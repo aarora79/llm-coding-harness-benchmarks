@@ -1,0 +1,5 @@
+Refactor process_csv.py. The process_csv_to_db function does too many things (parsing, validation, transformation, database writes). Break it into smaller functions with clear single responsibilities. Requirements:
+- The refactored code must have at least 4 separate functions
+- No single function should exceed 30 lines
+- All existing tests in test_process_csv.py must still pass
+- Keep the same public API (process_csv_to_db must still work with the same signature and return value)

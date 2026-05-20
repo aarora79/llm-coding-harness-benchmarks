@@ -1,0 +1,5 @@
+Add a POST /items endpoint to app.py that creates a new item. Requirements:
+- Accept JSON body with "name" (string, required) and "price" (float, required, must be > 0)
+- Auto-assign the next sequential ID
+- Return the created item with status 201
+- Return 422 for invalid input (missing fields or price <= 0)

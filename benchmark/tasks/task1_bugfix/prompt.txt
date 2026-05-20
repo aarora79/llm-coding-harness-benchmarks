@@ -1,0 +1,1 @@
+Fix the bug in buggy.py. The binary_search function has an off-by-one error that causes IndexError on some inputs. Fix it so all tests in test_binary_search.py pass.

@@ -1,0 +1,1 @@
+Fix the circular import error in this project. Running "python main.py" fails with ImportError because models.py imports from services.py and services.py imports from models.py. Restructure the code to eliminate the circular dependency while keeping all functionality working. All tests in test_app.py must pass.
