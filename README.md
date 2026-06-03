@@ -119,21 +119,8 @@ time of writing. Full method, caveats, and reproduce steps in
 
 ## Get Started
 
-The fastest path is to clone the repo and run the included Claude Code slash
-command, which detects your environment, runs the right setup steps, and
-verifies the result:
-
-```bash
-git clone https://github.com/aws-samples/sample-claude-code-multi-model.git
-cd sample-claude-code-multi-model
-claude
-# inside Claude Code:
-> /install
-```
-
-The `/install` command asks which path you want and walks through it. To set
-up manually, follow the path-specific README — each one has full setup,
-configuration, and a worked example:
+Pick a path and follow its README — each one has full setup, configuration, and
+a worked example:
 
 - **[bedrock/README.md](bedrock/README.md)** — Bedrock path. Start the LiteLLM
   proxy and run Claude Code against any of the 43 models with `claude-model.sh`.
