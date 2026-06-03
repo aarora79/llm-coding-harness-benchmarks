@@ -1,0 +1,55 @@
+** Third-Party Software Notices and Attributions **
+
+This sample code depends on the following third-party software. Each is
+installed at runtime (via pip) or invoked as a separate tool; none of their
+source is vendored into this repository. The applicable license and project
+home page are listed for each.
+
+----------------------------------------------------------------------
+
+Claude Code (Anthropic)
+  The CLI coding agent this sample runs. Installed separately by the user.
+  https://docs.anthropic.com/en/docs/claude-code
+
+LiteLLM (BerriAI)
+  Proxy that translates the Anthropic Messages API to the OpenAI Chat
+  Completions API used by Bedrock Mantle models.
+  License: MIT
+  https://github.com/BerriAI/litellm
+
+aws-bedrock-token-generator (Amazon Web Services)
+  Generates short-lived bearer tokens for the Bedrock Mantle endpoint.
+  License: Apache-2.0
+  https://pypi.org/project/aws-bedrock-token-generator/
+
+Ollama
+  Optional runtime for self-hosting open-source models on EC2 (self-hosted path).
+  License: MIT
+  https://github.com/ollama/ollama
+
+FastAPI
+  License: MIT
+  https://github.com/fastapi/fastapi
+
+Uvicorn
+  License: BSD-3-Clause
+  https://github.com/encode/uvicorn
+
+HTTPX
+  License: BSD-3-Clause
+  https://github.com/encode/httpx
+
+HumanEval (OpenAI) — used only by the benchmark
+  The public 164-task code-generation dataset used in bedrock/benchmark/.
+  License: MIT
+  https://github.com/openai/human-eval
+  Dataset mirror: https://huggingface.co/datasets/openai/openai_humaneval
+
+Hugging Face datasets — used only by the benchmark
+  License: Apache-2.0
+  https://github.com/huggingface/datasets
+
+----------------------------------------------------------------------
+
+Each third-party component is the property of its respective owner and is
+governed by its own license. Refer to the linked projects for full license text.

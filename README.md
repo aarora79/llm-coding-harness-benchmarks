@@ -8,13 +8,34 @@
 > It is not meant for production use. Review and harden all scripts, configurations,
 > and IAM permissions before using in any production or sensitive environment.
 
-Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) with **any
-foundation model** — not just Anthropic models. Two deployment paths:
+## Overview
+
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code) is Anthropic's
+command-line coding agent. By default it talks to Anthropic's own models. This
+repository shows how to run Claude Code against **any foundation model on Amazon
+Bedrock** — including non-Anthropic models such as Qwen, DeepSeek, Kimi, Mistral,
+and others — so you can pick the model that best fits each task instead of being
+limited to one provider.
+
+It does this without modifying Claude Code. Claude Code speaks the Anthropic
+Messages API; most Bedrock models speak the OpenAI Chat Completions API. A small
+[LiteLLM](https://github.com/BerriAI/litellm) proxy sits in between and translates
+the two, so Claude Code "just works" with whichever model you select. Native
+Anthropic models on Bedrock are called directly, with no proxy.
+
+Two deployment paths are provided:
 
 | Path | Models | Cost Model | Best For |
 |------|--------|------------|----------|
 | [**Bedrock (Mantle)**](bedrock/) | 43 models from 12 providers | Pay-per-token | Model variety, zero infrastructure |
 | [**Self-Hosted (EC2)**](self-hosted/) | Any Ollama/vLLM model | Fixed hourly GPU cost | Data sovereignty, air-gapped, unlimited tokens |
+
+**What you get:**
+
+- Run Claude Code with **43 Bedrock models** (5 native Anthropic + 38 third-party via Bedrock Mantle), or any open-source model you self-host on EC2
+- A one-command **LiteLLM proxy** that handles Anthropic↔OpenAI translation, tool calling, and streaming
+- An interactive **model picker** and per-model launch scripts
+- A reproducible **HumanEval benchmark** to compare model quality before you route work to a cheaper model (see [below](#benchmark))
 
 ## Architecture
 
@@ -59,6 +80,16 @@ and scoring with standard `pass@1`:
 
 Budget models reach 93–99% of the frontier model's pass rate. Full method,
 caveats, and reproduce steps in [bedrock/README.md](bedrock/README.md#benchmark-humaneval).
+
+## Prerequisites
+
+- An **AWS account** with [Amazon Bedrock model access](https://console.aws.amazon.com/bedrock/home#/modelaccess) enabled for the models you want to use
+- **AWS credentials** configured locally (`aws configure`, an IAM role, or AWS SSO)
+- **[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)** installed
+- **Python 3.9+** (for the LiteLLM proxy and Bedrock token generation)
+- For the self-hosted path: permission to launch an **EC2 GPU instance** (e.g. `g6e.xlarge`)
+
+> Bedrock Mantle (the OpenAI-compatible endpoint for third-party models) is currently available in **`us-east-1`**.
 
 ## Quick Start
 
@@ -107,19 +138,21 @@ See [self-hosted/README.md](self-hosted/README.md) for instance types, GPU selec
 
 ## Repository Structure
 
-```
+```text
 claude-code-multi-model/
 ├── README.md                  ← You are here
-├── LICENSE
+├── LICENSE                    MIT-0
 ├── CODE_OF_CONDUCT.md
 ├── CONTRIBUTING.md
 ├── SECURITY.md
 ├── SUPPORT.md
+├── THIRD_PARTY                Third-party dependency attributions
+├── .github/                   Issue and pull-request templates
 ├── bedrock/                   ← Bedrock Mantle path (38 third-party + 5 Anthropic)
-│   ├── README.md              Full Bedrock setup guide + benchmark results
+│   ├── README.md              Full Bedrock setup guide + benchmark
 │   ├── scripts/               setup-proxy.sh, claude-model.sh, mantle-token.sh
 │   ├── config/                litellm-config.yaml, claude-proxy-settings.json
-│   └── benchmark/             HumanEval runner + pass@1 results
+│   └── benchmark/             HumanEval runner (humaneval_runner.py) + pass@1 results
 └── self-hosted/               ← EC2 self-hosted path (Ollama/vLLM)
     ├── README.md              Full EC2 setup guide
     ├── SETUP-GUIDE.md         Step-by-step GPU instance provisioning
