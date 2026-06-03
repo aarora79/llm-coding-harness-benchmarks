@@ -70,16 +70,19 @@ We measured model quality on the public [HumanEval](https://github.com/openai/hu
 benchmark (164 tasks), driving each task through Claude Code backed by each model
 and scoring with standard `pass@1`:
 
-| Model | pass@1 |
-| --- | --- |
-| Claude Sonnet 4.6 | 97.6% |
-| Kimi K2.5 | 96.3% |
-| DeepSeek V3 | 94.5% |
-| Qwen Coder Next | 91.5% |
-| Qwen Coder 30B | 90.9% |
+| Model | pass@1 | Input $/1M | Output $/1M |
+| --- | --- | --- | --- |
+| Claude Sonnet 4.6 | 97.6% | $3.00 | $15.00 |
+| Kimi K2.5 | 96.3% | $0.60 | $3.00 |
+| DeepSeek V3.2 | 94.5% | $0.62 | $1.85 |
+| Qwen Coder Next | 91.5% | $0.50 | $1.20 |
+| Qwen Coder 30B | 90.9% | $0.15 | $0.62 |
 
-Budget models reach 93–99% of the frontier model's pass rate. Full method,
-caveats, and reproduce steps in [bedrock/README.md](bedrock/README.md#benchmark-humaneval).
+Budget models reach 93–99% of the frontier model's pass rate at a fraction of
+the cost. Prices are on-demand Standard-tier rates for US East from the
+[Amazon Bedrock pricing page](https://aws.amazon.com/bedrock/pricing/) at the
+time of writing. Full method, caveats, and reproduce steps in
+[bedrock/README.md](bedrock/README.md#benchmark-humaneval).
 
 ## Prerequisites
 
@@ -91,38 +94,16 @@ caveats, and reproduce steps in [bedrock/README.md](bedrock/README.md#benchmark-
 
 > The OpenAI-compatible Bedrock endpoint used for third-party models is currently available in **`us-east-1`**.
 
-## Quick Start
+## Get Started
 
-### Option A: Bedrock (43 models, pay-per-token)
+Pick a path and follow its README — each one has full setup, configuration, and
+a worked example:
 
-```bash
-cd bedrock
-
-# Anthropic models — no proxy needed
-./scripts/claude-model.sh --model claude-sonnet
-
-# Third-party models — start proxy first
-./scripts/setup-proxy.sh
-./scripts/claude-model.sh --model qwen-coder-next
-./scripts/claude-model.sh --model kimi-k2.5
-./scripts/claude-model.sh --model deepseek-v3
-```
-
-See [bedrock/README.md](bedrock/README.md) for full setup, all 43 models, and proxy management.
-
-### Option B: Self-Hosted on EC2 (fixed cost, data stays in VPC)
-
-```bash
-cd self-hosted
-
-# Launch GPU instance + install Ollama + pull model
-./scripts/setup.sh
-
-# Run Claude Code with self-hosted model
-./scripts/run.sh --model qwen3.5:35b
-```
-
-See [self-hosted/README.md](self-hosted/README.md) for instance types, GPU selection, and SSH tunnel setup.
+- **[bedrock/README.md](bedrock/README.md)** — Bedrock path. Start the LiteLLM
+  proxy and run Claude Code against any of the 43 models with `claude-model.sh`.
+- **[self-hosted/README.md](self-hosted/README.md)** — Self-hosted path. Provision
+  a GPU instance, install Ollama, open an SSH tunnel, and run Claude Code against
+  a model in your VPC.
 
 ## Comparison
 

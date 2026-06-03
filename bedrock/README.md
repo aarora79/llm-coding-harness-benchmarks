@@ -87,19 +87,24 @@ standard `pass@1` method: the model's completion is concatenated with the task's
 prompt preamble and unit tests, executed, and counted as a pass only if every
 assertion holds.
 
-| Model | Routing | pass@1 | Passed | Avg time/task |
-| --- | --- | --- | --- | --- |
-| Claude Sonnet 4.6 | native Bedrock | **97.6%** | 160/164 | 3.4s |
-| Kimi K2.5 | proxy → Bedrock | 96.3% | 158/164 | 5.9s |
-| DeepSeek V3 | proxy → Bedrock | 94.5% | 155/164 | 19.6s |
-| Qwen Coder Next | proxy → Bedrock | 91.5% | 150/164 | 14.1s |
-| Qwen Coder 30B | proxy → Bedrock | 90.9% | 149/164 | 9.5s |
+| Model | Routing | pass@1 | Passed | Avg time/task | Input $/1M | Output $/1M |
+| --- | --- | --- | --- | --- | --- | --- |
+| Claude Sonnet 4.6 | native Bedrock | **97.6%** | 160/164 | 3.4s | $3.00 | $15.00 |
+| Kimi K2.5 | proxy → Bedrock | 96.3% | 158/164 | 5.9s | $0.60 | $3.00 |
+| DeepSeek V3.2 | proxy → Bedrock | 94.5% | 155/164 | 19.6s | $0.62 | $1.85 |
+| Qwen Coder Next | proxy → Bedrock | 91.5% | 150/164 | 14.1s | $0.50 | $1.20 |
+| Qwen Coder 30B | proxy → Bedrock | 90.9% | 149/164 | 9.5s | $0.15 | $0.62 |
 
 All 164 tasks, single run per model. The budget models reach 93–99% of the
 frontier model's pass rate on this benchmark. Remaining failures are genuine
 incorrect solutions on HumanEval's harder tasks (e.g. /93, /127, /132, /145),
 not harness artifacts.
 
+> **Pricing source:** Per-1M-token rates are on-demand Standard-tier prices for
+> US East (N. Virginia / Ohio) on the [Amazon Bedrock pricing page](https://aws.amazon.com/bedrock/pricing/),
+> as published at the time of writing. Always check the page for current rates;
+> Bedrock also offers Priority, Flex, and Batch tiers at different prices.
+>
 > **Sonnet versions:** The table uses **Claude Sonnet 4.6**
 > (`us.anthropic.claude-sonnet-4-6`), which is what the `claude-sonnet` alias in
 > [scripts/claude-model.sh](scripts/claude-model.sh) pins. For reference, Claude
