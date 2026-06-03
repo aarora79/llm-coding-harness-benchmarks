@@ -63,37 +63,37 @@ on workloads that look like yours before routing real traffic.
 ### Bedrock path
 
 ```text
-       ┌───────────────────────────────┐
-       │        Claude Code CLI        │
-       │   (Anthropic Messages API)    │
-       └────────┬─────────────┬────────┘
-                │             │
-   Anthropic    │             │   third-party
-   models       │             │   models
-                │             │
-       ┌────────▼─────┐ ┌─────▼──────────┐
-       │    Native    │ │ LiteLLM Proxy  │
-       │   (no proxy) │ │  Anthropic ↔   │
-       │              │ │  OpenAI format │
-       └────────┬─────┘ └─────┬──────────┘
-                │             │
-                └──────┬──────┘
-                       │
-            ┌──────────▼───────────────┐
-            │     Amazon Bedrock       │
-            │                          │
-            │  • 5 Anthropic           │
-            │      Opus, Sonnet, Haiku │
-            │  • 38 third-party        │
-            │      Qwen, Kimi,         │
-            │      DeepSeek, Mistral…  │
-            └──────────────────────────┘
+              ┌─────────────────────────────────┐
+              │         Claude Code CLI         │
+              │    (Anthropic Messages API)     │
+              └────────┬───────────────┬────────┘
+                       │               │
+                       │               │
+              ┌────────▼─────┐  ┌──────▼─────────┐
+              │    Native    │  │ LiteLLM Proxy  │
+              │   (no proxy) │  │  Anthropic ↔   │
+              │              │  │  OpenAI format │
+              └────────┬─────┘  └──────┬─────────┘
+                       │               │
+              ┌────────▼─────┐  ┌──────▼─────────┐
+              │              │  │                │
+              │   Amazon     │  │    Amazon      │
+              │   Bedrock    │  │    Bedrock     │
+              │              │  │                │
+              ├──────────────┤  ├────────────────┤
+              │ 5 Anthropic  │  │ 38 third-party │
+              │              │  │                │
+              │ • Opus       │  │ • Qwen         │
+              │ • Sonnet     │  │ • Kimi         │
+              │ • Haiku      │  │ • DeepSeek     │
+              │              │  │ • Mistral …    │
+              └──────────────┘  └────────────────┘
 ```
 
-Both routes end at the **same** Amazon Bedrock service. The only difference
-is how Claude Code reaches it: Anthropic models go direct (no proxy);
-third-party models go through the LiteLLM proxy because they speak the OpenAI
-Chat Completions format and Claude Code speaks Anthropic Messages.
+Anthropic models go **direct** (no proxy) to Bedrock. Third-party models go
+through the **LiteLLM proxy** to Bedrock — the proxy translates the Anthropic
+Messages format Claude Code speaks into the OpenAI Chat Completions format
+those models expose.
 
 ### Self-hosted path
 
