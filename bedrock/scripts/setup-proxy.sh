@@ -5,7 +5,9 @@ set -euo pipefail
 # setup-proxy.sh — Install and start the LiteLLM proxy for Amazon Bedrock
 #
 # This proxy translates the Anthropic Messages API (Claude Code) to the
-# OpenAI Chat Completions API (Amazon Bedrock — all 38 third-party models).
+# OpenAI Chat Completions API spoken by the third-party models on Amazon
+# Bedrock's OpenAI-compatible `bedrock-mantle` endpoint.
+# See: https://docs.aws.amazon.com/bedrock/latest/userguide/inference.html
 #
 # Backend: bedrock-mantle.us-east-1.api.aws (NOT bedrock-runtime)
 # Auth: Bearer token generated from IAM credentials (12h validity)
