@@ -11,9 +11,10 @@
 Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) with **any of 45
 foundation models on Amazon Bedrock** — not just Anthropic models. A LiteLLM proxy
 translates Claude Code's Anthropic Messages API to the OpenAI Chat Completions API
-that Bedrock's OpenAI-compatible third-party models speak, so you can route routine tasks to
-cheaper models and reserve frontier models for complex work. Native Anthropic
-models run directly on Bedrock with no proxy.
+that the third-party models on Bedrock's OpenAI-compatible `bedrock-mantle`
+endpoint speak, so you can route routine tasks to cheaper models and reserve
+frontier models for complex work. Native Anthropic models run directly on
+Bedrock with no proxy.
 
 See the [HumanEval benchmark](#benchmark-humaneval) below for a quality comparison
 across models.
@@ -21,33 +22,54 @@ across models.
 ## Architecture
 
 ```text
-┌─────────────────────────────────────────────────────────────────┐
-│                        Claude Code CLI                          │
-│                  (speaks Anthropic Messages API)                │
-└──────────┬──────────────────────────────────────────┬───────────┘
-           │                                          │
-   ┌───────▼────────┐                       ┌────────▼──────────┐
-   │  Native Path   │                       │  LiteLLM Proxy    │
-   │  (no proxy)    │                       │  (localhost:4000)  │
-   │                │                       │                   │
-   │  Claude Opus   │                       │  Anthropic →      │
-   │  Claude Sonnet │                       │  OpenAI format    │
-   │  Claude Haiku  │                       │  translation      │
-   └───────┬────────┘                       └────────┬──────────┘
-           │                                          │
-   ┌───────▼────────┐                       ┌────────▼──────────┐
-   │                │                       │  Amazon Bedrock   │
-   │  Amazon        │                       │  (Chat Completions│
-   │  Bedrock       │                       │   API)            │
-   │                │                       │                   │
-   │                │                       │  38 models from   │
-   │                │                       │  12 providers     │
-   └────────────────┘                       └───────────────────┘
+              ┌─────────────────────────────────┐
+              │         Claude Code CLI         │
+              └────────┬───────────────┬────────┘
+                       │               │
+            Anthropic  │               │  Anthropic
+             Messages  │               │   Messages
+                       │               │
+                       │      ┌────────▼─────────┐
+                       │      │   LiteLLM Proxy  │
+                       │      │  Anthropic ↔     │
+                       │      │   OpenAI format  │
+                       │      └────────┬─────────┘
+                       │               │
+                       │               │  OpenAI Chat
+                       │               │   Completions
+                       │               │
+              ┌────────▼─────────┐ ┌───▼────────────────┐
+              │   Amazon Bedrock │ │   Amazon Bedrock   │
+              │  bedrock-mantle  │ │  bedrock-mantle    │
+              │ /anthropic/v1/   │ │ /v1/chat/          │
+              │    messages      │ │   completions      │
+              ├──────────────────┤ ├────────────────────┤
+              │  7 Anthropic     │ │  38 third-party    │
+              │                  │ │                    │
+              │  • Opus          │ │  • Qwen            │
+              │  • Sonnet        │ │  • Kimi            │
+              │  • Haiku         │ │  • DeepSeek        │
+              │                  │ │  • Mistral …       │
+              └──────────────────┘ └────────────────────┘
 ```
 
-**Why a proxy?** Claude Code speaks the Anthropic Messages API (`/v1/messages`). Bedrock's OpenAI-compatible third-party models speak the OpenAI Chat Completions API (`/v1/chat/completions`). [LiteLLM](https://github.com/BerriAI/litellm) translates between these formats.
+**Why a proxy?** Claude Code speaks the Anthropic Messages API. Amazon
+Bedrock supports three inference APIs on the `bedrock-mantle` endpoint —
+[Anthropic Messages](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-messages-api.html),
+[OpenAI Chat Completions](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-chat-completions-mantle.html),
+and [OpenAI Responses](https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html)
+— but only **Claude/Anthropic models** are reachable through Messages.
+Non-Anthropic models (Qwen, DeepSeek, Kimi, Mistral, etc.) are reachable
+only through the OpenAI-compatible APIs. [LiteLLM](https://github.com/BerriAI/litellm)
+sits between Claude Code and Bedrock, translating Anthropic Messages to
+OpenAI Chat Completions for those non-Anthropic models.
 
-**Why this endpoint?** Amazon Bedrock exposes a unified OpenAI-compatible endpoint for its non-Anthropic models. All 38 models support tool calling and streaming natively — no per-model configuration needed.
+**Why this endpoint?** `bedrock-mantle` is Amazon Bedrock's
+[OpenAI-compatible endpoint](https://docs.aws.amazon.com/bedrock/latest/userguide/inference.html)
+for non-Anthropic foundation models. It exposes Chat Completions and
+Responses (the same shapes OpenAI's own SDKs use) and supports API-key auth
+or AWS SigV4. All 38 third-party models on this endpoint support tool
+calling and streaming natively — no per-model configuration needed.
 
 ## Supported Models (45 total)
 
@@ -80,7 +102,7 @@ across models.
 | **Google** (3) | Gemma 3 27B/12B/4B | `google.gemma-3-27b-it`, `google.gemma-3-12b-it`, `google.gemma-3-4b-it` |
 | **Writer** (1) | Palmyra Vision 7B | `writer.palmyra-vision-7b` |
 
-> **Note:** Meta Llama, Amazon Nova, and DeepSeek R1 are available on Bedrock but **not** through the OpenAI-compatible endpoint — they lack tool calling support required by Claude Code.
+> **Note:** Meta Llama, Amazon Nova, and DeepSeek R1 are available on Bedrock but **not** on the `bedrock-mantle` endpoint — they lack tool calling support required by Claude Code.
 
 ## Benchmark (HumanEval)
 
@@ -322,11 +344,11 @@ alias cc-kimi="$CC_PROXY claude --settings ~/sample-claude-code-multi-model/bedr
 
 1. **Token generation**: `setup-proxy.sh` generates a bearer token from your AWS IAM credentials using `aws-bedrock-token-generator`. Tokens are scoped to `us-east-1` and valid for 12 hours.
 
-2. **LiteLLM translation**: The proxy receives Anthropic Messages API requests from Claude Code and translates them to OpenAI Chat Completions format for Amazon Bedrock.
+2. **LiteLLM translation**: The proxy receives Anthropic Messages API requests from Claude Code and translates them to OpenAI Chat Completions format for the `bedrock-mantle` endpoint.
 
-3. **Amazon Bedrock**: AWS's unified endpoint (`bedrock-mantle.us-east-1.api.aws`) routes requests to the selected model. All 38 non-Anthropic models support tool calling and streaming.
+3. **`bedrock-mantle` endpoint**: Amazon Bedrock's [OpenAI-compatible endpoint](https://docs.aws.amazon.com/bedrock/latest/userguide/inference.html) (`bedrock-mantle.us-east-1.api.aws`) routes requests to the selected model. All 38 non-Anthropic models support tool calling and streaming.
 
-4. **Key env var**: `LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES=true` forces LiteLLM to use `/v1/chat/completions` (not `/v1/responses`) — required for endpoint compatibility with LiteLLM v1.83+.
+4. **Key env var**: `LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES=true` forces LiteLLM to use `/v1/chat/completions` (not `/v1/responses`) — required for `bedrock-mantle` compatibility with LiteLLM v1.83+.
 
 ## Limitations
 

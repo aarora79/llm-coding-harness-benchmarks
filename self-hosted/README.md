@@ -182,4 +182,4 @@ aws ec2 delete-security-group --region us-east-1 --group-id <sg-id>
 
 ## See Also
 
-- **[Claude Code Multi-Model on Amazon Bedrock](https://github.com/shekharprateek/claude-code-multi-model-bedrock)** — Run Claude Code with 43 models from 12 providers (Qwen, DeepSeek, Mistral, Kimi, MiniMax, and more) via Amazon Bedrock. No GPU needed — fully managed.
+- **[Claude Code Multi-Model on Amazon Bedrock](https://github.com/shekharprateek/claude-code-multi-model-bedrock)** — Run Claude Code with 45 models from 11 providers (Qwen, DeepSeek, Mistral, Kimi, MiniMax, and more) via Amazon Bedrock. No GPU needed — fully managed.

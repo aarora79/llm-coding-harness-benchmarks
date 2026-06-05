@@ -72,34 +72,57 @@ you're trying to answer:
 ```text
               ┌─────────────────────────────────┐
               │         Claude Code CLI         │
-              │    (Anthropic Messages API)     │
               └────────┬───────────────┬────────┘
                        │               │
+            Anthropic  │               │  Anthropic
+             Messages  │               │   Messages
+                       │               │
                        │      ┌────────▼─────────┐
-                       │      │  LiteLLM Proxy   │
-                       │      │   Anthropic ↔    │
+                       │      │   LiteLLM Proxy  │
+                       │      │  Anthropic ↔     │
                        │      │   OpenAI format  │
                        │      └────────┬─────────┘
                        │               │
-              ┌────────▼─────┐  ┌──────▼─────────┐
-              │              │  │                │
-              │   Amazon     │  │    Amazon      │
-              │   Bedrock    │  │    Bedrock     │
-              │              │  │                │
-              ├──────────────┤  ├────────────────┤
-              │ 7 Anthropic  │  │ 38 third-party │
-              │              │  │                │
-              │ • Opus       │  │ • Qwen         │
-              │ • Sonnet     │  │ • Kimi         │
-              │ • Haiku      │  │ • DeepSeek     │
-              │              │  │ • Mistral …    │
-              └──────────────┘  └────────────────┘
+                       │               │  OpenAI Chat
+                       │               │   Completions
+                       │               │
+              ┌────────▼─────────┐ ┌───▼────────────────┐
+              │   Amazon Bedrock │ │   Amazon Bedrock   │
+              │  bedrock-mantle  │ │  bedrock-mantle    │
+              │ /anthropic/v1/   │ │ /v1/chat/          │
+              │    messages      │ │   completions      │
+              ├──────────────────┤ ├────────────────────┤
+              │  7 Anthropic     │ │  38 third-party    │
+              │                  │ │                    │
+              │  • Opus          │ │  • Qwen            │
+              │  • Sonnet        │ │  • Kimi            │
+              │  • Haiku         │ │  • DeepSeek        │
+              │                  │ │  • Mistral …       │
+              └──────────────────┘ └────────────────────┘
 ```
 
 Anthropic models go **direct** to Bedrock — no proxy needed since both speak
 the Anthropic Messages format. Third-party models go through the **LiteLLM
 proxy**, which translates the Anthropic Messages format Claude Code speaks
 into the OpenAI Chat Completions format those models expose on Bedrock.
+
+**Why a proxy?** Amazon Bedrock supports three inference APIs on the
+`bedrock-mantle` endpoint —
+[Anthropic Messages](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-messages-api.html),
+[OpenAI Chat Completions](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-chat-completions-mantle.html),
+and [OpenAI Responses](https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html)
+— but only **Claude/Anthropic models** are reachable through Messages.
+Non-Anthropic models (Qwen, DeepSeek, Kimi, Mistral, etc.) are reachable
+only through the OpenAI-compatible APIs. [LiteLLM](https://github.com/BerriAI/litellm)
+sits between Claude Code and Bedrock, translating Anthropic Messages to
+OpenAI Chat Completions for those non-Anthropic models.
+
+**Why this endpoint?** `bedrock-mantle` is Amazon Bedrock's
+[OpenAI-compatible endpoint](https://docs.aws.amazon.com/bedrock/latest/userguide/inference.html)
+for non-Anthropic foundation models. It exposes Chat Completions and
+Responses (the same shapes OpenAI's own SDKs use) and supports API-key auth
+or AWS SigV4. All 38 third-party models on this endpoint support tool
+calling and streaming natively — no per-model configuration needed.
 
 ### Self-hosted path
 
@@ -229,7 +252,7 @@ time of writing. Full method, caveats, and reproduce steps in
 - **Python 3.9+** (for the LiteLLM proxy and Bedrock token generation)
 - For the self-hosted path: permission to launch an **EC2 GPU instance** (e.g. `g6e.xlarge`)
 
-> The OpenAI-compatible Bedrock endpoint used for third-party models is currently available in **`us-east-1`**.
+> The `bedrock-mantle` endpoint used for third-party models is currently available in **`us-east-1`**.
 
 ## Get Started
 
