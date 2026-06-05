@@ -2,7 +2,7 @@
 
 [![License: MIT-0](https://img.shields.io/badge/License-MIT--0-yellow.svg)](LICENSE)
 [![Bedrock](https://img.shields.io/badge/Amazon-Bedrock-blue)](https://docs.aws.amazon.com/bedrock/latest/userguide/models-endpoint-availability.html)
-[![Models: 43+](https://img.shields.io/badge/Models-43%2B%20from%2012%20providers-orange)](./)
+[![Models: 45+](https://img.shields.io/badge/Models-45%2B%20from%2012%20providers-orange)](./)
 
 > **This is sample code intended for demonstration and learning purposes only.**
 > It is not meant for production use. Review and harden all scripts, configurations,
@@ -10,15 +10,26 @@
 
 ## Overview
 
-[Claude Code](https://docs.anthropic.com/en/docs/claude-code) is Anthropic's
-command-line coding agent. By default it talks to Anthropic's own models. This
-repository shows how to run Claude Code against **any foundation model on Amazon
-Bedrock** — including non-Anthropic models such as Qwen, DeepSeek, Kimi, Mistral,
-and others — so you can pick the model that best fits each task instead of being
-limited to one provider.
+This repository does **two** things, in this order:
 
-It does this without modifying Claude Code. Claude Code speaks the Anthropic
-Messages API; most Bedrock models speak the OpenAI Chat Completions API. A small
+1. **Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) against
+   non-Anthropic models.** Claude Code is Anthropic's command-line coding agent;
+   by default it talks only to Anthropic's own models. Here it's wired up to
+   any of 45 foundation models on Amazon Bedrock (Qwen, DeepSeek, Kimi, MiniMax,
+   Mistral, GPT-OSS, GLM, Gemma, Nemotron, Palmyra, plus the 7 native Anthropic
+   models), or to any open-source model you self-host on an EC2 GPU instance.
+2. **Measure how well each of those models actually does coding work.** Once you
+   can swap models freely, the next question is: which model is good enough for
+   which task? The repo ships two complementary evaluation modes — a per-task
+   *Software Engineering* benchmark you point at any GitHub repo, and a single-
+   function *HumanEval* benchmark with published cross-model results.
+
+The first half is plumbing; the second is what makes the plumbing decision-grade.
+
+### How it runs Claude Code on non-Anthropic models
+
+Without modifying Claude Code. Claude Code speaks the Anthropic Messages API;
+most Bedrock models speak the OpenAI Chat Completions API. A small
 [LiteLLM](https://github.com/BerriAI/litellm) proxy sits in between and translates
 the two, so Claude Code "just works" with whichever model you select. Native
 Anthropic models on Bedrock are called directly, with no proxy.
@@ -27,36 +38,32 @@ Two deployment paths are provided:
 
 | Path | Models | Cost Model | Best For |
 |------|--------|------------|----------|
-| [**Bedrock**](bedrock/) | 43 models from 12 providers | Pay-per-token | Model variety, zero infrastructure |
+| [**Bedrock**](bedrock/) | 45 models from 12 providers | Pay-per-token | Model variety, zero infrastructure |
 | [**Self-Hosted (EC2)**](self-hosted/) | Any Ollama/vLLM model | Fixed hourly GPU cost | Data sovereignty, air-gapped, unlimited tokens |
 
-**What you get:**
+### How it measures the models
 
-- Run Claude Code with **43 Bedrock models** (5 native Anthropic + 38 third-party via Bedrock), or any open-source model you self-host on EC2
+Two evaluation modes ship with the repo. Pick the one that matches the question
+you're trying to answer:
+
+| Mode | What it measures | Where the work lives |
+|------|------------------|----------------------|
+| **[SWE skill](#evaluation-1--swe-skill-real-world-tasks)** (real-world tasks) | Can the model take a real software-engineering problem in a real repo from idea to a complete design package — GitHub issue spec, low-level design, expert review, testing plan? | [.claude/skills/swe/](.claude/skills/swe/) → produces artifacts under [benchmarks/swe-benchmark-data/](benchmarks/swe-benchmark-data/) |
+| **[HumanEval](#evaluation-2--humaneval-single-function-pass1)** (single-function pass@1) | On 164 small self-contained Python tasks, does the model emit a function body that passes the hidden unit tests? | [bedrock/benchmark/humaneval_runner.py](bedrock/benchmark/humaneval_runner.py) |
+
+> **"SWE" here means software engineering in general — not [SWE-bench](https://www.swebench.com/),
+> the specific benchmark dataset.** The skill in this repo lets you run any model
+> against any task in any repo of your choosing. It is a *harness*, not a fixed
+> benchmark set. Compare results across models on the same task, or compare a
+> single model across tasks of varying difficulty.
+
+**What you get end to end:**
+
+- Run Claude Code with **45 Bedrock models** (7 native Anthropic + 38 third-party via Bedrock), or any open-source model you self-host on EC2
 - A one-command **LiteLLM proxy** that handles Anthropic↔OpenAI translation, tool calling, and streaming
 - An interactive **model picker** and per-model launch scripts
-- A reproducible **HumanEval benchmark** to compare model quality before you route work to a cheaper model (see [below](#benchmark))
-
-## Why this repo exists
-
-A coding agent session is token-heavy: tool calls, file reads, edits, and reasoning
-steps all consume input and output tokens. On Amazon Bedrock, frontier models cost
-roughly **5–20x more per token** than the cheapest non-Anthropic models on the same
-endpoint (see the cost columns in the [Benchmark](#benchmark) table). Running every
-task on a frontier model is therefore the most expensive default; running every
-task on the cheapest model risks worse output. The interesting question is how
-much quality you actually lose by routing routine tasks to a cheaper model — and
-that depends on the task and the model.
-
-This repository exists to make that question answerable with data, not opinion:
-
-- It lets Claude Code run against **any** of 43 Bedrock models, not just Anthropic ones, so the same agent harness can be measured across the cost range
-- It includes a **HumanEval pass@1 benchmark** that re-runs all 164 tasks through the agent for each model, with per-token cost listed alongside
-- It also supports a **self-hosted EC2 path** for the case where the per-token model is the wrong cost shape (very high volume, or data must stay in your VPC)
-
-The benchmark numbers below are evidence, not advertising — single-run pass@1 on
-164 small Python tasks. Use them as a starting point and run your own evaluation
-on workloads that look like yours before routing real traffic.
+- A **`/swe` skill** for repo-grounded SWE benchmarking, plus a **`/summarize`** skill for after-action reporting (token usage, errors, themes per run)
+- A reproducible **HumanEval benchmark** with cross-model pass@1 + per-token-cost numbers
 
 ## Architecture
 
@@ -80,7 +87,7 @@ on workloads that look like yours before routing real traffic.
               │   Bedrock    │  │    Bedrock     │
               │              │  │                │
               ├──────────────┤  ├────────────────┤
-              │ 5 Anthropic  │  │ 38 third-party │
+              │ 7 Anthropic  │  │ 38 third-party │
               │              │  │                │
               │ • Opus       │  │ • Qwen         │
               │ • Sonnet     │  │ • Kimi         │
@@ -117,7 +124,78 @@ Claude Code is pointed at `localhost`; the SSH tunnel transparently forwards
 every request to Ollama on the EC2 instance. No public ingress, no API keys
 — the only network path in is SSH.
 
-## Benchmark
+## Why this repo exists, briefly
+
+A coding agent session is token-heavy: tool calls, file reads, edits, and
+reasoning steps all consume input and output tokens. On Amazon Bedrock, frontier
+models cost roughly **5–20× more per token** than the cheapest non-Anthropic
+models on the same endpoint. Running every task on a frontier model is the most
+expensive default; running every task on the cheapest model risks worse output.
+
+The interesting question is *how much quality you actually lose* by routing
+routine tasks to a cheaper model — and that depends on the task and the model.
+The two evaluation modes below exist to make that question answerable with
+data, not opinion.
+
+## Evaluation 1 — SWE skill (real-world tasks)
+
+The `/swe` skill runs Claude Code (backed by whichever model you've selected)
+through a real software-engineering task in a real repository, and lands four
+artifacts on disk that capture the model's reasoning end-to-end. The artifacts
+are designed to be read by either a human reviewer or a separate LLM-as-judge.
+
+**Pipeline per run:**
+
+```
+{any-github-repo} ──► /swe ──► benchmarks/swe-benchmark-data/
+                                  └─ {repo-name}/
+                                      └─ {problem-name}/
+                                          └─ {model-name}/
+                                              ├─ github-issue.md   # spec
+                                              ├─ lld.md            # design
+                                              ├─ review.md         # critique
+                                              └─ testing.md        # test plan
+```
+
+The skill **stops at design**. It does not modify production code, run tests,
+or open PRs. Whether the design is any good is a downstream evaluation step you
+control: read the artifacts yourself, or feed them to another LLM judge.
+
+A second skill, `/summarize`, runs *after* `/swe` and produces a per-run report
+covering artifact completeness, error signals from the session, token usage
+broken down by model and cache type, and recurring themes from the conversation.
+Useful when you're comparing many model+task combinations and don't want to eyeball
+every transcript.
+
+### Worked example: `mcp-gateway-registry`
+
+The repo ships a worked example so you can see the harness producing real
+artifacts before pointing it at your own code. The example target is
+[agentic-community/mcp-gateway-registry](https://github.com/agentic-community/mcp-gateway-registry)
+at tag `1.24.4`, with two problems scoped:
+
+| Problem | What the model has to do |
+|---|---|
+| `remove-faiss` | Find and remove every FAISS reference (imports, deps, config, docs) and verify nothing breaks |
+| `remove-efs-from-terraform-aws-ecs` | Strip EFS out of `terraform/aws-ecs/` (file system, mount targets, security groups, task-definition mounts), keep `terraform validate` and `terraform plan` green |
+
+Two models already have artifacts on the first problem
+(`qwen.qwen3-coder-next` and `qwen.qwen3-coder-480b-a35b-instruct`) so you can
+compare them side-by-side without running the skill yourself. Setup, task
+descriptions, and per-model invocation steps are in
+[benchmarks/swe-benchmark-data/README.md](benchmarks/swe-benchmark-data/README.md).
+
+> **The example repo is the example, not the contract.** `/swe` works against
+> any GitHub URL — clone the target you actually care about, write the task
+> description, and run.
+
+> **Important — "SWE" ≠ [SWE-bench](https://www.swebench.com/).** This skill
+> evaluates a model on *whatever problem you give it in whatever repo you point
+> it at*, and the output is artifacts you grade. SWE-bench is a fixed dataset
+> of GitHub issues with hidden test patches that grade themselves. The two are
+> complementary, not interchangeable.
+
+## Evaluation 2 — HumanEval (single-function pass@1)
 
 We measured model quality on the public [HumanEval](https://github.com/openai/human-eval)
 benchmark (164 tasks), driving each task through Claude Code backed by each model
@@ -137,13 +215,11 @@ the cost. Prices are on-demand Standard-tier rates for US East from the
 time of writing. Full method, caveats, and reproduce steps in
 [bedrock/README.md](bedrock/README.md#benchmark-humaneval).
 
-> **These numbers are NOT comparable to [SWE-bench](https://www.swebench.com/).**
-> HumanEval measures whether a model can write a single small Python function
-> from a docstring; SWE-bench measures whether an agent can resolve a real
-> multi-file GitHub issue against a large codebase. Frontier models score 95%+
-> on HumanEval but only 40–80% on SWE-bench. Use HumanEval as a quick quality
-> signal for picking a routing tier, and SWE-bench (or your own production
-> traffic) for evaluating end-to-end agent capability.
+> **HumanEval is single-function code generation, not agentic editing.**
+> Frontier models score 95%+ on HumanEval but only 40–80% on SWE-bench.
+> Use HumanEval as a quick quality signal for picking a routing tier; use the
+> SWE skill above (or your own production traffic) when you need to know whether
+> a model can actually navigate a real codebase.
 
 ## Prerequisites
 
@@ -157,20 +233,34 @@ time of writing. Full method, caveats, and reproduce steps in
 
 ## Get Started
 
-Pick a path and follow its README — each one has full setup, configuration, and
-a worked example:
+Pick a path that matches what you're trying to do.
+
+**Just want to run a non-Anthropic model through Claude Code?**
 
 - **[bedrock/README.md](bedrock/README.md)** — Bedrock path. Start the LiteLLM
-  proxy and run Claude Code against any of the 43 models with `claude-model.sh`.
+  proxy and run Claude Code against any of the 45 models with `claude-model.sh`.
 - **[self-hosted/README.md](self-hosted/README.md)** — Self-hosted path. Provision
   a GPU instance, install Ollama, open an SSH tunnel, and run Claude Code against
   a model in your VPC.
+
+**Want to benchmark a model on a real repo task?**
+
+- **[benchmarks/swe-benchmark-data/README.md](benchmarks/swe-benchmark-data/README.md)** —
+  Set up the example target (`mcp-gateway-registry`) or any GitHub repo of your
+  choosing, then invoke `/swe` from Claude Code. The skill produces four
+  artifacts per (problem, model) pair, ready for human or LLM-judge review.
+
+**Want the published HumanEval cross-model numbers?**
+
+- See the [Evaluation 2 — HumanEval](#evaluation-2--humaneval-single-function-pass1)
+  table above; full method and reproduce steps in
+  [bedrock/README.md](bedrock/README.md#benchmark-humaneval).
 
 ## Comparison
 
 | | Bedrock | Self-Hosted (EC2) |
 |---|---|---|
-| **Models** | 43 from 12 providers | Any GGUF/HF model |
+| **Models** | 45 from 12 providers | Any GGUF/HF model |
 | **Pricing** | Per-token ($0.15-$15/M) | Per-hour ($0.84-$4.60/hr GPU) |
 | **Setup time** | 5 minutes | 15-20 minutes |
 | **Latency** | Varies by model (a few sec to minutes/task) | Depends on GPU + model size |
@@ -190,16 +280,29 @@ claude-code-multi-model/
 ├── SUPPORT.md
 ├── THIRD_PARTY                Third-party dependency attributions
 ├── .github/                   Issue and pull-request templates
-├── bedrock/                   ← Bedrock path (38 third-party + 5 Anthropic)
-│   ├── README.md              Full Bedrock setup guide + benchmark
+├── .claude/                   ← Claude Code skills shipped with the repo
+│   └── skills/
+│       ├── swe/               /swe — drive a model through a SWE task on any repo
+│       └── summarize/         /summarize — post-run report for a /swe attempt
+├── benchmarks/                ← Output of /swe runs (the SWE evaluation mode)
+│   └── swe-benchmark-data/
+│       ├── README.md          Worked example + how to add your own target repo
+│       └── mcp-gateway-registry/
+│           ├── repo/          (gitignored — contributor clones source here)
+│           ├── remove-faiss/
+│           │   └── {model}/   github-issue.md, lld.md, review.md, testing.md
+│           └── remove-efs-from-terraform-aws-ecs/
+├── bedrock/                   ← Bedrock path (38 third-party + 7 Anthropic)
+│   ├── README.md              Full Bedrock setup guide + HumanEval benchmark
+│   ├── pyproject.toml         uv-managed deps for proxy + benchmark
 │   ├── scripts/               setup-proxy.sh, claude-model.sh, mantle-token.sh
 │   ├── config/                litellm-config.yaml, claude-proxy-settings.json
 │   └── benchmark/             HumanEval runner (humaneval_runner.py) + pass@1 results
 └── self-hosted/               ← EC2 self-hosted path (Ollama/vLLM)
     ├── README.md              Full EC2 setup guide
     ├── SETUP-GUIDE.md         Step-by-step GPU instance provisioning
-    ├── scripts/               setup.sh, run.sh, tunnel.sh
-    └── config/                litellm-config.yaml, model configs
+    ├── scripts/               ec2-setup.sh, claude-local.sh, tunnel.sh, bench.sh
+    └── config/                settings.template.json
 ```
 
 ## See Also

@@ -2,19 +2,19 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# claude-model.sh — Run Claude Code with any Bedrock model
+# claude-model.sh — Run Claude Code with any Bedrock model (raw model IDs)
 #
 # For Anthropic models: connects directly to Bedrock (no proxy needed)
 # For third-party models: routes through LiteLLM proxy -> Amazon Bedrock
 #
-# All 38 models support tools + streaming natively.
+# All 38 third-party models support tools + streaming natively.
 #
 # Usage:
-#   ./scripts/claude-model.sh                      # interactive: pick a model
-#   ./scripts/claude-model.sh --model qwen-coder-next
-#   ./scripts/claude-model.sh --model claude-opus   # native Bedrock
-#   ./scripts/claude-model.sh --model claude-sonnet -p "explain this code"
-#   ./scripts/claude-model.sh --list                # list available models
+#   ./scripts/claude-model.sh                                                 # interactive picker
+#   ./scripts/claude-model.sh --model qwen.qwen3-coder-next
+#   ./scripts/claude-model.sh --model us.anthropic.claude-sonnet-4-6          # native Bedrock
+#   ./scripts/claude-model.sh --model us.anthropic.claude-sonnet-4-6 -p "..."
+#   ./scripts/claude-model.sh --list
 #
 # Environment:
 #   PROXY_PORT       LiteLLM proxy port (default: 4000)
@@ -27,79 +27,79 @@ PROXY_PORT="${PROXY_PORT:-4000}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 
 # ── Model Registry ────────────────────────────────────────────────
-# Format: alias|type|model_id|description
-# type: "native" = direct Bedrock, "proxy" = via LiteLLM -> Bedrock
+# Format: model_id|type|description
+#   model_id: raw Bedrock model id (what is sent on the wire)
+#   type    : "native" = direct Bedrock (Anthropic only)
+#             "proxy"  = via LiteLLM -> Amazon Bedrock
 MODELS=(
     # ── Anthropic (native — no proxy needed) ──────────────────────
-    "claude-opus|native|us.anthropic.claude-opus-4-6-v1|Claude Opus 4.6 — flagship, best reasoning"
-    "claude-sonnet|native|us.anthropic.claude-sonnet-4-6|Claude Sonnet 4.6 — balanced speed/quality"
-    "claude-haiku|native|us.anthropic.claude-haiku-4-5-20251001-v1:0|Claude Haiku 4.5 — fast, lightweight"
-    "claude-opus-4.5|native|us.anthropic.claude-opus-4-5-20251101-v1:0|Claude Opus 4.5 — previous gen flagship"
-    "claude-sonnet-4.5|native|us.anthropic.claude-sonnet-4-5-20250929-v1:0|Claude Sonnet 4.5 — previous gen balanced"
+    "us.anthropic.claude-opus-4-8|native|Claude Opus 4.8 — latest flagship as of June 5 2026"
+    "us.anthropic.claude-opus-4-7|native|Claude Opus 4.7 — flagship"
+    "us.anthropic.claude-opus-4-6-v1|native|Claude Opus 4.6 — flagship, strong reasoning"
+    "us.anthropic.claude-sonnet-4-6|native|Claude Sonnet 4.6 — balanced speed/quality"
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0|native|Claude Haiku 4.5 — fast, lightweight"
+    "us.anthropic.claude-opus-4-5-20251101-v1:0|native|Claude Opus 4.5 — previous gen flagship"
+    "us.anthropic.claude-sonnet-4-5-20250929-v1:0|native|Claude Sonnet 4.5 — previous gen balanced"
 
     # ── Qwen — Coding (via Bedrock) ────────────────────────────────
-    "qwen-coder-next|proxy|qwen-coder-next|Qwen3 Coder Next — latest coding model"
-    "qwen-coder-480b|proxy|qwen-coder-480b|Qwen3 Coder 480B — largest coding MoE"
-    "qwen-coder-30b|proxy|qwen-coder-30b|Qwen3 Coder 30B — compact coding MoE"
+    "qwen.qwen3-coder-next|proxy|Qwen3 Coder Next — latest coding model as of June 5 2026"
+    "qwen.qwen3-coder-480b-a35b-instruct|proxy|Qwen3 Coder 480B — largest coding MoE"
+    "qwen.qwen3-coder-30b-a3b-instruct|proxy|Qwen3 Coder 30B — compact coding MoE"
 
     # ── Qwen — General / Vision (via Bedrock) ──────────────────────
-    "qwen-235b|proxy|qwen-235b|Qwen3 235B — general purpose MoE"
-    "qwen-32b|proxy|qwen-32b|Qwen3 32B — dense, hybrid thinking"
-    "qwen-vl-235b|proxy|qwen-vl-235b|Qwen3 VL 235B — vision + language"
-    "qwen-next-80b|proxy|qwen-next-80b|Qwen3 Next 80B — efficient MoE"
+    "qwen.qwen3-235b-a22b-2507|proxy|Qwen3 235B — general purpose MoE"
+    "qwen.qwen3-32b|proxy|Qwen3 32B — dense, hybrid thinking"
+    "qwen.qwen3-vl-235b-a22b-instruct|proxy|Qwen3 VL 235B — vision + language"
+    "qwen.qwen3-next-80b-a3b-instruct|proxy|Qwen3 Next 80B — efficient MoE"
 
     # ── DeepSeek (via Bedrock) ─────────────────────────────────────
-    "deepseek-v3|proxy|deepseek-v3|DeepSeek V3.2 — coding + reasoning MoE"
-    "deepseek-v3.1|proxy|deepseek-v3.1|DeepSeek V3.1 — previous gen"
+    "deepseek.v3.2|proxy|DeepSeek V3.2 — coding + reasoning MoE"
+    "deepseek.v3.1|proxy|DeepSeek V3.1 — previous gen"
 
     # ── Mistral AI (via Bedrock) ───────────────────────────────────
-    "devstral-123b|proxy|devstral-123b|Devstral 2 123B — coding specialist"
-    "mistral-large-3|proxy|mistral-large-3|Mistral Large 3 675B — flagship MoE"
-    "magistral-small|proxy|magistral-small|Magistral Small — reasoning model"
-    "ministral-14b|proxy|ministral-14b|Ministral 14B — mid-size efficient"
-    "ministral-8b|proxy|ministral-8b|Ministral 8B — fast, lightweight"
-    "ministral-3b|proxy|ministral-3b|Ministral 3B — tiny, fastest"
-    "voxtral-small-24b|proxy|voxtral-small-24b|Voxtral Small 24B — multimodal"
-    "voxtral-mini-3b|proxy|voxtral-mini-3b|Voxtral Mini 3B — tiny multimodal"
+    "mistral.devstral-2-123b|proxy|Devstral 2 123B — coding specialist"
+    "mistral.mistral-large-3-675b-instruct|proxy|Mistral Large 3 675B — flagship MoE"
+    "mistral.magistral-small-2509|proxy|Magistral Small — reasoning model"
+    "mistral.ministral-3-14b-instruct|proxy|Ministral 14B — mid-size efficient"
+    "mistral.ministral-3-8b-instruct|proxy|Ministral 8B — fast, lightweight"
+    "mistral.ministral-3-3b-instruct|proxy|Ministral 3B — tiny, fastest"
+    "mistral.voxtral-small-24b-2507|proxy|Voxtral Small 24B — multimodal"
+    "mistral.voxtral-mini-3b-2507|proxy|Voxtral Mini 3B — tiny multimodal"
 
     # ── Moonshot AI / Kimi (via Bedrock) ───────────────────────────
-    "kimi-k2.5|proxy|kimi-k2.5|Kimi K2.5 — coding + reasoning"
-    "kimi-k2-thinking|proxy|kimi-k2-thinking|Kimi K2 Thinking — chain-of-thought"
+    "moonshotai.kimi-k2.5|proxy|Kimi K2.5 — coding + reasoning"
+    "moonshotai.kimi-k2-thinking|proxy|Kimi K2 Thinking — chain-of-thought"
 
     # ── MiniMax (via Bedrock) ──────────────────────────────────────
-    "minimax-m2|proxy|minimax-m2|MiniMax M2 — general purpose"
-    "minimax-m2.1|proxy|minimax-m2.1|MiniMax M2.1 — improved general"
-    "minimax-m2.5|proxy|minimax-m2.5|MiniMax M2.5 — latest, 80.2% SWE-bench"
+    "minimax.minimax-m2|proxy|MiniMax M2 — general purpose"
+    "minimax.minimax-m2.1|proxy|MiniMax M2.1 — improved general"
+    "minimax.minimax-m2.5|proxy|MiniMax M2.5 — latest as of June 5 2026, 80.2% SWE-bench (vendor claimed)"
 
     # ── NVIDIA Nemotron (via Bedrock) ──────────────────────────────
-    "nemotron-super-120b|proxy|nemotron-super-120b|Nemotron Super 120B — large reasoning"
-    "nemotron-nano-30b|proxy|nemotron-nano-30b|Nemotron Nano 30B — mid-size"
-    "nemotron-nano-12b|proxy|nemotron-nano-12b|Nemotron Nano 12B — compact"
-    "nemotron-nano-9b|proxy|nemotron-nano-9b|Nemotron Nano 9B — smallest"
+    "nvidia.nemotron-super-3-120b|proxy|Nemotron Super 120B — large reasoning"
+    "nvidia.nemotron-nano-3-30b|proxy|Nemotron Nano 30B — mid-size"
+    "nvidia.nemotron-nano-12b-v2|proxy|Nemotron Nano 12B — compact"
+    "nvidia.nemotron-nano-9b-v2|proxy|Nemotron Nano 9B — smallest"
 
     # ── OpenAI GPT OSS (via Bedrock) ──────────────────────────────
-    "gpt-oss-120b|proxy|gpt-oss-120b|GPT OSS 120B — open-source GPT"
-    "gpt-oss-20b|proxy|gpt-oss-20b|GPT OSS 20B — compact open-source GPT"
-    "gpt-oss-safeguard-120b|proxy|gpt-oss-safeguard-120b|GPT OSS Safeguard 120B"
-    "gpt-oss-safeguard-20b|proxy|gpt-oss-safeguard-20b|GPT OSS Safeguard 20B"
+    "openai.gpt-oss-120b|proxy|GPT OSS 120B — open-source GPT"
+    "openai.gpt-oss-20b|proxy|GPT OSS 20B — compact open-source GPT"
+    "openai.gpt-oss-safeguard-120b|proxy|GPT OSS Safeguard 120B"
+    "openai.gpt-oss-safeguard-20b|proxy|GPT OSS Safeguard 20B"
 
     # ── Z.AI / GLM (via Bedrock) ──────────────────────────────────
-    "glm-5|proxy|glm-5|GLM 5 — latest general model"
-    "glm-4.7|proxy|glm-4.7|GLM 4.7 — strong reasoning"
-    "glm-4.7-flash|proxy|glm-4.7-flash|GLM 4.7 Flash — fast inference"
-    "glm-4.6|proxy|glm-4.6|GLM 4.6 — previous gen"
+    "zai.glm-5|proxy|GLM 5 — latest general model as of June 5 2026"
+    "zai.glm-4.7|proxy|GLM 4.7 — strong reasoning"
+    "zai.glm-4.7-flash|proxy|GLM 4.7 Flash — fast inference"
+    "zai.glm-4.6|proxy|GLM 4.6 — previous gen"
 
     # ── Google Gemma (via Bedrock) ─────────────────────────────────
-    "gemma-3-27b|proxy|gemma-3-27b|Gemma 3 27B — open model, largest"
-    "gemma-3-12b|proxy|gemma-3-12b|Gemma 3 12B — open model, mid-size"
-    "gemma-3-4b|proxy|gemma-3-4b|Gemma 3 4B — open model, compact"
+    "google.gemma-3-27b-it|proxy|Gemma 3 27B — open model, largest"
+    "google.gemma-3-12b-it|proxy|Gemma 3 12B — open model, mid-size"
+    "google.gemma-3-4b-it|proxy|Gemma 3 4B — open model, compact"
 
     # ── Writer / Palmyra (via Bedrock) ─────────────────────────────
-    "palmyra-vision-7b|proxy|palmyra-vision-7b|Palmyra Vision 7B — vision model"
-
-    # ── Self-hosted via Ollama (proxy required, SSH tunnel must be active) ──
-    # Uncomment after starting tunnel: ./scripts/tunnel.sh start
-    # "qwen-local|proxy|qwen-local|Qwen 3.5 35B — self-hosted on GPU server"
+    "writer.palmyra-vision-7b|proxy|Palmyra Vision 7B — vision model"
 )
 
 # ── Functions ─────────────────────────────────────────────────────
@@ -109,29 +109,28 @@ list_models() {
     echo "Available Models for Claude Code + Bedrock"
     echo "==========================================="
     echo ""
-    echo "Backend: Amazon Bedrock (Chat Completions API) — all proxy models support tools + streaming"
+    echo "Backend: Amazon Bedrock (Chat Completions API for proxy models, Messages API for native)"
     echo ""
-    printf "  %-24s %-8s %s\n" "ALIAS" "TYPE" "DESCRIPTION"
-    printf "  %-24s %-8s %s\n" "-----" "----" "-----------"
+    printf "  %-46s %-8s %s\n" "MODEL ID" "TYPE" "DESCRIPTION"
+    printf "  %-46s %-8s %s\n" "--------" "----" "-----------"
 
-    local current_section=""
     for entry in "${MODELS[@]}"; do
-        IFS='|' read -r alias type model_id desc <<< "$entry"
-        printf "  %-24s %-8s %s\n" "$alias" "$type" "$desc"
+        IFS='|' read -r model_id type desc <<< "$entry"
+        printf "  %-46s %-8s %s\n" "$model_id" "$type" "$desc"
     done
     echo ""
     echo "native = direct Bedrock (no proxy needed, Anthropic models only)"
     echo "proxy  = via LiteLLM proxy -> Amazon Bedrock (start with: ./scripts/setup-proxy.sh)"
     echo ""
-    echo "Total: ${#MODELS[@]} models (5 native + $((${#MODELS[@]} - 5)) via Bedrock)"
+    echo "Total: ${#MODELS[@]} models (7 native + $((${#MODELS[@]} - 7)) via Bedrock)"
 }
 
 lookup_model() {
     local search="$1"
     for entry in "${MODELS[@]}"; do
-        IFS='|' read -r alias type model_id desc <<< "$entry"
-        if [[ "$alias" == "$search" ]]; then
-            echo "$alias|$type|$model_id|$desc"
+        IFS='|' read -r model_id type desc <<< "$entry"
+        if [[ "$model_id" == "$search" ]]; then
+            echo "$model_id|$type|$desc"
             return 0
         fi
     done
@@ -144,8 +143,8 @@ pick_model_interactive() {
     echo "" >&2
     local i=1
     for entry in "${MODELS[@]}"; do
-        IFS='|' read -r alias type model_id desc <<< "$entry"
-        printf "  %2d) %-24s [%s] %s\n" "$i" "$alias" "$type" "$desc" >&2
+        IFS='|' read -r model_id type desc <<< "$entry"
+        printf "  %2d) %-46s [%s] %s\n" "$i" "$model_id" "$type" "$desc" >&2
         ((i++))
     done
     echo "" >&2
@@ -169,16 +168,16 @@ check_proxy() {
 
 # ── Parse args ────────────────────────────────────────────────────
 
-MODEL_ALIAS=""
+MODEL_ID_ARG=""
 CLAUDE_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --model|-m)  MODEL_ALIAS="$2"; shift 2 ;;
+        --model|-m)  MODEL_ID_ARG="$2"; shift 2 ;;
         --list|-l)   list_models; exit 0 ;;
         -h|--help)
-            echo "Usage: $0 [--model ALIAS] [--list] [claude args...]"
-            echo "       $0 --model qwen-coder-next -p 'write a function'"
+            echo "Usage: $0 [--model MODEL_ID] [--list] [claude args...]"
+            echo "       $0 --model qwen.qwen3-coder-next -p 'write a function'"
             echo "       $0 --list"
             exit 0
             ;;
@@ -187,19 +186,19 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Interactive selection if no model specified
-if [[ -z "$MODEL_ALIAS" ]]; then
+if [[ -z "$MODEL_ID_ARG" ]]; then
     SELECTED=$(pick_model_interactive)
 else
-    SELECTED=$(lookup_model "$MODEL_ALIAS") || {
-        echo "[error] Unknown model: $MODEL_ALIAS"
+    SELECTED=$(lookup_model "$MODEL_ID_ARG") || {
+        echo "[error] Unknown model: $MODEL_ID_ARG"
         echo "        Run: $0 --list"
         exit 1
     }
 fi
 
-IFS='|' read -r ALIAS TYPE MODEL_ID DESC <<< "$SELECTED"
+IFS='|' read -r MODEL_ID TYPE DESC <<< "$SELECTED"
 echo ""
-echo "[model] $ALIAS — $DESC"
+echo "[model] $MODEL_ID — $DESC"
 
 # ── Launch Claude Code ────────────────────────────────────────────
 

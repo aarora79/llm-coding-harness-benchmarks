@@ -1,14 +1,14 @@
 # Claude Code Multi-Model on Amazon Bedrock
 
-[![License: MIT-0](https://img.shields.io/badge/License-MIT--0-yellow.svg)](LICENSE)
+[![License: MIT-0](https://img.shields.io/badge/License-MIT--0-yellow.svg)](../LICENSE)
 [![Bedrock](https://img.shields.io/badge/Amazon-Bedrock-blue)](https://docs.aws.amazon.com/bedrock/latest/userguide/models-endpoint-availability.html)
-[![Models: 43](https://img.shields.io/badge/Models-43%20from%2012%20providers-orange)](./)
+[![Models: 45](https://img.shields.io/badge/Models-45%20from%2012%20providers-orange)](./)
 
 > **This is sample code intended for demonstration and learning purposes only.**
 > It is not meant for production use. Review and harden all scripts, configurations,
 > and IAM permissions before using in any production or sensitive environment.
 
-Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) with **any of 43
+Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) with **any of 45
 foundation models on Amazon Bedrock** — not just Anthropic models. A LiteLLM proxy
 translates Claude Code's Anthropic Messages API to the OpenAI Chat Completions API
 that Bedrock's OpenAI-compatible third-party models speak, so you can route routine tasks to
@@ -49,32 +49,36 @@ across models.
 
 **Why this endpoint?** Amazon Bedrock exposes a unified OpenAI-compatible endpoint for its non-Anthropic models. All 38 models support tool calling and streaming natively — no per-model configuration needed.
 
-## Supported Models (43 total)
+## Supported Models (45 total)
 
-### Anthropic (5 — native Bedrock, no proxy)
+> Pass the **raw Bedrock model ID** to `--model`. No aliases — what you type is what hits Bedrock.
 
-| Alias | Model | Best For |
-|-------|-------|----------|
-| `claude-opus` | Claude Opus 4.6 | Flagship reasoning, complex tasks |
-| `claude-sonnet` | Claude Sonnet 4.6 | Balanced speed/quality |
-| `claude-haiku` | Claude Haiku 4.5 | Fast, lightweight tasks |
-| `claude-opus-4.5` | Claude Opus 4.5 | Previous gen flagship |
-| `claude-sonnet-4.5` | Claude Sonnet 4.5 | Previous gen balanced |
+### Anthropic (7 — native Bedrock, no proxy)
+
+| Bedrock Model ID | Model | Best For |
+|------------------|-------|----------|
+| `us.anthropic.claude-opus-4-8` | Claude Opus 4.8 | Newest flagship |
+| `us.anthropic.claude-opus-4-7` | Claude Opus 4.7 | Flagship |
+| `us.anthropic.claude-opus-4-6-v1` | Claude Opus 4.6 | Flagship, strong reasoning |
+| `us.anthropic.claude-sonnet-4-6` | Claude Sonnet 4.6 | Balanced speed/quality |
+| `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Claude Haiku 4.5 | Fast, lightweight tasks |
+| `us.anthropic.claude-opus-4-5-20251101-v1:0` | Claude Opus 4.5 | Previous gen flagship |
+| `us.anthropic.claude-sonnet-4-5-20250929-v1:0` | Claude Sonnet 4.5 | Previous gen balanced |
 
 ### Third-Party (38 — via LiteLLM proxy → Amazon Bedrock)
 
-| Provider | Models | Aliases |
-|----------|--------|---------|
-| **Qwen** (7) | Coder Next, Coder 480B, Coder 30B, 235B, 32B, VL 235B, Next 80B | `qwen-coder-next`, `qwen-coder-480b`, `qwen-coder-30b`, `qwen-235b`, `qwen-32b`, `qwen-vl-235b`, `qwen-next-80b` |
-| **DeepSeek** (2) | V3.2, V3.1 | `deepseek-v3`, `deepseek-v3.1` |
-| **Mistral** (8) | Devstral 123B, Large 3 675B, Magistral Small, Ministral 14B/8B/3B, Voxtral Small/Mini | `devstral-123b`, `mistral-large-3`, `magistral-small`, `ministral-14b`, `ministral-8b`, `ministral-3b`, `voxtral-small-24b`, `voxtral-mini-3b` |
-| **Moonshot AI** (2) | Kimi K2.5, K2 Thinking | `kimi-k2.5`, `kimi-k2-thinking` |
-| **MiniMax** (3) | M2, M2.1, M2.5 | `minimax-m2`, `minimax-m2.1`, `minimax-m2.5` |
-| **NVIDIA** (4) | Nemotron Super 120B, Nano 30B/12B/9B | `nemotron-super-120b`, `nemotron-nano-30b`, `nemotron-nano-12b`, `nemotron-nano-9b` |
-| **OpenAI** (4) | GPT OSS 120B/20B, Safeguard 120B/20B | `gpt-oss-120b`, `gpt-oss-20b`, `gpt-oss-safeguard-120b`, `gpt-oss-safeguard-20b` |
-| **Z.AI** (4) | GLM 5, 4.7, 4.7 Flash, 4.6 | `glm-5`, `glm-4.7`, `glm-4.7-flash`, `glm-4.6` |
-| **Google** (3) | Gemma 3 27B/12B/4B | `gemma-3-27b`, `gemma-3-12b`, `gemma-3-4b` |
-| **Writer** (1) | Palmyra Vision 7B | `palmyra-vision-7b` |
+| Provider | Models | Bedrock Model IDs |
+|----------|--------|-------------------|
+| **Qwen** (7) | Coder Next, Coder 480B, Coder 30B, 235B, 32B, VL 235B, Next 80B | `qwen.qwen3-coder-next`, `qwen.qwen3-coder-480b-a35b-instruct`, `qwen.qwen3-coder-30b-a3b-instruct`, `qwen.qwen3-235b-a22b-2507`, `qwen.qwen3-32b`, `qwen.qwen3-vl-235b-a22b-instruct`, `qwen.qwen3-next-80b-a3b-instruct` |
+| **DeepSeek** (2) | V3.2, V3.1 | `deepseek.v3.2`, `deepseek.v3.1` |
+| **Mistral** (8) | Devstral 123B, Large 3 675B, Magistral Small, Ministral 14B/8B/3B, Voxtral Small/Mini | `mistral.devstral-2-123b`, `mistral.mistral-large-3-675b-instruct`, `mistral.magistral-small-2509`, `mistral.ministral-3-14b-instruct`, `mistral.ministral-3-8b-instruct`, `mistral.ministral-3-3b-instruct`, `mistral.voxtral-small-24b-2507`, `mistral.voxtral-mini-3b-2507` |
+| **Moonshot AI** (2) | Kimi K2.5, K2 Thinking | `moonshotai.kimi-k2.5`, `moonshotai.kimi-k2-thinking` |
+| **MiniMax** (3) | M2, M2.1, M2.5 | `minimax.minimax-m2`, `minimax.minimax-m2.1`, `minimax.minimax-m2.5` |
+| **NVIDIA** (4) | Nemotron Super 120B, Nano 30B/12B/9B | `nvidia.nemotron-super-3-120b`, `nvidia.nemotron-nano-3-30b`, `nvidia.nemotron-nano-12b-v2`, `nvidia.nemotron-nano-9b-v2` |
+| **OpenAI** (4) | GPT OSS 120B/20B, Safeguard 120B/20B | `openai.gpt-oss-120b`, `openai.gpt-oss-20b`, `openai.gpt-oss-safeguard-120b`, `openai.gpt-oss-safeguard-20b` |
+| **Z.AI** (4) | GLM 5, 4.7, 4.7 Flash, 4.6 | `zai.glm-5`, `zai.glm-4.7`, `zai.glm-4.7-flash`, `zai.glm-4.6` |
+| **Google** (3) | Gemma 3 27B/12B/4B | `google.gemma-3-27b-it`, `google.gemma-3-12b-it`, `google.gemma-3-4b-it` |
+| **Writer** (1) | Palmyra Vision 7B | `writer.palmyra-vision-7b` |
 
 > **Note:** Meta Llama, Amazon Nova, and DeepSeek R1 are available on Bedrock but **not** through the OpenAI-compatible endpoint — they lack tool calling support required by Claude Code.
 
@@ -106,11 +110,10 @@ not harness artifacts.
 > Bedrock also offers Priority, Flex, and Batch tiers at different prices.
 >
 > **Sonnet versions:** The table uses **Claude Sonnet 4.6**
-> (`us.anthropic.claude-sonnet-4-6`), which is what the `claude-sonnet` alias in
-> [scripts/claude-model.sh](scripts/claude-model.sh) pins. For reference, Claude
-> Code's *built-in* default Sonnet alias (no explicit pin) resolves to **Sonnet
-> 4.5** and scored 99.4% (163/164) in a separate run — single-run pass@1 varies
-> by a few tasks between versions and runs, so treat the two as comparable.
+> (`us.anthropic.claude-sonnet-4-6`). For reference, Claude Code's *built-in*
+> default Sonnet alias (no explicit `--model` flag) resolves to **Sonnet 4.5**
+> and scored 99.4% (163/164) in a separate run — single-run pass@1 varies by
+> a few tasks between versions and runs, so treat the two as comparable.
 
 **Reproduce:**
 
@@ -118,7 +121,7 @@ not harness artifacts.
 cd benchmark
 # Start the proxy first (for the non-Anthropic models)
 ../scripts/setup-proxy.sh
-python3 humaneval_runner.py --models claude-sonnet,qwen-coder-30b,kimi-k2.5,qwen-coder-next,deepseek-v3 --all
+python3 humaneval_runner.py --models us.anthropic.claude-sonnet-4-6,qwen.qwen3-coder-30b-a3b-instruct,moonshotai.kimi-k2.5,qwen.qwen3-coder-next,deepseek.v3.2 --all
 ```
 
 Raw results (per-task CSV + summary) are saved under `benchmark/results/`.
@@ -140,6 +143,7 @@ standard `pass@1` method.
 - **AWS Account** with Bedrock model access enabled
 - **AWS CLI** configured (`aws configure` or IAM role/SSO)
 - **Python 3.9+** (for LiteLLM proxy and token generation)
+- **[uv](https://docs.astral.sh/uv/getting-started/installation/)** for Python dependency management
 - **Claude Code CLI** installed ([docs](https://docs.anthropic.com/en/docs/claude-code))
 
 ## Quick Start
@@ -147,43 +151,64 @@ standard `pass@1` method.
 ### 1. Clone and setup
 
 ```bash
-git clone https://github.com/shekharprateek/claude-code-multi-model-bedrock.git
-cd claude-code-multi-model-bedrock
+git clone https://github.com/aws-samples/sample-claude-code-multi-model.git
+cd sample-claude-code-multi-model/bedrock
 chmod +x scripts/*.sh
 ```
 
-### 2. Use Anthropic models (no proxy needed)
+### 2. Install Python dependencies with `uv`
+
+If you don't already have `uv`, install it (one-line; full instructions in the
+[uv docs](https://docs.astral.sh/uv/getting-started/installation/)):
 
 ```bash
-./scripts/claude-model.sh --model claude-opus
-./scripts/claude-model.sh --model claude-sonnet
-./scripts/claude-model.sh --model claude-haiku
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-### 3. Use third-party models (proxy required)
+Then create a virtual environment and install the proxy + benchmark dependencies
+(`litellm[proxy]`, `aws-bedrock-token-generator`, `datasets`):
+
+```bash
+uv sync               # creates .venv/ and installs everything
+source .venv/bin/activate
+```
+
+`uv sync` reads [pyproject.toml](pyproject.toml) and produces a reproducible
+install. Activating the venv puts `litellm` on your `PATH` so the proxy script
+can find it.
+
+### 3. Use Anthropic models (no proxy needed)
+
+```bash
+./scripts/claude-model.sh --model us.anthropic.claude-opus-4-8
+./scripts/claude-model.sh --model us.anthropic.claude-sonnet-4-6
+./scripts/claude-model.sh --model us.anthropic.claude-haiku-4-5-20251001-v1:0
+```
+
+### 4. Use third-party models (proxy required)
 
 ```bash
 # Step 1: Start the LiteLLM proxy (generates Bedrock token, installs deps)
 ./scripts/setup-proxy.sh
 
 # Step 2: Run Claude Code with any model
-./scripts/claude-model.sh --model qwen-coder-next
-./scripts/claude-model.sh --model deepseek-v3
-./scripts/claude-model.sh --model kimi-k2.5
-./scripts/claude-model.sh --model devstral-123b
+./scripts/claude-model.sh --model qwen.qwen3-coder-next
+./scripts/claude-model.sh --model deepseek.v3.2
+./scripts/claude-model.sh --model moonshotai.kimi-k2.5
+./scripts/claude-model.sh --model mistral.devstral-2-123b
 
 # With a prompt
-./scripts/claude-model.sh --model qwen-coder-next -p "write a Python REST API"
+./scripts/claude-model.sh --model qwen.qwen3-coder-next -p "write a Python REST API"
 ```
 
-### 4. Interactive model picker
+### 5. Interactive model picker
 
 ```bash
 ./scripts/claude-model.sh
-# Shows numbered list of all 43 models — pick one
+# Shows numbered list of all 45 models — pick one
 ```
 
-### 5. List all available models
+### 6. List all available models
 
 ```bash
 ./scripts/claude-model.sh --list
@@ -195,7 +220,7 @@ chmod +x scripts/*.sh
 # Start proxy (installs litellm + token generator if needed)
 ./scripts/setup-proxy.sh
 
-# Custom port
+# Custom port (default: 4000)
 ./scripts/setup-proxy.sh --port 8080
 
 # Check status
@@ -210,6 +235,33 @@ chmod +x scripts/*.sh
 # View logs
 tail -f .litellm.log
 ```
+
+### Bind address (`--host`)
+
+By default the proxy binds to **`127.0.0.1`** — Claude Code on the same machine
+can reach it, nothing else can. The proxy does not authenticate its own clients
+(the only auth gate is the Bedrock bearer token it uses upstream), so leaving
+the default in place is the safe choice.
+
+If you need clients on other hosts to reach the proxy (e.g. Claude Code running
+in a different VM in the same VPC, or a containerized client using a separate
+network namespace), override the bind:
+
+```bash
+# Bind to a specific private IP — only that interface accepts connections
+./scripts/setup-proxy.sh --host 10.0.1.42
+
+# Bind to all interfaces — careful, see warning below
+./scripts/setup-proxy.sh --host 0.0.0.0
+```
+
+When `--host` is anything other than `127.0.0.1` / `localhost` the script prints
+a warning. Treat the security-group / firewall layer as the only thing standing
+between the proxy and the outside world, and:
+
+- restrict ingress to port 4000 (or whatever `--port` you used) to known source CIDRs
+- prefer a private IP over `0.0.0.0` so the proxy only listens on the interface that needs it
+- run on a private subnet rather than something with a public IP attached
 
 ## Manual Configuration (No Scripts)
 
@@ -234,7 +286,7 @@ LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES=true \
 ANTHROPIC_BASE_URL=http://localhost:4000 \
 ANTHROPIC_API_KEY=bedrock-proxy \
 claude --settings config/claude-proxy-settings.json \
-       --model qwen-coder-next
+       --model qwen.qwen3-coder-next
 ```
 
 > **Important:** The `--settings config/claude-proxy-settings.json` flag disables Bedrock native mode (`CLAUDE_CODE_USE_BEDROCK=0`) so Claude Code routes through the proxy instead. Without it, Claude Code may try to connect directly to Bedrock and fail for non-Anthropic model IDs.
@@ -244,16 +296,16 @@ claude --settings config/claude-proxy-settings.json \
 Add to `~/.zshrc` or `~/.bashrc`:
 
 ```bash
-# Native Bedrock models
-alias cc-opus='CLAUDE_CODE_USE_BEDROCK=1 AWS_REGION=us-east-1 claude'
-alias cc-sonnet='CLAUDE_CODE_USE_BEDROCK=1 AWS_REGION=us-east-1 claude'
+# Native Bedrock models — pin a specific Anthropic Bedrock model ID
+alias cc-opus='CLAUDE_CODE_USE_BEDROCK=1 AWS_REGION=us-east-1 ANTHROPIC_MODEL=us.anthropic.claude-opus-4-6-v1 claude'
+alias cc-sonnet='CLAUDE_CODE_USE_BEDROCK=1 AWS_REGION=us-east-1 ANTHROPIC_MODEL=us.anthropic.claude-sonnet-4-6 claude'
 
 # Proxy models (requires LiteLLM running on :4000)
 CC_PROXY="ANTHROPIC_BASE_URL=http://localhost:4000 ANTHROPIC_API_KEY=bedrock-proxy"
-alias cc-qwen="$CC_PROXY claude --settings ~/claude-code-multi-model-bedrock/config/claude-proxy-settings.json --model qwen-coder-next"
-alias cc-deepseek="$CC_PROXY claude --settings ~/claude-code-multi-model-bedrock/config/claude-proxy-settings.json --model deepseek-v3"
-alias cc-devstral="$CC_PROXY claude --settings ~/claude-code-multi-model-bedrock/config/claude-proxy-settings.json --model devstral-123b"
-alias cc-kimi="$CC_PROXY claude --settings ~/claude-code-multi-model-bedrock/config/claude-proxy-settings.json --model kimi-k2.5"
+alias cc-qwen="$CC_PROXY claude --settings ~/sample-claude-code-multi-model/bedrock/config/claude-proxy-settings.json --model qwen.qwen3-coder-next"
+alias cc-deepseek="$CC_PROXY claude --settings ~/sample-claude-code-multi-model/bedrock/config/claude-proxy-settings.json --model deepseek.v3.2"
+alias cc-devstral="$CC_PROXY claude --settings ~/sample-claude-code-multi-model/bedrock/config/claude-proxy-settings.json --model mistral.devstral-2-123b"
+alias cc-kimi="$CC_PROXY claude --settings ~/sample-claude-code-multi-model/bedrock/config/claude-proxy-settings.json --model moonshotai.kimi-k2.5"
 ```
 
 ## What's Inside
@@ -261,7 +313,7 @@ alias cc-kimi="$CC_PROXY claude --settings ~/claude-code-multi-model-bedrock/con
 | File | What it does |
 | --- | --- |
 | [scripts/setup-proxy.sh](scripts/setup-proxy.sh) | One-command proxy setup: generates Bedrock token, installs LiteLLM, starts proxy |
-| [scripts/claude-model.sh](scripts/claude-model.sh) | Interactive model picker / launcher for all 43 models |
+| [scripts/claude-model.sh](scripts/claude-model.sh) | Interactive model picker / launcher for all 45 models |
 | [scripts/mantle-token.sh](scripts/mantle-token.sh) | Standalone Bedrock bearer token generator (12h validity) |
 | [config/litellm-config.yaml](config/litellm-config.yaml) | LiteLLM proxy config with all 38 models |
 | [config/claude-proxy-settings.json](config/claude-proxy-settings.json) | Claude Code settings override (disables native Bedrock mode) |
@@ -297,8 +349,8 @@ alias cc-kimi="$CC_PROXY claude --settings ~/claude-code-multi-model-bedrock/con
 
 ## See Also
 
-- **[Claude Code on Amazon EC2](https://github.com/shekharprateek/claude-code-on-amazon-ec2)** — Run Claude Code backed by a self-hosted open-source model (Ollama + Qwen 3.5) on an EC2 GPU instance. Fixed hourly cost, data stays in your VPC.
+- **[Claude Code on Amazon EC2](../self-hosted/README.md)** — Run Claude Code backed by a self-hosted open-source model (Ollama + Qwen 3.5) on an EC2 GPU instance. Fixed hourly cost, data stays in your VPC.
 
 ## License
 
-This library is licensed under the MIT-0 License. See the [LICENSE](LICENSE) file.
+This library is licensed under the MIT-0 License. See the [LICENSE](../LICENSE) file.

@@ -12,8 +12,8 @@ Unlike SWE-bench, there is no Docker, no repo cloning, and no patch application
 and deterministic.
 
 Usage:
-    python3 humaneval_runner.py --models claude-sonnet,qwen-coder-30b --tasks 20
-    python3 humaneval_runner.py --models claude-sonnet --all
+    python3 humaneval_runner.py --models us.anthropic.claude-sonnet-4-6,qwen.qwen3-coder-30b-a3b-instruct --tasks 20
+    python3 humaneval_runner.py --models us.anthropic.claude-sonnet-4-6 --all
 """
 
 import argparse
@@ -35,7 +35,13 @@ except ImportError:
     sys.exit(1)
 
 
-MODELS = ["claude-sonnet", "qwen-coder-next", "deepseek-v3", "kimi-k2.5", "qwen-coder-30b"]
+MODELS = [
+    "us.anthropic.claude-sonnet-4-6",
+    "qwen.qwen3-coder-next",
+    "deepseek.v3.2",
+    "moonshotai.kimi-k2.5",
+    "qwen.qwen3-coder-30b-a3b-instruct",
+]
 PROXY_PORT = 4000
 TIMEOUT_PER_TASK = 180        # 3 min: an agent loop on one small function
 TEST_TIMEOUT = 30            # seconds to run the generated code + unit tests
@@ -47,10 +53,9 @@ CLEAN_CONFIG_DIR: "str | None" = None
 # Pin the HumanEval dataset to a known revision so the benchmark is reproducible.
 HUMANEVAL_DATASET = "openai_humaneval"
 HUMANEVAL_REVISION = "7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544"
-# Explicit native Bedrock model/inference-profile IDs for pinned Sonnet versions.
-NATIVE_MODEL_IDS = {
-    "claude-sonnet-46": "us.anthropic.claude-sonnet-4-6",
-}
+# Native Bedrock IDs always start with `anthropic.` (or `us.anthropic.` for
+# cross-region inference profiles). Anything else routes through the proxy.
+NATIVE_PREFIXES = ("anthropic.", "us.anthropic.")
 
 
 def _get_clean_config_dir():
@@ -128,7 +133,7 @@ def run_claude_code(task, model):
     """Run Claude Code (backed by `model`) on one HumanEval task in an isolated
     temp dir. Returns (completion_text, elapsed, status)."""
     prompt = build_prompt(task)
-    is_native = model.startswith("claude-")
+    is_native = model.startswith(NATIVE_PREFIXES)
 
     env = os.environ.copy()
     # Use a clean Claude config dir so any user-level settings.json (which may
@@ -146,11 +151,7 @@ def run_claude_code(task, model):
         env["AWS_REGION"] = "us-east-1"
         env.pop("ANTHROPIC_BASE_URL", None)
         env.pop("ANTHROPIC_API_KEY", None)
-        # Pin an explicit Bedrock model/inference-profile when requested.
-        # `claude-sonnet`     -> Claude Code's default alias (resolves to Sonnet 4.5)
-        # `claude-sonnet-46`  -> Sonnet 4.6 via its cross-region inference profile
-        if model in NATIVE_MODEL_IDS:
-            env["ANTHROPIC_MODEL"] = NATIVE_MODEL_IDS[model]
+        env["ANTHROPIC_MODEL"] = model
     else:
         env["ANTHROPIC_BASE_URL"] = f"http://localhost:{PROXY_PORT}"
         env["ANTHROPIC_API_KEY"] = "bedrock-proxy"

@@ -27,15 +27,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG_FILE="$PROJECT_DIR/config/litellm-config.yaml"
+DEFAULT_HOST="127.0.0.1"
 DEFAULT_PORT=4000
 PID_FILE="$PROJECT_DIR/.litellm.pid"
 TOKEN_FILE="$PROJECT_DIR/.mantle-token"
 MANTLE_REGION="us-east-1"
 
 usage() {
-    echo "Usage: $0 [--port PORT] [--stop] [--status] [--refresh]"
+    echo "Usage: $0 [--host HOST] [--port PORT] [--stop] [--status] [--refresh]"
     echo ""
     echo "Options:"
+    echo "  --host HOST   Address to bind on (default: $DEFAULT_HOST). Use a"
+    echo "                non-loopback address (e.g. a VPC private IP) only if"
+    echo "                you need clients on other hosts to reach the proxy."
     echo "  --port PORT   Port to run proxy on (default: $DEFAULT_PORT)"
     echo "  --stop        Stop running proxy"
     echo "  --status      Check if proxy is running"
@@ -43,11 +47,13 @@ usage() {
     exit 1
 }
 
+HOST=$DEFAULT_HOST
 PORT=$DEFAULT_PORT
 ACTION="start"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --host)    HOST="$2"; shift 2 ;;
         --port)    PORT="$2"; shift 2 ;;
         --stop)    ACTION="stop"; shift ;;
         --status)  ACTION="status"; shift ;;
@@ -158,7 +164,14 @@ start_proxy() {
     # Start in background with Bedrock token + routing fix exported
     export MANTLE_API_KEY
     export LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES=true
-    nohup litellm --config "$CONFIG_FILE" --port "$PORT" > "$PROJECT_DIR/.litellm.log" 2>&1 &
+    # Default bind is 127.0.0.1; only override via --host if you have a real
+    # need to expose the proxy beyond the local machine.
+    if [[ "$HOST" != "127.0.0.1" && "$HOST" != "localhost" ]]; then
+        echo "[warn] Binding to $HOST — the proxy will be reachable from any host that"
+        echo "[warn] can reach $HOST:$PORT at the network layer. The proxy itself does"
+        echo "[warn] NOT authenticate clients; rely on your security group / firewall."
+    fi
+    nohup litellm --config "$CONFIG_FILE" --host "$HOST" --port "$PORT" > "$PROJECT_DIR/.litellm.log" 2>&1 &
     echo $! > "$PID_FILE"
 
     # Wait for proxy to be ready
@@ -166,7 +179,7 @@ start_proxy() {
     for i in $(seq 1 15); do
         if curl -sf "http://localhost:${PORT}/health" &>/dev/null; then
             echo ""
-            echo "[ready] Proxy running on http://localhost:${PORT}"
+            echo "[ready] Proxy running on http://${HOST}:${PORT}"
             echo "[pid] $(cat "$PID_FILE")"
             echo "[log] $PROJECT_DIR/.litellm.log"
             echo ""

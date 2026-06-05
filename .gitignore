@@ -16,6 +16,10 @@ ONE_PAGER.md
 .env
 .env.*
 .scratchpad/
+
+# Benchmark target repositories are cloned locally by contributors at a specific tag.
+# Keep the README and the generated artifacts tracked, but never commit the cloned source.
+benchmarks/swe-benchmark-data/*/repo/
 __pycache__/
 *.pyc
 credentials.json
@@ -25,3 +29,4 @@ security-review-findings.xlsx
 .litellm.pid
 .mantle-token
 .DS_Store
+.venv/
