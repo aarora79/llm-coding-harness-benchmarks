@@ -72,10 +72,9 @@ you're trying to answer:
 ```text
               ┌─────────────────────────────────┐
               │         Claude Code CLI         │
+              │      (POST /v1/messages)        │
               └────────┬───────────────┬────────┘
                        │               │
-                       │               │  Anthropic
-                       │               │   Messages
                        │               │
                        │      ┌────────▼─────────┐
                        │      │   LiteLLM Proxy  │
@@ -83,9 +82,7 @@ you're trying to answer:
                        │      │   OpenAI format  │
                        │      └────────┬─────────┘
                        │               │
-                       │               │
-                       │               │
-       /v1/messages    │               │   /v1/chat/
+                       │               │   /v1/chat/
                        │               │    completions
                        │               │
               ┌────────▼─────────┐ ┌───▼────────────────┐
