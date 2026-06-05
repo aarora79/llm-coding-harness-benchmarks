@@ -74,8 +74,8 @@ you're trying to answer:
               │         Claude Code CLI         │
               └────────┬───────────────┬────────┘
                        │               │
-            Anthropic  │               │  Anthropic
-             Messages  │               │   Messages
+                       │               │  Anthropic
+                       │               │   Messages
                        │               │
                        │      ┌────────▼─────────┐
                        │      │   LiteLLM Proxy  │
@@ -83,14 +83,14 @@ you're trying to answer:
                        │      │   OpenAI format  │
                        │      └────────┬─────────┘
                        │               │
-                       │               │  OpenAI Chat
-                       │               │   Completions
+                       │               │
+                       │               │
+       /v1/messages    │               │   /v1/chat/
+                       │               │    completions
                        │               │
               ┌────────▼─────────┐ ┌───▼────────────────┐
-              │   Amazon Bedrock │ │   Amazon Bedrock   │
-              │  bedrock-mantle  │ │  bedrock-mantle    │
-              │ /anthropic/v1/   │ │ /v1/chat/          │
-              │    messages      │ │   completions      │
+              │  Amazon Bedrock  │ │   Amazon Bedrock   │
+              │                  │ │  (mantle endpoint) │
               ├──────────────────┤ ├────────────────────┤
               │  7 Anthropic     │ │  38 third-party    │
               │                  │ │                    │
