@@ -27,14 +27,17 @@ flowchart TD
     Proxy["LiteLLM Proxy<br/>Anthropic ↔ OpenAI format"]
     BedrockA["Amazon Bedrock<br/>───────────────<br/>7 Anthropic models<br/>Opus · Sonnet · Haiku"]
     BedrockM["Amazon Bedrock (mantle endpoint)<br/>───────────────<br/>38 third-party models<br/>Qwen · Kimi · DeepSeek · Mistral …"]
+    SpacerL[" "]:::ghost
 
     CC -- "Anthropic Messages" --> BedrockA
     CC -- "Anthropic Messages" --> Proxy
     Proxy -- "/v1/chat/completions" --> BedrockM
+    BedrockA ~~~ SpacerL
 
     classDef agent fill:#E5E7EB,stroke:#6B7280,color:#111827
     classDef proxy fill:#EDE9FE,stroke:#7C3AED,color:#3B0764
     classDef bedrock fill:#FFF3E0,stroke:#FF9900,color:#1F2937
+    classDef ghost fill:none,stroke:none,color:#FFFFFF00
     class CC agent
     class Proxy proxy
     class BedrockA,BedrockM bedrock
