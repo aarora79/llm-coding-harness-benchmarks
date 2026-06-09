@@ -21,33 +21,25 @@ across models.
 
 ## Architecture
 
-```text
-              ┌─────────────────────────────────┐
-              │         Claude Code CLI         │
-              │      (POST /v1/messages)        │
-              └────────┬───────────────┬────────┘
-                       │               │
-                       │               │
-                       │      ┌────────▼─────────┐
-                       │      │   LiteLLM Proxy  │
-                       │      │  Anthropic ↔     │
-                       │      │   OpenAI format  │
-                       │      └────────┬─────────┘
-                       │               │
-                       │               │   /v1/chat/
-                       │               │    completions
-                       │               │
-              ┌────────▼─────────┐ ┌───▼────────────────┐
-              │  Amazon Bedrock  │ │   Amazon Bedrock   │
-              │                  │ │  (mantle endpoint) │
-              ├──────────────────┤ ├────────────────────┤
-              │  7 Anthropic     │ │  38 third-party    │
-              │                  │ │                    │
-              │  • Opus          │ │  • Qwen            │
-              │  • Sonnet        │ │  • Kimi            │
-              │  • Haiku         │ │  • DeepSeek        │
-              │                  │ │  • Mistral …       │
-              └──────────────────┘ └────────────────────┘
+```mermaid
+flowchart TD
+    CC["<b>Claude Code CLI</b><br/><sub>POST /v1/messages</sub>"]
+
+    Proxy["<b>LiteLLM Proxy</b><br/><sub>Anthropic ↔ OpenAI<br/>format translation</sub>"]
+
+    BedrockA["<b>Amazon Bedrock</b><br/><br/><b>7 Anthropic</b><br/>• Opus<br/>• Sonnet<br/>• Haiku"]
+    BedrockM["<b>Amazon Bedrock</b><br/><sub>(mantle endpoint)</sub><br/><br/><b>38 third-party</b><br/>• Qwen<br/>• Kimi<br/>• DeepSeek<br/>• Mistral …"]
+
+    CC -->|Anthropic Messages| BedrockA
+    CC -->|Anthropic Messages| Proxy
+    Proxy -->|/v1/chat/completions| BedrockM
+
+    classDef agent fill:#1F2937,stroke:#374151,color:#F9FAFB
+    classDef proxy fill:#7C3AED,stroke:#5B21B6,color:#FFFFFF
+    classDef bedrock fill:#FF9900,stroke:#B36B00,color:#1F2937
+    class CC agent
+    class Proxy proxy
+    class BedrockA,BedrockM bedrock
 ```
 
 **Why a proxy?** Claude Code speaks the Anthropic Messages API. Amazon

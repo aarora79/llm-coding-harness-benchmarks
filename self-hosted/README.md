@@ -12,21 +12,22 @@ Run Claude Code — Anthropic's AI coding assistant — backed by an open-source
 Amazon EC2. Your code stays inside your AWS account, costs are predictable, and you keep
 full control over the model.
 
-```text
-Your Machine
-  ┌──────────────────────────────────────┐
-  │ Claude Code CLI                      │
-  │   ANTHROPIC_BASE_URL=localhost:11434 │
-  └──────────────┬───────────────────────┘
-                 │
-                 │  SSH tunnel (encrypted, no open ports needed)
-                 │  localhost:11434  ──►  EC2:11434
-                 ▼
-  ┌──────────────────────────────────────┐
-  │ Amazon EC2 GPU Instance (g6e.xlarge) │
-  │   Ollama serving Qwen 3.5-35B        │
-  │   NVIDIA L40S, 45GB VRAM             │
-  └──────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Local["<b>Your Machine</b>"]
+        CC["<b>Claude Code CLI</b><br/><sub>ANTHROPIC_BASE_URL=<br/>localhost:11434</sub>"]
+    end
+
+    subgraph AWS["<b>AWS</b>"]
+        EC2["<b>Amazon EC2 GPU Instance (g6e.xlarge)</b><br/>Ollama serving Qwen 3.5-35B<br/>NVIDIA L40S, 45GB VRAM"]
+    end
+
+    CC -->|"SSH tunnel (encrypted, no open ports)<br/>localhost:11434 → EC2:11434"| EC2
+
+    classDef agent fill:#1F2937,stroke:#374151,color:#F9FAFB
+    classDef ec2 fill:#FF9900,stroke:#B36B00,color:#1F2937
+    class CC agent
+    class EC2 ec2
 ```
 
 Claude Code thinks it is talking to a local OpenAI-compatible endpoint; the SSH
