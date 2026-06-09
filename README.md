@@ -72,21 +72,13 @@ you're trying to answer:
 ```mermaid
 flowchart TD
     CC["Claude Code CLI<br/>POST /v1/messages"]
-
-    subgraph Left["Anthropic models (direct)"]
-        direction TB
-        BedrockA["Amazon Bedrock<br/>───────────────<br/>7 Anthropic models<br/>Opus · Sonnet · Haiku"]
-    end
-
-    subgraph Right["Third-party models (via proxy)"]
-        direction TB
-        Proxy["LiteLLM Proxy<br/>Anthropic ↔ OpenAI format"]
-        BedrockM["Amazon Bedrock (mantle endpoint)<br/>───────────────<br/>38 third-party models<br/>Qwen · Kimi · DeepSeek · Mistral …"]
-        Proxy -- "/v1/chat/completions" --> BedrockM
-    end
+    Proxy["LiteLLM Proxy<br/>Anthropic ↔ OpenAI format"]
+    BedrockA["Amazon Bedrock<br/>───────────────<br/>7 Anthropic models<br/>Opus · Sonnet · Haiku"]
+    BedrockM["Amazon Bedrock (mantle endpoint)<br/>───────────────<br/>38 third-party models<br/>Qwen · Kimi · DeepSeek · Mistral …"]
 
     CC -- "Anthropic Messages" --> BedrockA
     CC -- "Anthropic Messages" --> Proxy
+    Proxy -- "/v1/chat/completions" --> BedrockM
 
     classDef agent fill:#E5E7EB,stroke:#6B7280,color:#111827
     classDef proxy fill:#EDE9FE,stroke:#7C3AED,color:#3B0764
