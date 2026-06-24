@@ -60,14 +60,13 @@ git clone --branch 1.24.4 --depth 1 https://github.com/agentic-community/mcp-gat
 
 The tasks below are run with multiple models via the `/swe` skill. For each `{model-name}`, the resulting artifacts land at `benchmarks/swe-benchmark-data/mcp-gateway-registry/{problem-name}/{model-name}/`.
 
-| # | Problem name (folder) | Description |
-|---|-----------------------|-------------|
-| 1 | `remove-faiss` | Remove FAISS from the codebase and documentation. FAISS is obsolete in this repo. Delete all FAISS imports, dependencies, configuration, and references in docs. Replace any remaining vector-search needs with the maintained alternative already used elsewhere in the repo. |
-| 2 | `remove-efs-from-terraform-aws-ecs` | Remove EFS from `terraform/aws-ecs/`. EFS is obsolete in this deployment. Delete the EFS file system, mount targets, security groups, and any task-definition volume mounts that reference it. Update `variables.tf`, `terraform.tfvars.example`, and module wiring. Verify `terraform validate` and `terraform plan` still succeed. |
-
-##### Future Enhancements
-
-Additional tasks will be added one by one as enhancements are scoped. Each new task gets its own `{problem-name}` folder (kebab-case) and a row in the table above.
+| # | Problem name (folder) | Issue | Difficulty | Description |
+|---|-----------------------|-------|-----------|-------------|
+| 1 | `remove-faiss` | — | Medium | Remove FAISS from the codebase and documentation. FAISS is obsolete in this repo. Delete all FAISS imports, dependencies, configuration, and references in docs. Replace any remaining vector-search needs with the maintained DocumentDB hybrid search alternative already used elsewhere in the repo. |
+| 2 | `remove-efs-from-terraform-aws-ecs` | — | Medium | Remove EFS from `terraform/aws-ecs/`. EFS is obsolete in this deployment. Delete the EFS file system, mount targets, security groups, and any task-definition volume mounts that reference it. Update `variables.tf`, `terraform.tfvars.example`, and module wiring. Verify `terraform validate` and `terraform plan` still succeed. |
+| 3 | `ssrf-hardening-outbound-url-validation` | [#1282](https://github.com/agentic-community/mcp-gateway-registry/issues/1282) | Medium | SSRF hardening: validate outbound URLs on agent card fetch (health check + pull-card endpoints). The model must identify vulnerable endpoints that make outbound HTTP requests based on user-supplied URLs, propose URL validation (deny internal/private IPs, allowlists), and design input sanitization to prevent SSRF attacks. |
+| 4 | `migrate-ecs-env-vars-to-secrets-manager` | [#1134](https://github.com/agentic-community/mcp-gateway-registry/issues/1134) | High | Migrate sensitive ECS environment variables to AWS Secrets Manager. Identify which env vars in the ECS task definitions contain secrets (DB passwords, API keys, tokens), create Secrets Manager resources in Terraform, update ECS task definitions to pull from SM instead of plaintext env vars, and update application code to read secrets at runtime. |
+| 5 | `replace-keycloak-db-password-with-rds-iam` | [#1303](https://github.com/agentic-community/mcp-gateway-registry/issues/1303) | High | Replace the Keycloak database password with RDS IAM authentication. Remove static DB credentials from Terraform and ECS config, configure RDS IAM auth on the PostgreSQL instance, update the Keycloak ECS task to generate short-lived IAM auth tokens, and update IAM roles/policies accordingly. |
 
 #### How to Run a Task with `/swe`
 
@@ -77,7 +76,22 @@ Additional tasks will be added one by one as enhancements are scoped. Each new t
 # When prompted by the skill:
 # - repo-name   : mcp-gateway-registry
 # - problem-name: remove-faiss              (use the kebab-case name from the table)
-# - model-name  : claude-opus-4-7           (or whichever model is being benchmarked)
+# - model-name  : claude-opus-4-8           (or whichever model is being benchmarked)
 ```
 
-The skill will create `benchmarks/swe-benchmark-data/mcp-gateway-registry/remove-faiss/claude-opus-4-7/` and populate it with `github-issue.md`, `lld.md`, `review.md`, and `testing.md`. Re-run with a different `model-name` to add a sibling folder for direct comparison. The skill does not implement the change - that is a separate step the user can take with the design package as input.
+The skill will create `benchmarks/swe-benchmark-data/mcp-gateway-registry/remove-faiss/claude-opus-4-8/` and populate it with `github-issue.md`, `lld.md`, `review.md`, and `testing.md`. Re-run with a different `model-name` to add a sibling folder for direct comparison. The skill does not implement the change - that is a separate step the user can take with the design package as input.
+
+#### Scoring
+
+Each artifact is scored 0-100 by an LLM judge, weighted equally (25% each):
+
+| Artifact | Weight | What the judge evaluates |
+|----------|--------|--------------------------|
+| `github-issue.md` | 25% | Clear problem statement, complete acceptance criteria, actionable |
+| `lld.md` | 25% | Identifies all affected files, correct approach, no unnecessary changes |
+| `review.md` | 25% | Catches edge cases, risks, dependencies, suggests improvements |
+| `testing.md` | 25% | Covers happy path + edge cases, rollback plan, realistic |
+
+**Task score = (issue + lld + review + testing) / 4**
+
+Results are reported in a matrix: rows = tasks, columns = models, cells = percentage score.
