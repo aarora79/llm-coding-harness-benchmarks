@@ -712,3 +712,14 @@ When the same problem is later run with a different model (e.g. `claude-sonnet-4
 - **No emojis, clever code, or em-dashes** in any output.
 - **Naming**: always "Amazon Bedrock" (never "AWS Bedrock").
 - **Best Practices**: design recommendations should follow `CLAUDE.md` (logging, Pydantic, modularity) so that a future implementer's work will pass review.
+
+### Benchmark Isolation (CRITICAL)
+
+This skill is a benchmark. Each model run must be completely independent so artifacts are directly comparable. Read the cloned source repo only; do not read sibling model artifacts or communicate with other sessions. Specifically:
+
+- **Do NOT read any files under `benchmarks/swe-benchmark-data/{repo-name}/{problem-name}/`** other than the model's own target folder. Sibling model folders (e.g. `claude-opus-4-8/`, `kimi-k2-thinking/`, etc.) contain artifacts from other benchmark runs — reading them contaminates the benchmark.
+- **Do NOT read `benchmarks/swe-benchmark-data/README.md`** during analysis. The task description in this `/swe` invocation is the only allowed input from the benchmark directory.
+- **Do NOT use the `claude-peers` MCP tool** (`mcp__claude-peers__*`) to message, list, or coordinate with other Claude Code sessions during a `/swe` run. Each session must produce its design independently.
+- **The only allowed code source** is the cloned target repo at `benchmarks/swe-benchmark-data/{repo-name}/repo/`. Read that thoroughly; ignore everything else under `benchmarks/`.
+
+If the user explicitly asks you to compare with prior runs after artifacts are written, that is a separate request — done after the four artifacts are saved, not during their production.
