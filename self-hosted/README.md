@@ -30,9 +30,11 @@ flowchart TD
     class EC2 ec2
 ```
 
-Claude Code thinks it is talking to a local OpenAI-compatible endpoint; the SSH
-tunnel transparently forwards every request to the model server on the EC2
-instance. No API keys, no public ingress — the only network path in is SSH.
+Claude Code is configured with `ANTHROPIC_BASE_URL=http://localhost:11434` and
+talks to the local end of an SSH tunnel; the tunnel transparently forwards every
+request to the Ollama server on the EC2 instance. Ollama accepts Anthropic
+Messages requests natively (no proxy or format translation needed). No API keys
+on the wire, no public ingress — the only network path in is SSH.
 
 ## Why Run on EC2?
 

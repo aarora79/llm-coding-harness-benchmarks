@@ -28,13 +28,29 @@ The first half is plumbing; the second is what makes the plumbing decision-grade
 
 ### How it runs Claude Code on non-Anthropic models
 
-Without modifying Claude Code. Claude Code speaks the Anthropic Messages API;
-most Bedrock models speak the OpenAI Chat Completions API. A small
-[LiteLLM](https://github.com/BerriAI/litellm) proxy sits in between and translates
-the two, so Claude Code "just works" with whichever model you select. Native
-Anthropic models on Bedrock are called directly, with no proxy.
+Without modifying Claude Code. Claude Code speaks the Anthropic Messages API,
+but most other models speak the OpenAI Chat Completions API. The repo bridges
+that gap in two different ways depending on where the model lives.
 
-Two deployment paths are provided:
+**Path 1 — Amazon Bedrock (managed, pay-per-token).** Claude Code points at a
+local [LiteLLM](https://github.com/BerriAI/litellm) proxy that translates
+Anthropic Messages requests to OpenAI Chat Completions and forwards them to
+Bedrock's [`bedrock-mantle` endpoint](https://docs.aws.amazon.com/bedrock/latest/userguide/inference.html).
+Native Anthropic models on Bedrock skip the proxy and go direct. Best for model
+variety with zero infrastructure to manage.
+
+**Path 2 — Self-hosted on EC2 (your VPC, fixed GPU cost).** Claude Code points
+at an [Ollama](https://ollama.com/) server running on an EC2 GPU instance, reached
+through an SSH tunnel that forwards `localhost:11434` to the EC2 instance. Ollama
+accepts Anthropic-Messages requests natively, so no proxy or format translation is
+needed — the SSH tunnel itself is the entire "bridge." No public ingress, no API
+keys on the wire. Best for data sovereignty (tokens never leave your AWS account),
+air-gapped or compliance-sensitive environments, and high-volume workloads where
+the fixed hourly GPU cost beats per-token Bedrock pricing.
+
+The two paths share the same `/swe` and HumanEval evaluation harnesses, so quality
+and cost numbers are directly comparable. They differ only in where the model
+runs and how Claude Code reaches it.
 
 | Path | Models | Cost Model | Best For |
 |------|--------|------------|----------|
@@ -59,11 +75,12 @@ you're trying to answer:
 
 **What you get end to end:**
 
-- Run Claude Code with **45 Bedrock models** (7 native Anthropic + 38 third-party via Bedrock), or any open-source model you self-host on EC2
-- A one-command **LiteLLM proxy** that handles Anthropic↔OpenAI translation, tool calling, and streaming
+- Run Claude Code with **45 Bedrock models** (7 native Anthropic + 38 third-party) on the managed path, **or** any open-source model you self-host on an EC2 GPU instance (Ollama / vLLM)
+- A one-command **LiteLLM proxy** for the Bedrock path that handles Anthropic↔OpenAI translation, tool calling, and streaming (the self-hosted path uses Ollama directly via SSH tunnel, no proxy)
 - An interactive **model picker** and per-model launch scripts
 - A **`/swe` skill** for repo-grounded SWE benchmarking, plus a **`/summarize`** skill for after-action reporting (token usage, errors, themes per run)
 - A reproducible **HumanEval benchmark** with cross-model pass@1 + per-token-cost numbers
+- A **GPT-judged 5×5 SWE matrix** comparing model quality on real refactor / security tasks against a real repo ([`benchmarks/swe-benchmark-data/mcp-gateway-registry/JUDGE_RESULTS.md`](benchmarks/swe-benchmark-data/mcp-gateway-registry/JUDGE_RESULTS.md))
 
 ## Architecture
 
@@ -119,7 +136,7 @@ calling and streaming natively — no per-model configuration needed.
 ```mermaid
 flowchart TD
     CC["Claude Code CLI<br/>ANTHROPIC_BASE_URL=<br/>http://localhost:11434"]
-    EC2["EC2 GPU instance<br/>Ollama (OpenAI-compatible)<br/>open-source model"]
+    EC2["EC2 GPU instance<br/>Ollama (Anthropic Messages compatible)<br/>open-source model"]
 
     CC -- "SSH tunnel<br/>localhost:11434 → EC2:11434" --> EC2
 
@@ -178,21 +195,36 @@ every transcript.
 
 ### Worked example: `mcp-gateway-registry`
 
-The repo ships a worked example so you can see the harness producing real
-artifacts before pointing it at your own code. The example target is
-[agentic-community/mcp-gateway-registry](https://github.com/agentic-community/mcp-gateway-registry)
-at tag `1.24.4`, with two problems scoped:
+The repo ships a fully-populated worked example so you can see the harness
+producing real artifacts before pointing it at your own code. The example
+target is [agentic-community/mcp-gateway-registry](https://github.com/agentic-community/mcp-gateway-registry)
+at tag `1.24.4`, with **5 tasks × 5 models = 25 artifact bundles** on disk:
 
-| Problem | What the model has to do |
-|---|---|
-| `remove-faiss` | Find and remove every FAISS reference (imports, deps, config, docs) and verify nothing breaks |
-| `remove-efs-from-terraform-aws-ecs` | Strip EFS out of `terraform/aws-ecs/` (file system, mount targets, security groups, task-definition mounts), keep `terraform validate` and `terraform plan` green |
+| # | Problem | Difficulty | Source |
+|---|---------|-----------|--------|
+| 1 | `remove-faiss` | Medium | Internal |
+| 2 | `remove-efs-from-terraform-aws-ecs` | Medium | Internal |
+| 3 | `ssrf-hardening-outbound-url-validation` | Medium | Upstream [#1282](https://github.com/agentic-community/mcp-gateway-registry/issues/1282) |
+| 4 | `migrate-ecs-env-vars-to-secrets-manager` | High | Upstream [#1134](https://github.com/agentic-community/mcp-gateway-registry/issues/1134) |
+| 5 | `replace-keycloak-db-password-with-rds-iam` | High | Upstream [#1303](https://github.com/agentic-community/mcp-gateway-registry/issues/1303) |
 
-Two models already have artifacts on the first problem
-(`qwen.qwen3-coder-next` and `qwen.qwen3-coder-480b-a35b-instruct`) so you can
-compare them side-by-side without running the skill yourself. Setup, task
-descriptions, and per-model invocation steps are in
-[benchmarks/swe-benchmark-data/README.md](benchmarks/swe-benchmark-data/README.md).
+**Models benchmarked:** Claude Opus 4.8, Kimi K2 Thinking / K2.5, Mistral
+Devstral 2 123B, MiniMax M2.5, Qwen Coder Next.
+
+**Cross-model scores (GPT-judged):** each artifact bundle is scored 0–100 by
+an independent ChatGPT session against a 4-criterion rubric (Completeness,
+Correctness, Specificity, Risk Awareness — each 0–25). The full matrix,
+per-model leaderboard, and synthesis are in
+[`benchmarks/swe-benchmark-data/mcp-gateway-registry/JUDGE_RESULTS.md`](benchmarks/swe-benchmark-data/mcp-gateway-registry/JUDGE_RESULTS.md);
+per-cell breakdowns with criterion scores and judge notes are in
+`{task}/{model}/judge-gpt.json`.
+
+Headline: Opus 4.8 wins every row (89.95 avg). Kimi family is a clear #2
+(82.15 avg). The mid/budget tier — Qwen / Devstral / MiniMax — clusters at
+74–80 with task-by-task variance, not a clean ordering. SSRF was the hardest
+task by score (76.3 avg), not the README-labelled "High" tasks. Setup,
+per-model invocation steps, and the judging rubric are in
+[`benchmarks/swe-benchmark-data/README.md`](benchmarks/swe-benchmark-data/README.md).
 
 > **The example repo is the example, not the contract.** `/swe` works against
 > any GitHub URL — clone the target you actually care about, write the task
@@ -295,12 +327,16 @@ claude-code-multi-model/
 │       └── summarize/         /summarize — post-run report for a /swe attempt
 ├── benchmarks/                ← Output of /swe runs (the SWE evaluation mode)
 │   └── swe-benchmark-data/
-│       ├── README.md          Worked example + how to add your own target repo
+│       ├── README.md          5-task list, /swe invocation steps, 4×25 rubric
 │       └── mcp-gateway-registry/
 │           ├── repo/          (gitignored — contributor clones source here)
+│           ├── JUDGE_RESULTS.md       Consolidated 5×5 matrix + synthesis
 │           ├── remove-faiss/
-│           │   └── {model}/   github-issue.md, lld.md, review.md, testing.md
-│           └── remove-efs-from-terraform-aws-ecs/
+│           │   └── {model}/           github-issue.md, lld.md, review.md, testing.md, judge-gpt.json
+│           ├── remove-efs-from-terraform-aws-ecs/
+│           ├── ssrf-hardening-outbound-url-validation/
+│           ├── migrate-ecs-env-vars-to-secrets-manager/
+│           └── replace-keycloak-db-password-with-rds-iam/
 ├── bedrock/                   ← Bedrock path (38 third-party + 7 Anthropic)
 │   ├── README.md              Full Bedrock setup guide + HumanEval benchmark
 │   ├── pyproject.toml         uv-managed deps for proxy + benchmark

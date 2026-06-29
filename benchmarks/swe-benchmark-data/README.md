@@ -66,7 +66,7 @@ The tasks below are run with multiple models via the `/swe` skill. For each `{mo
 | 2 | `remove-efs-from-terraform-aws-ecs` | — | Medium | Remove EFS from `terraform/aws-ecs/`. EFS is obsolete in this deployment. Delete the EFS file system, mount targets, security groups, and any task-definition volume mounts that reference it. Update `variables.tf`, `terraform.tfvars.example`, and module wiring. Verify `terraform validate` and `terraform plan` still succeed. |
 | 3 | `ssrf-hardening-outbound-url-validation` | [#1282](https://github.com/agentic-community/mcp-gateway-registry/issues/1282) | Medium | SSRF hardening: validate outbound URLs on agent card fetch (health check + pull-card endpoints). The model must identify vulnerable endpoints that make outbound HTTP requests based on user-supplied URLs, propose URL validation (deny internal/private IPs, allowlists), and design input sanitization to prevent SSRF attacks. |
 | 4 | `migrate-ecs-env-vars-to-secrets-manager` | [#1134](https://github.com/agentic-community/mcp-gateway-registry/issues/1134) | High | Migrate sensitive ECS environment variables to AWS Secrets Manager. Identify which env vars in the ECS task definitions contain secrets (DB passwords, API keys, OAuth client secrets, admin passwords), create Secrets Manager resources in Terraform, update ECS task definitions to pull from Secrets Manager via the `secrets` block instead of passing plaintext via `environment`, and update the IAM task execution role to allow reading those secrets. |
-| 5 | `replace-keycloak-db-password-with-rds-iam` | [#1303](https://github.com/agentic-community/mcp-gateway-registry/issues/1303) | High | Replace the Keycloak database password with RDS IAM authentication. Remove static DB credentials from Terraform and ECS config, configure RDS IAM auth on the PostgreSQL instance, update the Keycloak ECS task to generate short-lived IAM auth tokens, and update IAM roles/policies accordingly. |
+| 5 | `replace-keycloak-db-password-with-rds-iam` | [#1303](https://github.com/agentic-community/mcp-gateway-registry/issues/1303) | High | Replace the Keycloak database password with RDS IAM authentication. The repo uses an Aurora MySQL cluster for Keycloak; remove static DB credentials from Terraform and ECS config, enable IAM database authentication on the Aurora MySQL cluster, update the Keycloak ECS task to generate short-lived IAM auth tokens via `rds:GenerateDBAuthToken`, and update IAM roles/policies accordingly. |
 
 #### How to Run a Task with `/swe`
 
@@ -83,15 +83,22 @@ The skill will create `benchmarks/swe-benchmark-data/mcp-gateway-registry/remove
 
 #### Scoring
 
-Each artifact is scored 0-100 by an LLM judge, weighted equally (25% each):
+Each of the 4 artifacts is scored 0–100 by an independent ChatGPT session
+(cross-lineage judge). Within each artifact, the judge applies the same
+4-criterion rubric — each criterion worth 25 points, summing to 100 per
+artifact:
 
-| Artifact | Weight | What the judge evaluates |
-|----------|--------|--------------------------|
-| `github-issue.md` | 25% | Clear problem statement, complete acceptance criteria, actionable |
-| `lld.md` | 25% | Identifies all affected files, correct approach, no unnecessary changes |
-| `review.md` | 25% | Catches edge cases, risks, dependencies, suggests improvements |
-| `testing.md` | 25% | Covers happy path + edge cases, rollback plan, realistic |
+| Criterion | 0–25 each | What the judge evaluates |
+|-----------|-----------|--------------------------|
+| **Completeness** | 25 | Did the artifact identify all affected files, deps, and components? |
+| **Correctness** | 25 | Are the proposed changes technically right? Would the design actually work? |
+| **Specificity** | 25 | Concrete file paths, code snippets, resource names — not hand-waving? |
+| **Risk awareness** | 25 | Rollback plan, backwards-compat, deployment cutover, edge cases? |
 
-**Task score = (issue + lld + review + testing) / 4**
+**Artifact total = sum of 4 criteria (0–100).**
+**Task score = mean of the 4 artifact totals.**
 
-Results are reported in a matrix: rows = tasks, columns = models, cells = percentage score.
+Results are reported in a 5×5 matrix (rows = tasks, columns = models). Per-cell
+JSON with criterion breakdowns and judge notes lives at
+`{task}/{model}/judge-gpt.json`. The aggregated matrix + synthesis is in
+[`mcp-gateway-registry/JUDGE_RESULTS.md`](mcp-gateway-registry/JUDGE_RESULTS.md).
