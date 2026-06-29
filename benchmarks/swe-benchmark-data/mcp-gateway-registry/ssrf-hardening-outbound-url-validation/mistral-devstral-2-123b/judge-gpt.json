@@ -1,0 +1,40 @@
+{
+  "task": "ssrf-hardening-outbound-url-validation",
+  "model": "mistral-devstral-2-123b",
+  "scores": {
+    "github_issue": {
+      "completeness": 18,
+      "correctness": 20,
+      "specificity": 18,
+      "risk_awareness": 15,
+      "total": 71,
+      "notes": "Reasonable issue framing but sparse acceptance details."
+    },
+    "lld": {
+      "completeness": 12,
+      "correctness": 13,
+      "specificity": 10,
+      "risk_awareness": 11,
+      "total": 46,
+      "notes": "LLD is far too short and vague to implement safely."
+    },
+    "review": {
+      "completeness": 19,
+      "correctness": 20,
+      "specificity": 17,
+      "risk_awareness": 21,
+      "total": 77,
+      "notes": "Review is more useful than the design and catches some security risks."
+    },
+    "testing": {
+      "completeness": 22,
+      "correctness": 21,
+      "specificity": 22,
+      "risk_awareness": 23,
+      "total": 88,
+      "notes": "Strong curl and rollback-oriented testing plan."
+    }
+  },
+  "task_score": 70.5,
+  "verdict": "MIXED: testing is good, but the core LLD is not actionable enough."
+}

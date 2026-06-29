@@ -1,0 +1,40 @@
+{
+  "task": "ssrf-hardening-outbound-url-validation",
+  "model": "minimax-m2-5",
+  "scores": {
+    "github_issue": {
+      "completeness": 16,
+      "correctness": 17,
+      "specificity": 15,
+      "risk_awareness": 15,
+      "total": 63,
+      "notes": "Basic SSRF issue but limited endpoint specificity."
+    },
+    "lld": {
+      "completeness": 18,
+      "correctness": 15,
+      "specificity": 20,
+      "risk_awareness": 17,
+      "total": 70,
+      "notes": "Direct-IP blocking is concrete, but rejecting DNS-resolution blocking leaves a major SSRF bypass."
+    },
+    "review": {
+      "completeness": 17,
+      "correctness": 18,
+      "specificity": 16,
+      "risk_awareness": 20,
+      "total": 71,
+      "notes": "Reasonable security review but does not fully correct the DNS gap."
+    },
+    "testing": {
+      "completeness": 19,
+      "correctness": 18,
+      "specificity": 19,
+      "risk_awareness": 17,
+      "total": 73,
+      "notes": "Good negative tests for direct IPs, weaker for DNS rebinding and redirect handling."
+    }
+  },
+  "task_score": 69.25,
+  "verdict": "WEAK: useful partial hardening, but a design without DNS resolution checks is not sufficient."
+}

@@ -1,0 +1,40 @@
+{
+  "task": "migrate-ecs-env-vars-to-secrets-manager",
+  "model": "minimax-m2-5",
+  "scores": {
+    "github_issue": {
+      "completeness": 19,
+      "correctness": 20,
+      "specificity": 18,
+      "risk_awareness": 17,
+      "total": 74,
+      "notes": "Captures main security goal, but misses some service-specific details."
+    },
+    "lld": {
+      "completeness": 21,
+      "correctness": 19,
+      "specificity": 21,
+      "risk_awareness": 17,
+      "total": 78,
+      "notes": "Uses ECS secrets correctly, but suggests keeping old env vars initially, risking duplicate/conflicting names."
+    },
+    "review": {
+      "completeness": 21,
+      "correctness": 21,
+      "specificity": 20,
+      "risk_awareness": 20,
+      "total": 82,
+      "notes": "Decent review, not enough focus on execution-role and duplicate-name hazards."
+    },
+    "testing": {
+      "completeness": 21,
+      "correctness": 21,
+      "specificity": 20,
+      "risk_awareness": 18,
+      "total": 80,
+      "notes": "Solid terraform checks, limited rotation and rollback depth."
+    }
+  },
+  "task_score": 78.5,
+  "verdict": "GOOD: core AWS pattern is right, but migration sequencing has correctness risk."
+}

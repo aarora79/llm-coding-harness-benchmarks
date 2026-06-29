@@ -1,0 +1,40 @@
+{
+  "task": "replace-keycloak-db-password-with-rds-iam",
+  "model": "mistral-devstral-2-123b",
+  "scores": {
+    "github_issue": {
+      "completeness": 17,
+      "correctness": 17,
+      "specificity": 16,
+      "risk_awareness": 16,
+      "total": 66,
+      "notes": "Basic issue statement, lacking several hard constraints."
+    },
+    "lld": {
+      "completeness": 16,
+      "correctness": 14,
+      "specificity": 15,
+      "risk_awareness": 16,
+      "total": 61,
+      "notes": "Too vague and overconfident about RDS Proxy and token behavior."
+    },
+    "review": {
+      "completeness": 20,
+      "correctness": 18,
+      "specificity": 19,
+      "risk_awareness": 22,
+      "total": 79,
+      "notes": "Review catches more risks than the LLD, but not enough to repair design gaps."
+    },
+    "testing": {
+      "completeness": 22,
+      "correctness": 20,
+      "specificity": 22,
+      "risk_awareness": 21,
+      "total": 85,
+      "notes": "Good testing plan despite weaker design."
+    }
+  },
+  "task_score": 72.75,
+  "verdict": "ADEQUATE: useful tests, but the implementation design is not reliable enough for this task."
+}

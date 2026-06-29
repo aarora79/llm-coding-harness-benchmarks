@@ -1,0 +1,40 @@
+{
+  "task": "remove-efs-from-terraform-aws-ecs",
+  "model": "claude-opus-4-8",
+  "scores": {
+    "github_issue": {
+      "completeness": 23,
+      "correctness": 23,
+      "specificity": 22,
+      "risk_awareness": 21,
+      "total": 89,
+      "notes": "Correctly scopes module, ECS mounts, outputs, scripts, docs, and DocumentDB replacement path."
+    },
+    "lld": {
+      "completeness": 24,
+      "correctness": 24,
+      "specificity": 24,
+      "risk_awareness": 23,
+      "total": 95,
+      "notes": "Best artifact: exact Terraform resources, service mounts, scopes init path, and state-destroy risks."
+    },
+    "review": {
+      "completeness": 22,
+      "correctness": 23,
+      "specificity": 20,
+      "risk_awareness": 23,
+      "total": 88,
+      "notes": "Review catches persistence, scopes, and destructive Terraform apply risks."
+    },
+    "testing": {
+      "completeness": 23,
+      "correctness": 23,
+      "specificity": 22,
+      "risk_awareness": 23,
+      "total": 91,
+      "notes": "Strong terraform plan, script, output, and deployment verification plan."
+    }
+  },
+  "task_score": 90.75,
+  "verdict": "STRONG: accurate, specific, and operationally aware."
+}

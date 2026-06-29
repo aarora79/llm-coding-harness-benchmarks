@@ -1,0 +1,40 @@
+{
+  "task": "remove-efs-from-terraform-aws-ecs",
+  "model": "mistral-devstral-2-123b",
+  "scores": {
+    "github_issue": {
+      "completeness": 20,
+      "correctness": 21,
+      "specificity": 19,
+      "risk_awareness": 18,
+      "total": 78,
+      "notes": "Identifies core Terraform and script surfaces."
+    },
+    "lld": {
+      "completeness": 20,
+      "correctness": 19,
+      "specificity": 20,
+      "risk_awareness": 19,
+      "total": 78,
+      "notes": "Covers main removals but proposes new SSM scripts and deprecation where deletion is expected."
+    },
+    "review": {
+      "completeness": 22,
+      "correctness": 22,
+      "specificity": 20,
+      "risk_awareness": 24,
+      "total": 88,
+      "notes": "Risk review is stronger than the design itself."
+    },
+    "testing": {
+      "completeness": 23,
+      "correctness": 22,
+      "specificity": 23,
+      "risk_awareness": 23,
+      "total": 91,
+      "notes": "Strong validation plan for Terraform, scripts, and rollback."
+    }
+  },
+  "task_score": 83.75,
+  "verdict": "GOOD: broad and testable, though the LLD overcomplicates scopes replacement."
+}

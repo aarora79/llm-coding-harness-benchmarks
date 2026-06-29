@@ -1,0 +1,40 @@
+{
+  "task": "replace-keycloak-db-password-with-rds-iam",
+  "model": "kimi-k2-5",
+  "scores": {
+    "github_issue": {
+      "completeness": 21,
+      "correctness": 20,
+      "specificity": 21,
+      "risk_awareness": 21,
+      "total": 83,
+      "notes": "Good scope and security framing."
+    },
+    "lld": {
+      "completeness": 22,
+      "correctness": 18,
+      "specificity": 22,
+      "risk_awareness": 22,
+      "total": 84,
+      "notes": "Strong detail and risk awareness, but has contradictions around RDS Proxy and questionable container/AWS CLI assumptions."
+    },
+    "review": {
+      "completeness": 22,
+      "correctness": 22,
+      "specificity": 20,
+      "risk_awareness": 24,
+      "total": 88,
+      "notes": "Review catches token TTL and rollback risks well."
+    },
+    "testing": {
+      "completeness": 23,
+      "correctness": 21,
+      "specificity": 23,
+      "risk_awareness": 23,
+      "total": 90,
+      "notes": "Very comprehensive AWS, Terraform, IAM, and rollback testing."
+    }
+  },
+  "task_score": 86.25,
+  "verdict": "STRONG: detailed and operationally serious, but some AWS/Keycloak implementation claims need correction."
+}

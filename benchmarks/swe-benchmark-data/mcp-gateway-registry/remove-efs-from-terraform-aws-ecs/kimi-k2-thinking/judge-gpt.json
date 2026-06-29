@@ -1,0 +1,40 @@
+{
+  "task": "remove-efs-from-terraform-aws-ecs",
+  "model": "kimi-k2-thinking",
+  "scores": {
+    "github_issue": {
+      "completeness": 20,
+      "correctness": 21,
+      "specificity": 19,
+      "risk_awareness": 18,
+      "total": 78,
+      "notes": "Good EFS scope, but introduces Parameter Store migration that is not clearly required."
+    },
+    "lld": {
+      "completeness": 21,
+      "correctness": 20,
+      "specificity": 21,
+      "risk_awareness": 20,
+      "total": 82,
+      "notes": "Covers key Terraform resources; unnecessary SSM scopes design adds risk."
+    },
+    "review": {
+      "completeness": 21,
+      "correctness": 22,
+      "specificity": 19,
+      "risk_awareness": 23,
+      "total": 85,
+      "notes": "Good rollback and ops review."
+    },
+    "testing": {
+      "completeness": 22,
+      "correctness": 22,
+      "specificity": 23,
+      "risk_awareness": 22,
+      "total": 89,
+      "notes": "Thorough terraform, task definition, and smoke-test coverage."
+    }
+  },
+  "task_score": 83.5,
+  "verdict": "GOOD: strong coverage, slightly weakened by added configuration migration complexity."
+}

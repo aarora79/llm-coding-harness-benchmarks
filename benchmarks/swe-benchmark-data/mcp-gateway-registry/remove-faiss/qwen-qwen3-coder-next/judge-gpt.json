@@ -1,0 +1,40 @@
+{
+  "task": "remove-faiss",
+  "model": "qwen-qwen3-coder-next",
+  "scores": {
+    "github_issue": {
+      "completeness": 19,
+      "correctness": 21,
+      "specificity": 18,
+      "risk_awareness": 16,
+      "total": 74,
+      "notes": "Clear task statement but lighter on full repo touchpoints and rollout risks."
+    },
+    "lld": {
+      "completeness": 22,
+      "correctness": 22,
+      "specificity": 22,
+      "risk_awareness": 20,
+      "total": 86,
+      "notes": "Good concrete design with many affected files identified."
+    },
+    "review": {
+      "completeness": 20,
+      "correctness": 21,
+      "specificity": 19,
+      "risk_awareness": 20,
+      "total": 80,
+      "notes": "Solid review, though less incisive on telemetry and behavior drift."
+    },
+    "testing": {
+      "completeness": 22,
+      "correctness": 22,
+      "specificity": 21,
+      "risk_awareness": 18,
+      "total": 83,
+      "notes": "Good coverage but weaker rollback and production-observability checks."
+    }
+  },
+  "task_score": 80.75,
+  "verdict": "GOOD: mostly complete and actionable, with moderate risk-awareness gaps."
+}

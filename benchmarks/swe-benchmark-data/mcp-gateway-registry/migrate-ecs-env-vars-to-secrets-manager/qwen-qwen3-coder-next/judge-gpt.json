@@ -1,0 +1,40 @@
+{
+  "task": "migrate-ecs-env-vars-to-secrets-manager",
+  "model": "qwen-qwen3-coder-next",
+  "scores": {
+    "github_issue": {
+      "completeness": 19,
+      "correctness": 20,
+      "specificity": 18,
+      "risk_awareness": 17,
+      "total": 74,
+      "notes": "Clear but broad issue; pulls in Keycloak DB areas that are separate work."
+    },
+    "lld": {
+      "completeness": 20,
+      "correctness": 18,
+      "specificity": 22,
+      "risk_awareness": 18,
+      "total": 78,
+      "notes": "Specific but overbroad, with some incorrect resource names and unrelated Keycloak DB handling."
+    },
+    "review": {
+      "completeness": 21,
+      "correctness": 22,
+      "specificity": 20,
+      "risk_awareness": 22,
+      "total": 85,
+      "notes": "Good review that partially compensates for LLD overreach."
+    },
+    "testing": {
+      "completeness": 22,
+      "correctness": 21,
+      "specificity": 22,
+      "risk_awareness": 21,
+      "total": 86,
+      "notes": "Strong verification plan for task definitions and secret exposure."
+    }
+  },
+  "task_score": 80.75,
+  "verdict": "GOOD: useful testing and review, but LLD has over-scope and naming correctness issues."
+}

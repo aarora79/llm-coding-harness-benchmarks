@@ -1,0 +1,40 @@
+{
+  "task": "replace-keycloak-db-password-with-rds-iam",
+  "model": "claude-opus-4-8",
+  "scores": {
+    "github_issue": {
+      "completeness": 22,
+      "correctness": 21,
+      "specificity": 22,
+      "risk_awareness": 22,
+      "total": 87,
+      "notes": "Strong issue with correct AWS/RDS surfaces and token-lifetime concerns."
+    },
+    "lld": {
+      "completeness": 23,
+      "correctness": 20,
+      "specificity": 23,
+      "risk_awareness": 22,
+      "total": 88,
+      "notes": "Very detailed and aware of TLS, DB user grants, proxy choice, and token TTL; token refresh strategy remains risky."
+    },
+    "review": {
+      "completeness": 22,
+      "correctness": 22,
+      "specificity": 20,
+      "risk_awareness": 24,
+      "total": 88,
+      "notes": "Excellent risk review around connection pools, rollback, and IAM policy scope."
+    },
+    "testing": {
+      "completeness": 22,
+      "correctness": 21,
+      "specificity": 22,
+      "risk_awareness": 23,
+      "total": 88,
+      "notes": "Good infra and runtime validation, though long-lived pool/token behavior remains hard to prove."
+    }
+  },
+  "task_score": 87.75,
+  "verdict": "STRONG: best treatment of a hard task, with residual uncertainty around Keycloak token refresh."
+}

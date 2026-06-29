@@ -1,0 +1,40 @@
+{
+  "task": "remove-faiss",
+  "model": "mistral-devstral-2-123b",
+  "scores": {
+    "github_issue": {
+      "completeness": 18,
+      "correctness": 20,
+      "specificity": 17,
+      "risk_awareness": 15,
+      "total": 70,
+      "notes": "Captures the main goal but misses several touchpoints and has limited risk framing."
+    },
+    "lld": {
+      "completeness": 20,
+      "correctness": 21,
+      "specificity": 20,
+      "risk_awareness": 18,
+      "total": 79,
+      "notes": "Reasonable design, but less complete around scripts, docs, and write-path edge cases."
+    },
+    "review": {
+      "completeness": 18,
+      "correctness": 20,
+      "specificity": 16,
+      "risk_awareness": 20,
+      "total": 74,
+      "notes": "Adequate review, but less concrete than the stronger artifacts."
+    },
+    "testing": {
+      "completeness": 22,
+      "correctness": 22,
+      "specificity": 22,
+      "risk_awareness": 22,
+      "total": 88,
+      "notes": "Testing plan is the strongest artifact, with good grep, API, and rollback checks."
+    }
+  },
+  "task_score": 77.75,
+  "verdict": "GOOD: implementable in broad strokes, but weaker artifact coverage outside testing."
+}

@@ -1,0 +1,40 @@
+{
+  "task": "ssrf-hardening-outbound-url-validation",
+  "model": "qwen-qwen3-coder-next",
+  "scores": {
+    "github_issue": {
+      "completeness": 20,
+      "correctness": 21,
+      "specificity": 21,
+      "risk_awareness": 19,
+      "total": 81,
+      "notes": "Clear SSRF task statement with good acceptance criteria."
+    },
+    "lld": {
+      "completeness": 23,
+      "correctness": 22,
+      "specificity": 23,
+      "risk_awareness": 21,
+      "total": 89,
+      "notes": "Comprehensive validator design with scheme, DNS, IP, metadata, and redirect checks; slightly overbroad."
+    },
+    "review": {
+      "completeness": 20,
+      "correctness": 22,
+      "specificity": 19,
+      "risk_awareness": 22,
+      "total": 83,
+      "notes": "Good security review, though some app-surface assumptions are broad."
+    },
+    "testing": {
+      "completeness": 23,
+      "correctness": 22,
+      "specificity": 23,
+      "risk_awareness": 22,
+      "total": 90,
+      "notes": "Strong SSRF matrix including private ranges, redirects, DNS, and feature flags."
+    }
+  },
+  "task_score": 85.75,
+  "verdict": "STRONG: comprehensive and mostly correct, with some overreach beyond the issue."
+}

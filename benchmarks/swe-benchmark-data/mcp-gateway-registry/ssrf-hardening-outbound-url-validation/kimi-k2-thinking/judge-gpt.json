@@ -1,0 +1,40 @@
+{
+  "task": "ssrf-hardening-outbound-url-validation",
+  "model": "kimi-k2-thinking",
+  "scores": {
+    "github_issue": {
+      "completeness": 16,
+      "correctness": 17,
+      "specificity": 16,
+      "risk_awareness": 15,
+      "total": 64,
+      "notes": "Frames the issue around federation endpoints more than the agent-card fetch task."
+    },
+    "lld": {
+      "completeness": 18,
+      "correctness": 17,
+      "specificity": 19,
+      "risk_awareness": 17,
+      "total": 71,
+      "notes": "Contains reasonable SSRF primitives but applies them to the wrong primary component."
+    },
+    "review": {
+      "completeness": 18,
+      "correctness": 19,
+      "specificity": 17,
+      "risk_awareness": 22,
+      "total": 76,
+      "notes": "Review has useful security concerns despite target drift."
+    },
+    "testing": {
+      "completeness": 13,
+      "correctness": 15,
+      "specificity": 14,
+      "risk_awareness": 12,
+      "total": 54,
+      "notes": "Testing plan is short and misses much of the required agent-card/redirect matrix."
+    }
+  },
+  "task_score": 66.25,
+  "verdict": "WEAK: good SSRF vocabulary, but incomplete alignment with the actual issue."
+}

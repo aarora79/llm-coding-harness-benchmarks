@@ -1,0 +1,40 @@
+{
+  "task": "migrate-ecs-env-vars-to-secrets-manager",
+  "model": "claude-opus-4-8",
+  "scores": {
+    "github_issue": {
+      "completeness": 22,
+      "correctness": 23,
+      "specificity": 21,
+      "risk_awareness": 21,
+      "total": 87,
+      "notes": "Correctly frames ECS task-definition leakage and keeps non-secret config in environment."
+    },
+    "lld": {
+      "completeness": 24,
+      "correctness": 24,
+      "specificity": 24,
+      "risk_awareness": 23,
+      "total": 95,
+      "notes": "Excellent idiomatic ECS secrets-block design with exact resources, IAM, Grafana, and Mongo fallback handling."
+    },
+    "review": {
+      "completeness": 22,
+      "correctness": 23,
+      "specificity": 20,
+      "risk_awareness": 24,
+      "total": 89,
+      "notes": "Review catches duplicate env names, Grafana execution role, rotation, and state risks."
+    },
+    "testing": {
+      "completeness": 23,
+      "correctness": 23,
+      "specificity": 23,
+      "risk_awareness": 22,
+      "total": 91,
+      "notes": "Strong plan/task-definition inspection and post-apply verification."
+    }
+  },
+  "task_score": 90.5,
+  "verdict": "STRONG: idiomatic AWS/ECS design and very actionable."
+}

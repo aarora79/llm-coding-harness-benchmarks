@@ -1,0 +1,40 @@
+{
+  "task": "remove-efs-from-terraform-aws-ecs",
+  "model": "minimax-m2-5",
+  "scores": {
+    "github_issue": {
+      "completeness": 18,
+      "correctness": 20,
+      "specificity": 18,
+      "risk_awareness": 15,
+      "total": 71,
+      "notes": "Captures EFS removal but misses deployment scripts and several docs/runbook surfaces."
+    },
+    "lld": {
+      "completeness": 19,
+      "correctness": 20,
+      "specificity": 18,
+      "risk_awareness": 17,
+      "total": 74,
+      "notes": "Concise Terraform map, but omits important post-deploy script handling."
+    },
+    "review": {
+      "completeness": 20,
+      "correctness": 20,
+      "specificity": 19,
+      "risk_awareness": 21,
+      "total": 80,
+      "notes": "Decent risks around data and rollback."
+    },
+    "testing": {
+      "completeness": 20,
+      "correctness": 20,
+      "specificity": 20,
+      "risk_awareness": 19,
+      "total": 79,
+      "notes": "Useful terraform checks but limited script and scopes validation."
+    }
+  },
+  "task_score": 76,
+  "verdict": "ADEQUATE: main Terraform removal is understandable, but deployment cleanup is incomplete."
+}

@@ -1,0 +1,40 @@
+{
+  "task": "remove-faiss",
+  "model": "kimi-k2-thinking",
+  "scores": {
+    "github_issue": {
+      "completeness": 22,
+      "correctness": 21,
+      "specificity": 21,
+      "risk_awareness": 20,
+      "total": 84,
+      "notes": "Broad FAISS removal scope, though less explicit on DocumentDB/MongoDB fallback details."
+    },
+    "lld": {
+      "completeness": 23,
+      "correctness": 22,
+      "specificity": 22,
+      "risk_awareness": 21,
+      "total": 88,
+      "notes": "Good implementation map; some backend terminology and behavioral parity details are looser."
+    },
+    "review": {
+      "completeness": 22,
+      "correctness": 22,
+      "specificity": 20,
+      "risk_awareness": 23,
+      "total": 87,
+      "notes": "Useful risk review with realistic rollback and drift concerns."
+    },
+    "testing": {
+      "completeness": 23,
+      "correctness": 22,
+      "specificity": 24,
+      "risk_awareness": 23,
+      "total": 92,
+      "notes": "Very thorough functional and cleanup tests."
+    }
+  },
+  "task_score": 87.75,
+  "verdict": "STRONG: detailed and mostly correct, with minor ambiguity around the replacement search semantics."
+}

@@ -1,0 +1,40 @@
+{
+  "task": "replace-keycloak-db-password-with-rds-iam",
+  "model": "minimax-m2-5",
+  "scores": {
+    "github_issue": {
+      "completeness": 17,
+      "correctness": 18,
+      "specificity": 16,
+      "risk_awareness": 15,
+      "total": 66,
+      "notes": "Captures the headline requirement but is thin on RDS Proxy, TLS, and token lifecycle."
+    },
+    "lld": {
+      "completeness": 20,
+      "correctness": 17,
+      "specificity": 21,
+      "risk_awareness": 19,
+      "total": 77,
+      "notes": "Detailed enough to start, but the token refresh and Keycloak connection-pool story is not fully correct."
+    },
+    "review": {
+      "completeness": 19,
+      "correctness": 19,
+      "specificity": 18,
+      "risk_awareness": 22,
+      "total": 78,
+      "notes": "Review has reasonable risk flags."
+    },
+    "testing": {
+      "completeness": 21,
+      "correctness": 20,
+      "specificity": 21,
+      "risk_awareness": 22,
+      "total": 84,
+      "notes": "Good AWS/IAM validation plan with rollback checks."
+    }
+  },
+  "task_score": 76.25,
+  "verdict": "GOOD-ENOUGH: actionable in parts, but correctness is shaky for the hardest edge cases."
+}

@@ -1,0 +1,40 @@
+{
+  "task": "replace-keycloak-db-password-with-rds-iam",
+  "model": "qwen-qwen3-coder-next",
+  "scores": {
+    "github_issue": {
+      "completeness": 17,
+      "correctness": 18,
+      "specificity": 16,
+      "risk_awareness": 15,
+      "total": 66,
+      "notes": "Basic issue, but includes questionable Docker/Helm scope and understates proxy/token issues."
+    },
+    "lld": {
+      "completeness": 16,
+      "correctness": 11,
+      "specificity": 19,
+      "risk_awareness": 17,
+      "total": 63,
+      "notes": "Contains impossible or non-idiomatic ideas such as Lambda valueFrom for ECS secrets and EFS-backed init token sharing."
+    },
+    "review": {
+      "completeness": 18,
+      "correctness": 18,
+      "specificity": 17,
+      "risk_awareness": 22,
+      "total": 75,
+      "notes": "Review identifies token lifetime and rollback concerns, but not all design impossibilities."
+    },
+    "testing": {
+      "completeness": 21,
+      "correctness": 19,
+      "specificity": 21,
+      "risk_awareness": 21,
+      "total": 82,
+      "notes": "Testing plan is useful but cannot compensate for incorrect implementation mechanics."
+    }
+  },
+  "task_score": 71.5,
+  "verdict": "ADEQUATE: good test instincts, but the LLD has serious AWS/ECS correctness flaws."
+}

@@ -1,0 +1,40 @@
+{
+  "task": "ssrf-hardening-outbound-url-validation",
+  "model": "claude-opus-4-8",
+  "scores": {
+    "github_issue": {
+      "completeness": 22,
+      "correctness": 23,
+      "specificity": 21,
+      "risk_awareness": 21,
+      "total": 87,
+      "notes": "Correctly targets agent-card and health-check fetches with concrete SSRF criteria."
+    },
+    "lld": {
+      "completeness": 24,
+      "correctness": 23,
+      "specificity": 24,
+      "risk_awareness": 23,
+      "total": 94,
+      "notes": "Strong shared validator design: schemes, DNS/IP checks, metadata IPs, redirects, allowlist, and known TOCTOU risk."
+    },
+    "review": {
+      "completeness": 22,
+      "correctness": 22,
+      "specificity": 20,
+      "risk_awareness": 24,
+      "total": 88,
+      "notes": "Security review is realistic and catches DNS rebinding and allowlist tradeoffs."
+    },
+    "testing": {
+      "completeness": 23,
+      "correctness": 23,
+      "specificity": 22,
+      "risk_awareness": 23,
+      "total": 91,
+      "notes": "Good unit and functional SSRF matrix including private IPs, metadata, redirects, and allowlists."
+    }
+  },
+  "task_score": 90,
+  "verdict": "STRONG: security controls are complete and grounded in the actual fetch paths."
+}
