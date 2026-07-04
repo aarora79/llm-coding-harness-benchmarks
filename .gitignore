@@ -13,6 +13,8 @@ ONE_PAGER.md
 *.pem
 *.key
 *.log
+# vLLM server / benchmark logs are tee'd to the console AND to this dir; never commit them
+self-hosted/vllm/logs/
 .env
 .env.*
 .scratchpad/

@@ -1,0 +1,24 @@
+[project]
+name = "vllm-inference-clients"
+version = "0.1.0"
+description = "Client-side test programs for a self-hosted vLLM endpoint (OpenAI-compatible)"
+requires-python = ">=3.10"
+dependencies = [
+    # OpenAI-compatible client for the vLLM /v1 endpoint
+    "openai>=1.40.0",
+    # Lower-level HTTP client — for raw requests, streaming, and the async
+    # concurrency probes used by the throughput checks
+    "httpx>=0.27.0",
+    # Token accounting when comparing against API pricing
+    "tiktoken>=0.7.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.4.0",
+]
+
+# These clients talk to the vLLM server over HTTP; they do NOT import vllm and
+# are independent of the server's own ~/vllm-env. Install them in their own
+# venv (see README "Client test programs"). Run them on the instance against
+# localhost:8000, or from your laptop through the SSH tunnel.
