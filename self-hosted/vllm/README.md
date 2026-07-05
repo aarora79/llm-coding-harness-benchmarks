@@ -47,9 +47,16 @@ Weight memory = `params × bytes/param` (BF16 = 2 bytes). On 184 GB of VRAM, aft
 | **Qwen3-Coder-30B-A3B-Instruct** ⭐ | MoE | 30.5B (3B) | ~61 GB | ✅ comfortably — **the default** |
 | Qwen3-32B | dense | 32.8B (all) | ~66 GB | ✅ (every param active → ~10× the per-token compute of a 3B-active MoE) |
 | Qwen3.6-35B-A3B | MoE | 35.9B (3B) | ~72 GB | ✅ |
-| Qwen3-Coder-Next | MoE | 79.6B (3B) | ~160 GB | ✅ tight — reduce `--max-model-len` to leave KV headroom |
+| Qwen3-Coder-Next | MoE (hybrid Mamba) | 79.6B (3B) | ~160 GB | ✅ tight — reduce `--max-model-len` **and** cap `--max-num-seqs` (Mamba cache), see [model file](models/qwen3-coder-next.md) |
 
 ⭐ The default is the **30B-A3B coder MoE**: only 3B parameters activate per token, so it is fast and leaves ~120 GB of VRAM for a large KV cache and high concurrency — exactly what a throughput benchmark wants.
+
+**Per-model serving guidelines** live in [`models/`](models/) — one file each with the exact serve command, the right tool-call parser, and model-specific tuning notes:
+
+- [Qwen3-Coder-30B-A3B](models/qwen3-coder-30b.md) ⭐ — the default MoE coder
+- [Qwen3-32B](models/qwen3-32b.md) — dense chat model (`hermes` parser)
+- [Qwen3.6-35B-A3B](models/qwen3.6-35b-a3b.md) — 3.6-generation MoE
+- [Qwen3-Coder-Next (80B)](models/qwen3-coder-next.md) — largest fit, reduced context
 
 ---
 
@@ -133,12 +140,14 @@ Every knob is an environment variable with a sensible default for this node. Eac
 | `TP` | `4` | tensor-parallel size = number of GPUs to shard across | `--tensor-parallel-size` |
 | `PORT` | `8000` | OpenAI-compatible API port | `--port` |
 | `MAX_MODEL_LEN` | `32768` | context window to serve | `--max-model-len` |
+| `ROPE_SCALING` | *(unset)* | extend context past the model's 32K native window with YaRN — a bare factor (e.g. `4` → 128K) or full JSON | `--rope-scaling` |
+| `MAX_NUM_SEQS` | *(unset)* | cap on concurrent sequences (vLLM default 256); **required for hybrid Mamba models on a VRAM-tight node** — e.g. Qwen3-Coder-Next, see its [model file](models/qwen3-coder-next.md) | `--max-num-seqs` |
 | `GPU_MEM_UTIL` | `0.90` | fraction of each GPU's VRAM vLLM may use | `--gpu-memory-utilization` |
 | `TOOL_PARSER` | `qwen3_coder` | tool-call parser for agentic clients; `none` disables tools | `--tool-call-parser` (+ `--enable-auto-tool-choice`) |
 | `VLLM_ENV` | `~/vllm-env` | path to the vLLM virtualenv | *(picks the `vllm` binary)* |
 | `HF_TOKEN` | *(unset)* | HuggingFace token for gated/faster downloads | *(env, not a flag)* |
 
-The server also always binds `--host 127.0.0.1` (loopback only — reach it via the SSH tunnel), and applies `VLLM_USE_FLASHINFER_SAMPLER=0` + a `CUDA_HOME` fallback (the two DLAMI fixes above).
+The server also always binds `--host 127.0.0.1` (loopback only — reach it via the SSH tunnel), applies `VLLM_USE_FLASHINFER_SAMPLER=0` + a `CUDA_HOME` fallback (the two DLAMI fixes), and **always enables prefix caching** (`--enable-prefix-caching`) — this is a no-cost optimization that reduces prompt token processing when consecutive requests share common prefixes (e.g. conversation history, system prompts).
 
 **Spell out every parameter explicitly (recommended for a benchmark).** So a run is fully reproducible from its command line — no reliance on defaults — pass all of them even when they equal the default:
 
@@ -164,7 +173,8 @@ vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct \
   --served-model-name qwen3-coder-30b \
   --max-model-len 32768 \
   --gpu-memory-utilization 0.90 \
-  --enable-auto-tool-choice --tool-call-parser qwen3_coder
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder \
+  --enable-prefix-caching
 ```
 
 More examples:
@@ -173,8 +183,16 @@ More examples:
 # A dense 32B alternative — the Qwen3 chat models use the `hermes` parser
 MODEL=Qwen/Qwen3-32B SERVED_NAME=qwen3-32b TOOL_PARSER=hermes ./vllm-serve.sh
 
-# The 80B MoE — trim context so the KV cache still fits
-MODEL=Qwen/Qwen3-Coder-Next SERVED_NAME=qwen3-coder-next MAX_MODEL_LEN=16384 ./vllm-serve.sh
+# The 80B MoE — trim context so the KV cache fits, AND cap concurrent sequences:
+# it is a hybrid Mamba model that needs one Mamba cache block per sequence, so the
+# default max_num_seqs=256 exceeds the ~134 blocks that fit and boot aborts. See its model file.
+MODEL=Qwen/Qwen3-Coder-Next SERVED_NAME=qwen3-coder-next \
+  MAX_MODEL_LEN=16384 MAX_NUM_SEQS=128 ./vllm-serve.sh
+
+# Extend context to 128K with YaRN — the 32K-native models need rope scaling to go past 32768.
+# ROPE_SCALING=4 = 4x the 32768 native window; expect ~1/4 the concurrency (4x KV cache per request).
+MODEL=Qwen/Qwen3-32B SERVED_NAME=qwen3-32b TOOL_PARSER=hermes \
+  MAX_MODEL_LEN=131072 ROPE_SCALING=4 ./vllm-serve.sh
 
 # Plain completion server, no tool calling
 TOOL_PARSER=none ./vllm-serve.sh
@@ -315,6 +333,25 @@ Maximum concurrency for 32,768 tokens per request: 31.65x
 
 Reading that last line: at a full 32K-token context, this node can hold ~32 concurrent requests' worth of KV cache. Shorter prompts → proportionally more concurrency. Raising `GPU_MEM_UTIL` gives more KV cache (more concurrency) at the cost of headroom; lowering `MAX_MODEL_LEN` does the same.
 
+### Long context and `ROPE_SCALING` (YaRN)
+
+**Native context windows differ sharply by model — check the [per-model file](models/) before assuming.** Of the models in this folder, only the dense **Qwen3-32B** is 32K-native; the three MoE models (Qwen3-Coder-30B, Qwen3.6-35B-A3B, Qwen3-Coder-Next) are all **256K-native**. This matters because `--max-model-len` is a hard ceiling you set (it never auto-expands to native), and YaRN rope scaling is only needed when you ask for *more than native*:
+
+- **Serving ≤ native window → no `ROPE_SCALING`.** Just set `MAX_MODEL_LEN` to what you want. For the 256K-native MoE models, that covers everything up to 256K (e.g. 128K needs no scaling); for Qwen3-32B, everything up to 32768.
+- **Serving > native window → enable YaRN.** vLLM will *reject* an oversized `--max-model-len` on a model without rope scaling. `ROPE_SCALING` wires it up: pass a bare factor and the script builds the `--rope-scaling` JSON assuming a **32768** native window (factor `4` → 131072 tokens), or — for the 256K-native models — pass a **full JSON object** with the correct `original_max_position_embeddings` (the bare-number shorthand's 32768 assumption would be wrong for them).
+
+```bash
+# Qwen3-32B (32K native) → 128K with YaRN, bare factor is correct here
+MODEL=Qwen/Qwen3-32B SERVED_NAME=qwen3-32b TOOL_PARSER=hermes \
+  MAX_MODEL_LEN=131072 ROPE_SCALING=4 ./vllm-serve.sh
+
+# Qwen3.6-35B-A3B (256K native) → 128K needs NO scaling, just raise the window
+MODEL=Qwen/Qwen3.6-35B-A3B SERVED_NAME=qwen3.6-35b \
+  MAX_MODEL_LEN=131072 ./vllm-serve.sh
+```
+
+Two caveats whenever you *do* extend past native. **(1) Throughput cost:** context length scales KV-cache VRAM linearly, so 4× the window ≈ ¼ the concurrency — a poor trade for a pure throughput benchmark, correct only when you genuinely need the long window. On 4×L40S, KV-cache VRAM (not the model's native window) is usually the real ceiling. **(2) YaRN is static:** once enabled it applies to every request and can slightly degrade quality on short prompts, so leave `ROPE_SCALING` unset unless you actually need the extra length.
+
 ### Attention backend (`FLASH_ATTN`)
 
 vLLM auto-selects **FlashAttention 2** on the L40S (out of `FLASH_ATTN`, `FLASHINFER`, `TRITON_ATTN`, `FLEX_ATTENTION`). Fused, memory-efficient attention — nothing to configure.
@@ -412,6 +449,7 @@ Verified working end-to-end on the reference node: opencode's `build` agent driv
 
 | File | What it does |
 |------|--------------|
+| [models/](models/) | Per-model serving guidelines — one `.md` per model (serve command, parser, tuning) |
 | [scripts/vllm-install.sh](scripts/vllm-install.sh) | Full install: driver check → apt deps → uv → venv → vLLM → monitoring → GPU verify |
 | [scripts/vllm-serve.sh](scripts/vllm-serve.sh) | Serve a model tensor-parallel across all GPUs; tee's logs; `--foreground` / `--stop` |
 | [scripts/vllm-verify.sh](scripts/vllm-verify.sh) | Smoke-test the endpoint with a real chat completion |

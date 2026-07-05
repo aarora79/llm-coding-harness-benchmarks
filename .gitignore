@@ -33,6 +33,9 @@ secrets/
 security-review-findings.xlsx
 .litellm.pid
 .mantle-token
+# HuggingFace token for gated/faster model downloads — never commit; consumed by vllm-serve.sh
+.hf_token
+**/.hf_token
 .DS_Store
 .venv/
 tmp/
