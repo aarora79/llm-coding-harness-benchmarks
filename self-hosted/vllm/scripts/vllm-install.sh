@@ -16,6 +16,13 @@ set -euo pipefail
 # Usage:
 #   ./vllm-install.sh                 # install into ~/vllm-env
 #   VLLM_ENV=/mnt/vllm ./vllm-install.sh
+#   ./vllm-install.sh --help          # show this help and exit
+#
+# Environment variables (all optional):
+#   VLLM_ENV         path to the vLLM virtualenv to create  (default: ~/vllm-env)
+#   PYTHON_VERSION   Python version for the venv            (default: 3.12)
+#
+# Idempotent: re-running skips anything already present.
 # ---------------------------------------------------------------------------
 
 VLLM_ENV="${VLLM_ENV:-$HOME/vllm-env}"
@@ -26,6 +33,12 @@ info()   { echo -e "${BLUE}[info]${RESET}  $1"; }
 ok()     { echo -e "${GREEN}[ok]${RESET}    $1"; }
 fail()   { echo -e "${RED}[fail]${RESET}  $1"; exit 1; }
 header() { echo -e "\n${BOLD}=== $1 ===${RESET}"; }
+
+# Print the header comment block (lines starting with '#') as help.
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  sed -n '5,25p' "$0" | sed 's/^# \{0,1\}//; s/^#$//'
+  exit 0
+fi
 
 header "Step 1 — Check GPU + driver"
 command -v nvidia-smi >/dev/null 2>&1 || fail "nvidia-smi not found. Use a GPU instance with NVIDIA drivers (e.g. the Deep Learning AMI)."

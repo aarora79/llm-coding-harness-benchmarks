@@ -2,7 +2,4 @@
 
 ## Markdown
 
-- **Wrap prose in Markdown files at 76 characters.** Hard-wrap paragraph
-  text so no line exceeds 76 columns. Exceptions (do not wrap): URLs, table
-  rows, fenced code blocks, and headings. This keeps `.md` diffs readable
-  and reviewable line-by-line.
+- **Do not hard-wrap prose in Markdown files.** Write each paragraph as a single line and let the editor/renderer soft-wrap it. Tables, fenced code blocks, and list structure are unaffected.

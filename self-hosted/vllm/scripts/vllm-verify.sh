@@ -13,6 +13,11 @@ set -euo pipefail
 #   ./vllm-verify.sh                 # default localhost:8000
 #   PORT=8000 ./vllm-verify.sh
 #   HOST=127.0.0.1 PORT=8000 ./vllm-verify.sh
+#   ./vllm-verify.sh --help          # show this help and exit
+#
+# Environment variables (all optional):
+#   HOST   host the vLLM server is bound to   (default: 127.0.0.1)
+#   PORT   vLLM API port                       (default: 8000)
 # ---------------------------------------------------------------------------
 
 HOST="${HOST:-127.0.0.1}"
@@ -24,6 +29,11 @@ info()   { echo -e "${BLUE}[info]${RESET}  $1"; }
 ok()     { echo -e "${GREEN}[ok]${RESET}    $1"; }
 fail()   { echo -e "${RED}[fail]${RESET}  $1"; exit 1; }
 header() { echo -e "\n${BOLD}=== $1 ===${RESET}"; }
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  sed -n '5,20p' "$0" | sed 's/^# \{0,1\}//; s/^#$//'
+  exit 0
+fi
 
 header "1. Server reachable? ($BASE)"
 MODELS_JSON=$(curl -sf "$BASE/v1/models" 2>/dev/null) || fail "No response from $BASE/v1/models. Is the server up? (./vllm-serve.sh)"

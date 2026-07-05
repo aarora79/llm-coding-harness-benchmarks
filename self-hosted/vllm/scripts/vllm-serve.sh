@@ -25,8 +25,17 @@ set -euo pipefail
 #   PORT               OpenAI-compatible API port     (default: 8000)
 #   MAX_MODEL_LEN      context window to serve        (default: 32768)
 #   GPU_MEM_UTIL       fraction of VRAM vLLM may use  (default: 0.90)
+#   TOOL_PARSER        vLLM tool-call parser          (default: qwen3_coder)
+#                      set to "" / "none" to disable tool calling
 #   VLLM_ENV           path to the vLLM virtualenv    (default: ~/vllm-env)
 #   HF_TOKEN           HuggingFace token for gated/faster downloads (optional)
+#
+# Tool calling is ON by default. Agentic clients (opencode, Claude Code) send
+# `tool_choice: "auto"`, which vLLM rejects unless the server was started with
+# --enable-auto-tool-choice and a matching --tool-call-parser. The default
+# parser `qwen3_coder` is correct for the Qwen3-Coder models; use `hermes` for
+# other Qwen3 chat models, or set TOOL_PARSER=none for a plain completion
+# server. Run `vllm serve --help` for the full parser list.
 #
 # The server binds to 127.0.0.1 only. Reach it from your laptop with an SSH
 # tunnel (see tunnel.sh), exactly like the Ollama path — no public ingress.
@@ -38,6 +47,7 @@ TP="${TP:-4}"
 PORT="${PORT:-8000}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"
+TOOL_PARSER="${TOOL_PARSER:-qwen3_coder}"
 VLLM_ENV="${VLLM_ENV:-$HOME/vllm-env}"
 
 # Logs are written under the repo's gitignored logs dir (self-hosted/vllm/logs/)
@@ -53,6 +63,13 @@ info()   { echo -e "${BLUE}[info]${RESET}  $1"; }
 ok()     { echo -e "${GREEN}[ok]${RESET}    $1"; }
 warn()   { echo -e "${YELLOW}[warn]${RESET}  $1"; }
 fail()   { echo -e "${RED}[fail]${RESET}  $1"; exit 1; }
+
+# --help: print the header comment block (env vars + options) and exit.
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  sed -n '5,41p' "$0" | sed 's/^# \{0,1\}//; s/^#$//'
+  echo "Options: --foreground|-f  (run in foreground)   --stop  (stop + free GPUs)"
+  exit 0
+fi
 
 # --stop: kill the background server (launcher + tee + vLLM workers) and free GPUs.
 if [[ "${1:-}" == "--stop" ]]; then
@@ -115,6 +132,14 @@ ARGS=(
   --max-model-len "$MAX_MODEL_LEN"
   --gpu-memory-utilization "$GPU_MEM_UTIL"
 )
+
+# Enable tool calling unless explicitly disabled — agentic clients need it.
+if [[ -n "$TOOL_PARSER" && "$TOOL_PARSER" != "none" ]]; then
+  ARGS+=( --enable-auto-tool-choice --tool-call-parser "$TOOL_PARSER" )
+  info "Tools:        enabled (parser: $TOOL_PARSER)"
+else
+  info "Tools:        disabled (plain completion server)"
+fi
 
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/vllm-serve.log"
