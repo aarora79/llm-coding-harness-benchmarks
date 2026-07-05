@@ -30,3 +30,8 @@ When a task is unscoped, the source worth reading lives under:
 
 - **Markdown:** do not hard-wrap prose. Write each paragraph as a single line and let the renderer soft-wrap. Tables, code fences, and lists are unaffected.
 - Match the style of surrounding code; keep changes minimal and scoped to the task.
+
+## Git rules
+
+- **Never commit directly to `main`.** Always create a feature branch and open a PR.
+- **Never merge PRs directly to `main`.** Use a PR review workflow with an approved merge.
