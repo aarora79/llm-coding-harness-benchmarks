@@ -35,3 +35,4 @@ security-review-findings.xlsx
 .mantle-token
 .DS_Store
 .venv/
+tmp/
