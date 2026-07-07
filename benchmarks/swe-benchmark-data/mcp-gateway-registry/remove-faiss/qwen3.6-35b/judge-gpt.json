@@ -1,0 +1,40 @@
+{
+  "task": "remove-faiss",
+  "model": "qwen3.6-35b",
+  "scores": {
+    "github_issue": {
+      "completeness": 21,
+      "correctness": 19,
+      "specificity": 20,
+      "risk_awareness": 14,
+      "total": 74,
+      "notes": "Good scope and acceptance criteria, with many concrete files and symbols. Some overbroad cleanup requirements conflict with preserving historical release notes, and risk/cutover handling is fairly thin."
+    },
+    "lld": {
+      "completeness": 23,
+      "correctness": 21,
+      "specificity": 24,
+      "risk_awareness": 21,
+      "total": 89,
+      "notes": "Very detailed file map, line references, code diffs, config defaults, tests, docs, metrics, and rollout. Minor concerns around deleting migration tooling, compatibility for STORAGE_BACKEND=file, and some database metrics cleanup details."
+    },
+    "review": {
+      "completeness": 21,
+      "correctness": 22,
+      "specificity": 21,
+      "risk_awareness": 22,
+      "total": 86,
+      "notes": "Strong review that catches historical release note risk, Docker/Helm checks, config validation, and migration-script ambiguity. Mostly actionable."
+    },
+    "testing": {
+      "completeness": 20,
+      "correctness": 15,
+      "specificity": 20,
+      "risk_awareness": 17,
+      "total": 72,
+      "notes": "Covers grep, imports, docs, factory behavior, and deployment surfaces. Contains some faulty snippets and inconsistencies, including missing imports and conflicting expectations around historical release notes."
+    }
+  },
+  "task_score": 80.25,
+  "verdict": "Strong design overall. The LLD is the standout artifact; testing and issue wording need cleanup around historical docs and a few executable command details."
+}

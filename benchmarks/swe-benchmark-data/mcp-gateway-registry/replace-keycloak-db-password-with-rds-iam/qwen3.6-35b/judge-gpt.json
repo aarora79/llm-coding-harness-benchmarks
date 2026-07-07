@@ -1,0 +1,40 @@
+{
+  "task": "replace-keycloak-db-password-with-rds-iam",
+  "model": "qwen3.6-35b",
+  "scores": {
+    "github_issue": {
+      "completeness": 18,
+      "correctness": 7,
+      "specificity": 17,
+      "risk_awareness": 13,
+      "total": 55,
+      "notes": "Ambitious and specific, but contains serious AWS/MySQL correctness problems, including the wrong Terraform attribute for IAM database auth and underdeveloped Keycloak runtime-token handling."
+    },
+    "lld": {
+      "completeness": 18,
+      "correctness": 5,
+      "specificity": 19,
+      "risk_awareness": 11,
+      "total": 53,
+      "notes": "Detailed but deeply flawed. Uses incorrect IAM auth attributes and rds-db ARN construction, assumes AWS CLI/boto3 in the Keycloak image, uses wrong token-generation parameters, has questionable MySQL IAM user SQL, and does not solve token refresh for connection pools."
+    },
+    "review": {
+      "completeness": 17,
+      "correctness": 14,
+      "specificity": 16,
+      "risk_awareness": 21,
+      "total": 68,
+      "notes": "The review catches several real blockers: AWS CLI availability, master password migration, token expiry, token-in-env exposure, and missing parallel rollout. It still misses important AWS specifics like the wrong Terraform field and ARN format."
+    },
+    "testing": {
+      "completeness": 17,
+      "correctness": 8,
+      "specificity": 18,
+      "risk_awareness": 16,
+      "total": 59,
+      "notes": "Covers many surfaces, but many checks encode the flawed design: EnableHttpAuthentication, likely wrong IAM role/resource names, weak token-refresh validation, and commands that are unlikely to work in a real ECS/RDS deployment."
+    }
+  },
+  "task_score": 58.75,
+  "verdict": "Weak for a high-difficulty IAM auth migration. The artifacts are detailed, but the core design would not be safe or likely to work without major re-architecture."
+}

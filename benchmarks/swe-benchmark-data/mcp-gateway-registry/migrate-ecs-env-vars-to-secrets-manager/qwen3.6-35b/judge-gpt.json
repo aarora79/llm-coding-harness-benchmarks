@@ -1,0 +1,40 @@
+{
+  "task": "migrate-ecs-env-vars-to-secrets-manager",
+  "model": "qwen3.6-35b",
+  "scores": {
+    "github_issue": {
+      "completeness": 20,
+      "correctness": 14,
+      "specificity": 18,
+      "risk_awareness": 16,
+      "total": 68,
+      "notes": "Identifies many sensitive variables and correct ECS secrets-block direction. The major flaw is claiming Terraform state exposure is solved while proposing Terraform-managed secret versions sourced from variables, which still places secret values in state."
+    },
+    "lld": {
+      "completeness": 20,
+      "correctness": 9,
+      "specificity": 20,
+      "risk_awareness": 13,
+      "total": 62,
+      "notes": "Very detailed but technically risky. It has unconditional references to counted secrets, duplicate secret entries, inconsistent resource names, missing/incorrect conditional gates, and the same Terraform-state leakage problem via secret_string."
+    },
+    "review": {
+      "completeness": 18,
+      "correctness": 12,
+      "specificity": 16,
+      "risk_awareness": 18,
+      "total": 64,
+      "notes": "Surfaces useful concerns around IAM policy size, Docker Compose, high-value secrets, and rollout size, but misses the central state-leak problem and includes some questionable claims such as random_password regenerating on every apply."
+    },
+    "testing": {
+      "completeness": 18,
+      "correctness": 10,
+      "specificity": 17,
+      "risk_awareness": 13,
+      "total": 58,
+      "notes": "Broad but fragile. Several Terraform plan assertions are unrealistic, state-leak checks are misleading, commands are not reliably executable, and it does not catch the conditional-count and duplicate-secret correctness issues."
+    }
+  },
+  "task_score": 63,
+  "verdict": "Below average for a high-difficulty secrets migration. It is specific, but the proposed pattern does not actually remove secrets from Terraform state and would likely produce Terraform/ECS definition errors."
+}

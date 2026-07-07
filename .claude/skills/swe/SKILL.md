@@ -723,3 +723,7 @@ This skill is a benchmark. Each model run must be completely independent so arti
 - **The only allowed code source** is the cloned target repo at `benchmarks/swe-benchmark-data/{repo-name}/repo/`. Read that thoroughly; ignore everything else under `benchmarks/`.
 
 If the user explicitly asks you to compare with prior runs after artifacts are written, that is a separate request — done after the four artifacts are saved, not during their production.
+
+### Self-Review (CRITICAL)
+
+After writing all four artifact files (`github-issue.md`, `lld.md`, `review.md`, `testing.md`), go back and re-read each one against the original task description and clarifying answers. Verify you have not missed any requirement, acceptance criterion, or constraint that was stated earlier. If you find a gap, fix the artifact immediately before presenting the summary in Step 9. Do not rely on memory alone — re-read the task inputs and cross-check.

@@ -1,0 +1,40 @@
+{
+  "task": "ssrf-hardening-outbound-url-validation",
+  "model": "qwen3.6-35b",
+  "scores": {
+    "github_issue": {
+      "completeness": 20,
+      "correctness": 17,
+      "specificity": 19,
+      "risk_awareness": 17,
+      "total": 73,
+      "notes": "Identifies major outbound paths and blocked ranges. However, redirect handling is ambiguous and DNS rebinding is pushed out of scope despite being central to robust SSRF defense."
+    },
+    "lld": {
+      "completeness": 19,
+      "correctness": 13,
+      "specificity": 20,
+      "risk_awareness": 14,
+      "total": 66,
+      "notes": "Useful utility design and integration map, but security correctness is weak: redirects are not decided, blocking uses synchronous DNS without timeout, TOCTOU/DNS rebinding remains, schemes are not explicitly constrained, and MCP URL construction coverage is incomplete."
+    },
+    "review": {
+      "completeness": 20,
+      "correctness": 21,
+      "specificity": 17,
+      "risk_awareness": 22,
+      "total": 80,
+      "notes": "The review correctly flags redirect bypass as critical, calls out MCP coverage gaps, DNS failures, and user-facing error leakage. It is the strongest artifact for this task."
+    },
+    "testing": {
+      "completeness": 18,
+      "correctness": 13,
+      "specificity": 19,
+      "risk_awareness": 16,
+      "total": 66,
+      "notes": "Good range of unit cases and integration ideas, but the pytest fixture structure is flawed, redirect testing is vague, MCP client coverage is thin, and some allowed IP examples are reserved documentation ranges."
+    }
+  },
+  "task_score": 71.25,
+  "verdict": "Moderate design with a strong review artifact. The core SSRF proposal needs revision before implementation because redirect and DNS-resolution behavior are not secure enough."
+}

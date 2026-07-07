@@ -22,7 +22,7 @@ This repository does **two** things, in this order:
    can swap models freely, the next question is: which model is good enough for
    which task? The repo ships two complementary evaluation modes — the
    **`/swe` skill**, a per-task Software Engineering benchmark you point at any
-   GitHub repo (5 tasks × 5 models already populated for `mcp-gateway-registry`,
+   GitHub repo (5 tasks × 6 models already populated for `mcp-gateway-registry`,
    GPT-judged), and the **HumanEval benchmark**, a single-function `pass@1`
    suite with published cross-model results.
 
@@ -82,7 +82,7 @@ you're trying to answer:
 - An interactive **model picker** and per-model launch scripts
 - A **`/swe` skill** for repo-grounded SWE benchmarking, plus a **`/summarize`** skill for after-action reporting (token usage, errors, themes per run)
 - A reproducible **HumanEval benchmark** with cross-model pass@1 + per-token-cost numbers
-- A **GPT-judged 5×5 SWE matrix** comparing model quality on real refactor / security tasks (full matrix and findings in [Evaluation 1 → Worked example](#worked-example-mcp-gateway-registry) below). At a glance (avg % across 5 tasks, scored 0–100):
+- A **GPT-judged 5×6 SWE matrix** comparing model quality on real refactor / security tasks (full matrix and findings in [Evaluation 1 → Worked example](#worked-example-mcp-gateway-registry) below). At a glance (avg % across 5 tasks, scored 0–100):
 
   | Rank | Model | Avg score |
   |-----:|-------|----------:|
@@ -91,6 +91,7 @@ you're trying to answer:
   | 🥉 | Qwen Coder Next | 79.80% |
   | 4 | Mistral Devstral 2 123B | 75.95% |
   | 5 | MiniMax M2.5 | 74.70% |
+  | 6 | Qwen 3.6 35B (self-hosted) | 69.70% |
 
 ## Architecture
 
@@ -223,7 +224,7 @@ points per criterion, summing to 100**:
 Calibration: the judge is instructed that a median artifact should score around
 60–70, not 85; 90+ is reserved for genuinely excellent work; hallucinated files
 or functions lose at least 10 points off Correctness. Results are reported in
-a 5×5 matrix (rows = tasks, columns = models). Per-cell JSON with criterion
+a 5×6 matrix (rows = tasks, columns = models). Per-cell JSON with criterion
 breakdowns and judge notes lives at `{task}/{model}/judge-gpt.json`. The
 aggregated matrix + synthesis is in
 [`benchmarks/swe-benchmark-data/mcp-gateway-registry/JUDGE_RESULTS.md`](benchmarks/swe-benchmark-data/mcp-gateway-registry/JUDGE_RESULTS.md).
@@ -233,7 +234,7 @@ aggregated matrix + synthesis is in
 The repo ships a fully-populated worked example so you can see the harness
 producing real artifacts before pointing it at your own code. The example
 target is [agentic-community/mcp-gateway-registry](https://github.com/agentic-community/mcp-gateway-registry)
-at tag `1.24.4`, with **5 tasks × 5 models = 25 artifact bundles** on disk:
+at tag `1.24.4`, with **5 tasks × 6 models = 30 artifact bundles** on disk:
 
 | # | Problem | Difficulty | Source |
 |---|---------|-----------|--------|
@@ -243,8 +244,7 @@ at tag `1.24.4`, with **5 tasks × 5 models = 25 artifact bundles** on disk:
 | 4 | `migrate-ecs-env-vars-to-secrets-manager` | High | Upstream [#1134](https://github.com/agentic-community/mcp-gateway-registry/issues/1134) |
 | 5 | `replace-keycloak-db-password-with-rds-iam` | High | Upstream [#1303](https://github.com/agentic-community/mcp-gateway-registry/issues/1303) |
 
-**Models benchmarked:** Claude Opus 4.8, Kimi K2 Thinking / K2.5, Mistral
-Devstral 2 123B, MiniMax M2.5, Qwen Coder Next.
+**Models benchmarked:** Claude Opus 4.8, Kimi K2 Thinking / K2.5, Mistral Devstral 2 123B, MiniMax M2.5, Qwen Coder Next (all via Bedrock proxy), and Qwen 3.6 35B (self-hosted, vLLM on g6e.12xlarge).
 
 **Cross-model scores (GPT-judged):** each artifact bundle was scored 0–100 by
 an independent ChatGPT session against the [4-criterion × 25-point rubric](#scoring-rubric-llm-as-judge)
@@ -252,21 +252,20 @@ above. Per-cell breakdowns with criterion scores and judge notes are in
 `{task}/{model}/judge-gpt.json`; the consolidated report is in
 [`benchmarks/swe-benchmark-data/mcp-gateway-registry/JUDGE_RESULTS.md`](benchmarks/swe-benchmark-data/mcp-gateway-registry/JUDGE_RESULTS.md).
 
-#### Results — 5 × 5 matrix
+#### Results — 5 × 6 matrix
 
 All cells are percentages (0–100%), averaged across the 4 artifacts per (task × model). Bold = top score in row.
 
-| Task | Opus 4.8 | Kimi¹ | Devstral 123B | MiniMax M2.5 | Qwen Coder Next | Task avg |
-|------|---------:|------:|--------------:|-------------:|----------------:|---------:|
-| `remove-faiss` | **90.8%** | 87.8% ᵀ | 77.8% | 73.5% | 80.8% | 82.1% |
-| `remove-efs-from-terraform-aws-ecs` | **90.8%** | 83.5% ᵀ | 83.8% | 76.0% | 80.2% | 82.8% |
-| `ssrf-hardening-outbound-url-validation` | **90.0%** | 66.2% ᵀ | 70.5% | 69.2% | 85.8% | 76.3% |
-| `migrate-ecs-env-vars-to-secrets-manager` | **90.5%** | 87.0% ⁵ | 75.0% | 78.5% | 80.8% | 82.3% |
-| `replace-keycloak-db-password-with-rds-iam` | **87.8%** | 86.2% ⁵ | 72.8% | 76.2% | 71.5% | 78.9% |
+| Task | Opus 4.8 | Kimi¹ | Devstral 123B | MiniMax M2.5 | Qwen Coder Next | Qwen 3.6 35B² | Task avg |
+|------|----------:|-------:|--------------:|-------------:|----------------:|---------------:|---------:|
+| `remove-faiss` | **90.8%** | 87.8% ᵀ | 77.8% | 73.5% | 80.8% | 80.2% | 81.8% |
+| `remove-efs-from-terraform-aws-ecs` | **90.8%** | 83.5% ᵀ | 83.8% | 76.0% | 80.2% | 75.2% | 81.6% |
+| `ssrf-hardening-outbound-url-validation` | **90.0%** | 66.2% ᵀ | 70.5% | 69.2% | 85.8% | 71.2% | 75.5% |
+| `migrate-ecs-env-vars-to-secrets-manager` | **90.5%** | 87.0% ⁵ | 75.0% | 78.5% | 80.8% | 63.0% | 79.1% |
+| `replace-keycloak-db-password-with-rds-iam` | **87.8%** | 86.2% ⁵ | 72.8% | 76.2% | 71.5% | 58.8% | 75.5% |
 
-¹ Kimi variant: ᵀ = K2 Thinking (tasks 1–3), ⁵ = K2.5 (tasks 4–5;
-substituted mid-benchmark after K2 Thinking's Bedrock backend started
-hanging requests).
+¹ Kimi variant: ᵀ = K2 Thinking (tasks 1–3), ⁵ = K2.5 (tasks 4–5; substituted mid-benchmark after K2 Thinking's Bedrock backend started hanging requests).
+² Qwen 3.6 35B ran self-hosted via vLLM on g6e.12xlarge (4x L40S), not through the Bedrock proxy.
 
 #### Per-model leaderboard
 
@@ -277,6 +276,7 @@ hanging requests).
 | 🥉 | Qwen Coder Next | 79.80% | 5 |
 | 4 | Mistral Devstral 2 123B | 75.95% | 5 |
 | 5 | MiniMax M2.5 | 74.70% | 5 |
+| 6 | Qwen 3.6 35B (self-hosted) | 69.70% | 5 |
 
 #### What the data says
 
@@ -296,10 +296,8 @@ hanging requests).
   (85.8%), weakest on Keycloak IAM (71.5%, lost points to hallucinated AWS
   mechanics — judge flagged "impossible ideas such as Lambda valueFrom for
   ECS secrets").
-- **20× cost spread → ~15-point quality spread.** At the top of the field,
-  the budget models are genuinely good enough for routine refactors and
-  code-heavy work; frontier reasoning earns its premium on AWS-specific
-  infrastructure design.
+- **Qwen 3.6 35B (self-hosted) is usable on bounded cleanup, drops on AWS-heavy tasks.** Scored 80.2% on FAISS removal and 75.2% on EFS removal but fell to 63.0% and 58.8% on the two High-difficulty AWS infrastructure tasks. The smaller parameter count shows up when the design requires multi-service Terraform orchestration.
+- **20× cost spread → ~21-point quality spread.** At the top of the field, the budget models are genuinely good enough for routine refactors and code-heavy work; frontier reasoning earns its premium on AWS-specific infrastructure design.
 
 > **The example repo is the example, not the contract.** `/swe` works against
 > any GitHub URL — clone the target you actually care about, write the task
@@ -405,7 +403,7 @@ claude-code-multi-model/
 │       ├── README.md          5-task list, /swe invocation steps, 4×25 rubric
 │       └── mcp-gateway-registry/
 │           ├── repo/          (gitignored — contributor clones source here)
-│           ├── JUDGE_RESULTS.md       Consolidated 5×5 matrix + synthesis
+│           ├── JUDGE_RESULTS.md       Consolidated 5×6 matrix + synthesis
 │           ├── remove-faiss/
 │           │   └── {model}/           github-issue.md, lld.md, review.md, testing.md, judge-gpt.json
 │           ├── remove-efs-from-terraform-aws-ecs/

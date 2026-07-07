@@ -407,7 +407,26 @@ export G6E_KEY=~/.ssh/<your-key>.pem
 LOCAL_MODEL_PORT=8000 ../ollama/scripts/tunnel.sh start   # forwards localhost:8000 → EC2:8000
 ```
 
-Then point any OpenAI-compatible client (including Claude Code, opencode, or `curl`) at `http://localhost:8000/v1`.
+Then point any compatible client at `http://localhost:8000/v1`.
+
+---
+
+## Drive Claude Code
+
+vLLM exposes an Anthropic-compatible `/v1/messages` endpoint, so Claude Code can use the self-hosted model directly. Use the launcher below instead of editing global Claude settings:
+
+```bash
+cd self-hosted/vllm/scripts
+./claude-local.sh -p "Reply with exactly: claude-vllm-ok"
+```
+
+The launcher detects the served model name from `/v1/models`, passes a temporary Claude Code settings file, disables Bedrock for the session, and caps `CLAUDE_CODE_MAX_OUTPUT_TOKENS` to `4096`.
+
+The output cap matters because the default vLLM serve profile uses a 32K context window. Claude Code otherwise requests 32K output tokens, which can exceed the served context once the prompt is included. Override it only when you serve a larger context:
+
+```bash
+CLAUDE_MAX_OUTPUT_TOKENS=8192 ./claude-local.sh
+```
 
 ---
 
@@ -453,6 +472,7 @@ Verified working end-to-end on the reference node: opencode's `build` agent driv
 | [scripts/vllm-install.sh](scripts/vllm-install.sh) | Full install: driver check → apt deps → uv → venv → vLLM → monitoring → GPU verify |
 | [scripts/vllm-serve.sh](scripts/vllm-serve.sh) | Serve a model tensor-parallel across all GPUs; tee's logs; `--foreground` / `--stop` |
 | [scripts/vllm-verify.sh](scripts/vllm-verify.sh) | Smoke-test the endpoint with a real chat completion |
+| [scripts/claude-local.sh](scripts/claude-local.sh) | Launch Claude Code against the vLLM endpoint with temporary settings |
 | [scripts/opencode-setup.sh](scripts/opencode-setup.sh) | Install opencode (if missing) + point it at the vLLM endpoint |
 | [clients/hello_inference.py](clients/hello_inference.py) | Minimal Python inference client (openai SDK) |
 | [pyproject.toml](pyproject.toml) | `uv`-managed deps for the Python clients |

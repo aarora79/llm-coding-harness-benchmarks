@@ -98,7 +98,7 @@ artifact:
 **Artifact total = sum of 4 criteria (0–100).**
 **Task score = mean of the 4 artifact totals.**
 
-Results are reported in a 5×5 matrix (rows = tasks, columns = models). Per-cell
+Results are reported in a 5×6 matrix (rows = tasks, columns = models). Per-cell
 JSON with criterion breakdowns and judge notes lives at
 `{task}/{model}/judge-gpt.json`. The aggregated matrix + synthesis is in
 [`mcp-gateway-registry/JUDGE_RESULTS.md`](mcp-gateway-registry/JUDGE_RESULTS.md).

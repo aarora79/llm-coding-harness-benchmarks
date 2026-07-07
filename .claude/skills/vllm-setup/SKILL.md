@@ -22,8 +22,9 @@ All the underlying logic lives in [`self-hosted/vllm/scripts/`](../../../self-ho
 3. **Install** — run `vllm-install.sh`, report each layer
 4. **Serve** — run `vllm-serve.sh` (tool calling ON) with the chosen model
 5. **Verify** — run `vllm-verify.sh`, show the real inference round-trip
-6. **Drive an agent** — offer opencode via `opencode-setup.sh` (idempotent)
-7. **Report** — summarize, show how to monitor and stop
+6. **Drive Claude Code** — verify Claude Code against the vLLM endpoint
+7. **Drive another agent** — optionally offer opencode via `opencode-setup.sh` (idempotent)
+8. **Report** — summarize, show how to monitor and stop
 
 Keep the SSH-tunnel / client-connection steps for after inference is confirmed; the goal of this skill is a working local endpoint on the instance.
 
@@ -99,7 +100,20 @@ cd self-hosted/vllm/scripts
 
 Show the user the model's actual reply and the prompt/completion token counts. This proves the endpoint serves real tokens. Be explicit that the single-request tokens/sec here is **not** the throughput number — batched concurrency is much higher (cite the concurrency figure from Step 4).
 
-## Step 6 — Drive a coding agent with opencode
+## Step 6 — Drive Claude Code
+
+Now that raw inference works, verify Claude Code itself against the vLLM endpoint:
+
+```bash
+cd self-hosted/vllm/scripts
+./claude-local.sh -p "Reply with exactly: claude-vllm-ok"
+```
+
+The launcher uses a temporary settings file and sets `CLAUDE_CODE_MAX_OUTPUT_TOKENS=4096`. This cap is required for the default 32K served context; Claude Code's default 32K output request can exceed vLLM's context limit after the prompt is included.
+
+If this fails with a context-length error, lower `CLAUDE_MAX_OUTPUT_TOKENS` or restart vLLM with a larger `MAX_MODEL_LEN` plus the model-appropriate rope scaling.
+
+## Step 7 — Drive a coding agent with opencode
 
 Now that raw inference works, offer to wire up opencode so the user can run a real agentic session against the self-hosted model. Ask first:
 
@@ -133,6 +147,7 @@ Summarize:
 
 - node (instance type, GPUs, VRAM), model served, `served-model-name`, port
 - that the OpenAI-compatible API is live at `http://127.0.0.1:8000/v1`
+- Claude Code status (verified with `claude-local.sh`?)
 - opencode status (installed?, provider wired, verified)
 - how to monitor: `nvtop`, `~/vllm-env/bin/gpustat -i 1`
 - how to stop: `./vllm-serve.sh --stop`

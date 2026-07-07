@@ -1,0 +1,40 @@
+{
+  "task": "remove-efs-from-terraform-aws-ecs",
+  "model": "qwen3.6-35b",
+  "scores": {
+    "github_issue": {
+      "completeness": 20,
+      "correctness": 18,
+      "specificity": 19,
+      "risk_awareness": 17,
+      "total": 74,
+      "notes": "Good Terraform surface identification: storage module, ECS volumes, variables, outputs, README, and scripts. Some assumptions about scopes.yml and plan output are not fully resolved."
+    },
+    "lld": {
+      "completeness": 21,
+      "correctness": 17,
+      "specificity": 21,
+      "risk_awareness": 18,
+      "total": 77,
+      "notes": "Concrete file-by-file removal plan with useful line ranges. Correctly handles ECS volume removal and outputs, but includes questionable AWS/EFS lifecycle claims and leaves scopes initialization/app log path as unresolved risks."
+    },
+    "review": {
+      "completeness": 19,
+      "correctness": 19,
+      "specificity": 18,
+      "risk_awareness": 21,
+      "total": 77,
+      "notes": "Good operational review, especially data-loss warnings, script dependencies, and scopes.yml availability. Less concrete than the LLD but useful."
+    },
+    "testing": {
+      "completeness": 19,
+      "correctness": 15,
+      "specificity": 20,
+      "risk_awareness": 19,
+      "total": 73,
+      "notes": "Covers validate, plan, grep, outputs, variables, and rollback. Several expectations are shaky: existing state should show EFS destruction, plan grep expectations conflict with destruction, and some Terraform init/state assumptions are under-specified."
+    }
+  },
+  "task_score": 75.25,
+  "verdict": "Solid medium-quality infrastructure design. It is actionable, but needs a more precise live-migration story for EFS destruction and scopes initialization."
+}
