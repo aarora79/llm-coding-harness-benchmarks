@@ -53,7 +53,6 @@ export ANTHROPIC_BASE_URL="http://${HOST}:${PORT}"
 export ANTHROPIC_API_KEY="local"
 export CLAUDE_CODE_USE_BEDROCK="0"
 export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS}"
-export DISABLE_PROMPT_CACHING="1"
 export DISABLE_NON_ESSENTIAL_MODEL_CALLS="1"
 
 CLAUDE_ARGS=(--model "$MODEL" --setting-sources local,project)
