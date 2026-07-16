@@ -9,13 +9,20 @@ benchmarks/swe-benchmark-data/
 ├── README.md                       # This file
 └── {repo-name}/
     ├── repo/                       # Cloned source (gitignored - cloned by contributor, never committed)
+    ├── JUDGE_RESULTS.md            # Aggregated score matrix + leaderboard + synthesis
+    ├── reports/                    # Generated charts (run generate-report.py)
     ├── {problem-name}/
+    │   ├── implementations/        # Shared spec + per-model code implementations
+    │   │   ├── spec.md            # Best LLD used as input for /implement runs
+    │   │   └── {model-name}/      # Code output from /implement
     │   ├── {model-name-A}/         # Artifacts produced by model A on this problem
-    │   │   ├── github-issue.md
-    │   │   ├── lld.md
-    │   │   ├── review.md
-    │   │   └── testing.md
-    │   └── {model-name-B}/         # Artifacts produced by model B on the same problem
+    │   │   ├── github-issue.md    # GitHub issue specification
+    │   │   ├── lld.md             # Low-level design
+    │   │   ├── review.md          # Multi-persona expert review
+    │   │   ├── testing.md         # Testing plan
+    │   │   ├── eval.json          # Evaluation scores (from independent judge)
+    │   │   └── metrics.json       # Token/cost/throughput metrics (if collected)
+    │   └── {model-name-B}/
     │       └── ...
     └── {next-problem-name}/
         └── ...
