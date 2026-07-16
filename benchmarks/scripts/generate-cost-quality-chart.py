@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate Cost vs Quality scatter plot from benchmark data.
 
-Plots each model's average quality score (from judge-gpt.json) against its
+Plots each model's average quality score (from judge.json) against its
 effective cost per 1M input tokens. Self-hosted models use instance cost
 divided by throughput; API models use published pricing.
 
@@ -105,7 +105,7 @@ MODEL_COSTS = {
 
 
 def load_quality_scores():
-    """Load average quality score per model from judge-gpt.json files."""
+    """Load average quality score per model from judge.json files."""
     scores = {}
     for task_dir in BENCH_DIR.iterdir():
         if not task_dir.is_dir() or task_dir.name in SKIP_DIRS:
@@ -113,7 +113,7 @@ def load_quality_scores():
         for model_dir in task_dir.iterdir():
             if not model_dir.is_dir():
                 continue
-            judge_file = model_dir / "judge-gpt.json"
+            judge_file = model_dir / "judge.json"
             if not judge_file.exists():
                 continue
             with open(judge_file) as f:

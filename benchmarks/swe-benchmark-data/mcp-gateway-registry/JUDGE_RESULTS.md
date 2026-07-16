@@ -1,6 +1,6 @@
 # Judge Results
 
-Scores are 0-100 task averages from the four artifact totals in each `judge-gpt.json`.
+Scores are 0-100 task averages from the four artifact totals in each `judge.json`.
 
 ## Final Matrix
 

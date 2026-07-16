@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate benchmark report charts from judge-gpt.json files.
+"""Generate benchmark report charts from judge.json files.
 
 Reads all judge results, produces:
 1. Score matrix heatmap (tasks × models)
@@ -59,7 +59,7 @@ SKIP_DIRS = {"repo", "implementations"}
 
 
 def load_all_scores():
-    """Load all judge-gpt.json files into a DataFrame."""
+    """Load all judge.json files into a DataFrame."""
     rows = []
     for task_dir in BENCH_DIR.iterdir():
         if not task_dir.is_dir() or task_dir.name in SKIP_DIRS:
@@ -68,7 +68,7 @@ def load_all_scores():
         for model_dir in task_dir.iterdir():
             if not model_dir.is_dir():
                 continue
-            judge_file = model_dir / "judge-gpt.json"
+            judge_file = model_dir / "judge.json"
             if not judge_file.exists():
                 continue
             with open(judge_file) as f:
