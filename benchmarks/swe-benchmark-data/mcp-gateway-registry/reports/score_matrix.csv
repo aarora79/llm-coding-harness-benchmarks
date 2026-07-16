@@ -1,0 +1,6 @@
+task,claude-opus-4-8,kimi-k2-thinking,kimi-k2-5,qwen-qwen3-coder-next,qwen3.6-35b,glm-5.2,kimi-k2-7-code,mistral-devstral-2-123b,minimax-m2-5
+remove-faiss,89.0,90.5,,78.75,75.0,76.5,73.5,68.5,67.5
+remove-efs-from-terraform-aws-ecs,90.25,86.75,,68.75,70.75,80.75,76.75,77.5,64.25
+ssrf-hardening-outbound-url-validation,88.0,80.5,,78.5,82.5,82.25,78.25,63.25,70.0
+migrate-ecs-env-vars-to-secrets-manager,89.25,,87.0,82.25,78.75,60.25,75.25,68.0,70.25
+replace-keycloak-db-password-with-rds-iam,85.75,,80.25,76.5,66.25,68.25,64.25,62.25,65.0
