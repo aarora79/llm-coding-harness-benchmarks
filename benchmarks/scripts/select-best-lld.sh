@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# select-best-lld.sh — Copy the best LLD as spec.md for implementation benchmarks
+# select-best-lld.sh - Copy the best LLD as spec.md for implementation benchmarks
 #
 # Usage:
 #   ./select-best-lld.sh <repo-name> <problem-name> <source-model>
@@ -38,5 +38,5 @@ if [[ -f "$SPEC_FILE" ]]; then
 fi
 
 cp "$SOURCE_LLD" "$SPEC_FILE"
-echo "[done] Copied LLD from ${SOURCE_MODEL} → ${SPEC_FILE}"
+echo "[done] Copied LLD from ${SOURCE_MODEL} -> ${SPEC_FILE}"
 echo "       $(wc -l < "$SPEC_FILE") lines"

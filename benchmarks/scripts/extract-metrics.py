@@ -4,7 +4,7 @@
 Parses session transcripts to compute per-run metrics:
 - Input/output/thinking tokens
 - Cache read/write tokens
-- Cost (computed from wall-clock × instance cost for self-hosted)
+- Cost (computed from wall-clock x instance cost for self-hosted)
 - Tool call count
 - Error count
 - Prompt/generation throughput (tokens/sec)
@@ -18,15 +18,98 @@ The script updates an existing metrics.json with token/cache/throughput fields.
 """
 
 import json
-import sys
+import logging
 import os
-import glob
-from pathlib import Path
+import sys
 from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s,p%(process)s,{%(filename)s:%(lineno)d},%(levelname)s,%(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
-def find_session_jsonl(session_id=None, latest=False):
-    """Find session JSONL file."""
+def _resolve_paths(argv: list[str]) -> tuple[Path | None, str | None]:
+    """Resolve the session JSONL path and metrics path from raw argv.
+
+    Preserves the original CLI contract: supports the --latest and
+    --session-id flags as well as a positional session-JSONL path.
+
+    Args:
+        argv: The full process argument vector (including argv[0]).
+
+    Returns:
+        A tuple of (jsonl_path, metrics_path). Either element may be None
+        when it cannot be resolved or was not supplied.
+    """
+    args = argv[1:]
+
+    if args[0] == "--latest":
+        jsonl_path = find_session_jsonl(latest=True)
+        metrics_path = args[1] if len(args) > 1 else None
+    elif args[0] == "--session-id":
+        jsonl_path = find_session_jsonl(session_id=args[1])
+        metrics_path = args[2] if len(args) > 2 else None
+    else:
+        jsonl_path = Path(args[0])
+        metrics_path = args[1] if len(args) > 1 else None
+
+    return jsonl_path, metrics_path
+
+
+def _log_extracted_metrics(extracted: dict[str, Any]) -> None:
+    """Log a human-readable summary of the extracted metrics.
+
+    Args:
+        extracted: The metrics dictionary produced by extract_from_jsonl.
+    """
+    logger.info("  API calls: %s", extracted["api_calls"])
+    logger.info("  Input tokens: %s", f"{extracted['input_tokens']:,}")
+    logger.info("  Output tokens: %s", f"{extracted['output_tokens']:,}")
+    logger.info("  Cache read: %s", f"{extracted['cache_read_tokens']:,}")
+    logger.info("  Cache write: %s", f"{extracted['cache_write_tokens']:,}")
+    logger.info("  Tool calls: %s", extracted["tool_calls"])
+    logger.info("  Errors: %s", extracted["errors"])
+
+
+def _report_result(metrics_path: str | None, extracted: dict[str, Any]) -> None:
+    """Persist and report metrics, or emit them as JSON to stdout.
+
+    When a metrics path is supplied the extracted values are merged into the
+    existing metrics.json and a summary is logged. Otherwise the extracted
+    metrics are printed as JSON (product output).
+
+    Args:
+        metrics_path: Path to the metrics.json to update, or None.
+        extracted: The metrics dictionary produced by extract_from_jsonl.
+    """
+    if not metrics_path:
+        print(json.dumps(extracted, indent=2))
+        return
+
+    updated = update_metrics_json(metrics_path, extracted)
+    logger.info("Updated: %s", metrics_path)
+    if "task_cost_usd" in updated:
+        logger.info("  Task cost: $%.4f", updated["task_cost_usd"])
+    if "cache_hit_rate" in updated:
+        logger.info("  Cache hit rate: %.1f%%", updated["cache_hit_rate"] * 100)
+
+
+def find_session_jsonl(
+    session_id: str | None = None, latest: bool = False
+) -> Path | None:
+    """Find a session JSONL file under the Claude projects directory.
+
+    Args:
+        session_id: If given, locate the JSONL file for this session id.
+        latest: If True, return the most recently modified JSONL file.
+
+    Returns:
+        The resolved JSONL path, or None if no match is found.
+    """
     base = Path.home() / ".claude" / "projects"
 
     if session_id:
@@ -41,9 +124,17 @@ def find_session_jsonl(session_id=None, latest=False):
     return None
 
 
-def extract_from_jsonl(jsonl_path):
-    """Parse a session JSONL and extract metrics."""
-    metrics = {
+def extract_from_jsonl(jsonl_path: Path) -> dict[str, Any]:
+    """Parse a session JSONL and extract metrics.
+
+    Args:
+        jsonl_path: Path to the session transcript JSONL file.
+
+    Returns:
+        A metrics dictionary with token counts, tool/error/API-call counts,
+        and derived wall-clock and throughput fields.
+    """
+    metrics: dict[str, Any] = {
         "input_tokens": 0,
         "output_tokens": 0,
         "thinking_tokens": 0,
@@ -56,9 +147,9 @@ def extract_from_jsonl(jsonl_path):
         "last_timestamp": None,
     }
 
-    with open(jsonl_path, "r") as f:
-        for line in f:
-            line = line.strip()
+    with open(jsonl_path, encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
             if not line:
                 continue
             try:
@@ -84,8 +175,12 @@ def extract_from_jsonl(jsonl_path):
                 metrics["api_calls"] += 1
                 metrics["input_tokens"] += usage.get("input_tokens", 0)
                 metrics["output_tokens"] += usage.get("output_tokens", 0)
-                metrics["cache_read_tokens"] += usage.get("cache_read_input_tokens", 0) or usage.get("cache_read", 0)
-                metrics["cache_write_tokens"] += usage.get("cache_creation_input_tokens", 0) or usage.get("cache_write", 0)
+                metrics["cache_read_tokens"] += usage.get(
+                    "cache_read_input_tokens", 0
+                ) or usage.get("cache_read", 0)
+                metrics["cache_write_tokens"] += usage.get(
+                    "cache_creation_input_tokens", 0
+                ) or usage.get("cache_write", 0)
 
             # Count tool uses
             entry_type = entry.get("type") or ""
@@ -106,8 +201,12 @@ def extract_from_jsonl(jsonl_path):
     # Compute wall clock from timestamps
     if metrics["first_timestamp"] and metrics["last_timestamp"]:
         try:
-            t1 = datetime.fromisoformat(metrics["first_timestamp"].replace("Z", "+00:00"))
-            t2 = datetime.fromisoformat(metrics["last_timestamp"].replace("Z", "+00:00"))
+            t1 = datetime.fromisoformat(
+                metrics["first_timestamp"].replace("Z", "+00:00")
+            )
+            t2 = datetime.fromisoformat(
+                metrics["last_timestamp"].replace("Z", "+00:00")
+            )
             metrics["wall_clock_seconds"] = (t2 - t1).total_seconds()
         except (ValueError, TypeError):
             pass
@@ -125,10 +224,22 @@ def extract_from_jsonl(jsonl_path):
     return metrics
 
 
-def update_metrics_json(metrics_path, extracted):
-    """Update an existing metrics.json with extracted data."""
+def update_metrics_json(metrics_path: str, extracted: dict[str, Any]) -> dict[str, Any]:
+    """Update an existing metrics.json with extracted data.
+
+    Non-null, non-zero extracted values are merged into the existing metrics.
+    Derived task cost and cache-hit-rate fields are computed when the required
+    inputs are present.
+
+    Args:
+        metrics_path: Path to the metrics.json to read and write.
+        extracted: The metrics dictionary produced by extract_from_jsonl.
+
+    Returns:
+        The merged metrics dictionary that was written to disk.
+    """
     if os.path.exists(metrics_path):
-        with open(metrics_path, "r") as f:
+        with open(metrics_path, encoding="utf-8") as f:
             existing = json.load(f)
     else:
         existing = {}
@@ -150,56 +261,29 @@ def update_metrics_json(metrics_path, extracted):
     if total_input > 0:
         existing["cache_hit_rate"] = round(cache_read / total_input, 3)
 
-    with open(metrics_path, "w") as f:
+    with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(existing, f, indent=2)
 
     return existing
 
 
-def main():
+def main() -> None:
+    """Parse arguments, extract metrics, and report or persist the result."""
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)
 
-    jsonl_path = None
-    metrics_path = None
-
-    args = sys.argv[1:]
-
-    if args[0] == "--latest":
-        jsonl_path = find_session_jsonl(latest=True)
-        metrics_path = args[1] if len(args) > 1 else None
-    elif args[0] == "--session-id":
-        jsonl_path = find_session_jsonl(session_id=args[1])
-        metrics_path = args[2] if len(args) > 2 else None
-    else:
-        jsonl_path = Path(args[0])
-        metrics_path = args[1] if len(args) > 1 else None
+    jsonl_path, metrics_path = _resolve_paths(sys.argv)
 
     if not jsonl_path or not jsonl_path.exists():
-        print(f"Error: Could not find session JSONL: {jsonl_path}", file=sys.stderr)
+        logger.error("Could not find session JSONL: %s", jsonl_path)
         sys.exit(1)
 
-    print(f"Extracting from: {jsonl_path}")
+    logger.info("Extracting from: %s", jsonl_path)
     extracted = extract_from_jsonl(jsonl_path)
 
-    print(f"  API calls: {extracted['api_calls']}")
-    print(f"  Input tokens: {extracted['input_tokens']:,}")
-    print(f"  Output tokens: {extracted['output_tokens']:,}")
-    print(f"  Cache read: {extracted['cache_read_tokens']:,}")
-    print(f"  Cache write: {extracted['cache_write_tokens']:,}")
-    print(f"  Tool calls: {extracted['tool_calls']}")
-    print(f"  Errors: {extracted['errors']}")
-
-    if metrics_path:
-        updated = update_metrics_json(metrics_path, extracted)
-        print(f"\nUpdated: {metrics_path}")
-        if "task_cost_usd" in updated:
-            print(f"  Task cost: ${updated['task_cost_usd']:.4f}")
-        if "cache_hit_rate" in updated:
-            print(f"  Cache hit rate: {updated['cache_hit_rate']*100:.1f}%")
-    else:
-        print(json.dumps(extracted, indent=2))
+    _log_extracted_metrics(extracted)
+    _report_result(metrics_path, extracted)
 
 
 if __name__ == "__main__":

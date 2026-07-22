@@ -2,13 +2,13 @@
 """Generate benchmark report charts from eval.json files.
 
 Reads all judge results, produces:
-1. Score matrix heatmap (tasks × models)
+1. Score matrix heatmap (tasks x models)
 2. Per-model bar chart (average scores)
 3. Per-task bar chart (difficulty ranking)
 4. Radar chart (per-criteria breakdown for top models)
 5. CSV export of all scores
 
-No LLM is used — this is purely data visualization from the JSON files.
+No LLM is used -- this is purely data visualization from the JSON files.
 
 Usage:
     python3 generate-report.py [--output-dir ./reports]
@@ -18,22 +18,29 @@ Requires: matplotlib, pandas (install with: pip install matplotlib pandas)
 
 import argparse
 import json
-import os
+import logging
 import sys
 from pathlib import Path
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s,p%(process)s,{%(filename)s:%(lineno)d},%(levelname)s,%(message)s",
+)
+logger = logging.getLogger(__name__)
+
 try:
     import matplotlib.pyplot as plt
-    import matplotlib.colors as mcolors
     import numpy as np
 except ImportError:
-    print("Error: matplotlib and numpy required. Install with: pip install matplotlib numpy", file=sys.stderr)
+    logger.error(
+        "matplotlib and numpy required. Install with: pip install matplotlib numpy"
+    )
     sys.exit(1)
 
 try:
     import pandas as pd
 except ImportError:
-    print("Error: pandas required. Install with: pip install pandas", file=sys.stderr)
+    logger.error("pandas required. Install with: pip install pandas")
     sys.exit(1)
 
 
@@ -57,9 +64,16 @@ TASK_SHORT = {
 
 SKIP_DIRS = {"repo", "implementations"}
 
+ARTIFACTS = ["github_issue", "lld", "review", "testing"]
+CRITERIA = ["completeness", "correctness", "specificity", "risk_awareness"]
 
-def load_all_scores():
-    """Load all eval.json files into a DataFrame."""
+
+def _load_all_scores() -> pd.DataFrame:
+    """Load all eval.json files into a DataFrame.
+
+    Returns:
+        DataFrame with one row per scored (task, model) cell.
+    """
     rows = []
     for task_dir in BENCH_DIR.iterdir():
         if not task_dir.is_dir() or task_dir.name in SKIP_DIRS:
@@ -71,7 +85,7 @@ def load_all_scores():
             judge_file = model_dir / "eval.json"
             if not judge_file.exists():
                 continue
-            with open(judge_file) as f:
+            with open(judge_file, encoding="utf-8") as f:
                 data = json.load(f)
             row = {
                 "task": task,
@@ -79,27 +93,41 @@ def load_all_scores():
                 "task_score": data.get("task_score", 0),
             }
             scores = data.get("scores", {})
-            for artifact in ["github_issue", "lld", "review", "testing"]:
+            for artifact in ARTIFACTS:
                 artifact_scores = scores.get(artifact, {})
                 row[f"{artifact}_total"] = artifact_scores.get("total", 0)
-                for criterion in ["completeness", "correctness", "specificity", "risk_awareness"]:
+                for criterion in CRITERIA:
                     row[f"{artifact}_{criterion}"] = artifact_scores.get(criterion, 0)
             rows.append(row)
 
-    df = pd.DataFrame(rows)
-    return df
+    return pd.DataFrame(rows)
 
 
-def build_matrix(df):
-    """Build task × model score matrix."""
-    pivot = df.pivot_table(index="task", columns="model", values="task_score", aggfunc="first")
+def _build_matrix(df: pd.DataFrame) -> pd.DataFrame:
+    """Build a task x model score matrix.
+
+    Args:
+        df: DataFrame of all scores from ``_load_all_scores``.
+
+    Returns:
+        Pivot table indexed by task and columned by model, ordered by task
+        order and descending mean model score.
+    """
+    pivot = df.pivot_table(
+        index="task", columns="model", values="task_score", aggfunc="first"
+    )
     pivot = pivot.reindex(index=[t for t in TASK_ORDER if t in pivot.index])
     pivot = pivot.reindex(columns=sorted(pivot.columns, key=lambda m: -pivot[m].mean()))
     return pivot
 
 
-def plot_heatmap(matrix, output_dir):
-    """Generate score matrix heatmap."""
+def _plot_heatmap(matrix: pd.DataFrame, output_dir: Path) -> None:
+    """Generate the score matrix heatmap.
+
+    Args:
+        matrix: Task x model score matrix from ``_build_matrix``.
+        output_dir: Directory to write the chart into.
+    """
     fig, ax = plt.subplots(figsize=(14, 6))
 
     short_tasks = [TASK_SHORT.get(t, t) for t in matrix.index]
@@ -117,18 +145,33 @@ def plot_heatmap(matrix, output_dir):
             val = data[i, j]
             if not np.isnan(val):
                 color = "white" if val < 65 else "black"
-                ax.text(j, i, f"{val:.1f}", ha="center", va="center", fontsize=8, color=color)
+                ax.text(
+                    j,
+                    i,
+                    f"{val:.1f}",
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color=color,
+                )
 
     plt.colorbar(im, ax=ax, label="Task Score (0-100)")
-    ax.set_title("SWE Benchmark: Task Score Matrix (Tasks x Models)", fontsize=12, pad=15)
+    ax.set_title(
+        "SWE Benchmark: Task Score Matrix (Tasks x Models)", fontsize=12, pad=15
+    )
     plt.tight_layout()
     plt.savefig(output_dir / "heatmap.png", dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  Saved: {output_dir / 'heatmap.png'}")
+    logger.info("  Saved: %s", output_dir / "heatmap.png")
 
 
-def plot_leaderboard(df, output_dir):
-    """Generate per-model average score bar chart."""
+def _plot_leaderboard(df: pd.DataFrame, output_dir: Path) -> None:
+    """Generate the per-model average score bar chart.
+
+    Args:
+        df: DataFrame of all scores from ``_load_all_scores``.
+        output_dir: Directory to write the chart into.
+    """
     avg_scores = df.groupby("model")["task_score"].mean().sort_values(ascending=True)
 
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -147,18 +190,23 @@ def plot_leaderboard(df, output_dir):
     plt.tight_layout()
     plt.savefig(output_dir / "leaderboard.png", dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  Saved: {output_dir / 'leaderboard.png'}")
+    logger.info("  Saved: %s", output_dir / "leaderboard.png")
 
 
-def plot_task_difficulty(df, output_dir):
-    """Generate per-task average score (difficulty indicator)."""
+def _plot_task_difficulty(df: pd.DataFrame, output_dir: Path) -> None:
+    """Generate the per-task average score (difficulty indicator).
+
+    Args:
+        df: DataFrame of all scores from ``_load_all_scores``.
+        output_dir: Directory to write the chart into.
+    """
     task_avg = df.groupby("task")["task_score"].mean()
     task_avg = task_avg.reindex([t for t in TASK_ORDER if t in task_avg.index])
     short_names = [TASK_SHORT.get(t, t) for t in task_avg.index]
 
     fig, ax = plt.subplots(figsize=(8, 5))
     colors = plt.cm.RdYlGn(np.linspace(0.3, 0.9, len(task_avg)))
-    bars = ax.bar(range(len(task_avg)), task_avg.values, color=colors)
+    ax.bar(range(len(task_avg)), task_avg.values, color=colors)
 
     ax.set_xticks(range(len(task_avg)))
     ax.set_xticklabels(short_names, rotation=30, ha="right", fontsize=9)
@@ -172,27 +220,30 @@ def plot_task_difficulty(df, output_dir):
     plt.tight_layout()
     plt.savefig(output_dir / "task_difficulty.png", dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  Saved: {output_dir / 'task_difficulty.png'}")
+    logger.info("  Saved: %s", output_dir / "task_difficulty.png")
 
 
-def plot_criteria_radar(df, output_dir, top_n=4):
-    """Radar chart showing per-criteria strengths for top models."""
-    criteria = ["completeness", "correctness", "specificity", "risk_awareness"]
-    artifacts = ["github_issue", "lld", "review", "testing"]
+def _plot_criteria_radar(df: pd.DataFrame, output_dir: Path, top_n: int = 4) -> None:
+    """Generate a radar chart of per-criteria strengths for top models.
 
+    Args:
+        df: DataFrame of all scores from ``_load_all_scores``.
+        output_dir: Directory to write the chart into.
+        top_n: Number of top-scoring models to include.
+    """
     avg_scores = df.groupby("model")["task_score"].mean().sort_values(ascending=False)
     top_models = avg_scores.head(top_n).index.tolist()
 
     fig, ax = plt.subplots(figsize=(8, 8), subplot_kw=dict(polar=True))
 
-    angles = np.linspace(0, 2 * np.pi, len(criteria), endpoint=False).tolist()
+    angles = np.linspace(0, 2 * np.pi, len(CRITERIA), endpoint=False).tolist()
     angles += angles[:1]
 
     for model in top_models:
         model_df = df[df["model"] == model]
         values = []
-        for criterion in criteria:
-            cols = [f"{a}_{criterion}" for a in artifacts]
+        for criterion in CRITERIA:
+            cols = [f"{a}_{criterion}" for a in ARTIFACTS]
             avg = model_df[cols].mean(axis=1).mean()
             values.append(avg)
         values += values[:1]
@@ -200,7 +251,7 @@ def plot_criteria_radar(df, output_dir, top_n=4):
         ax.fill(angles, values, alpha=0.1)
 
     ax.set_xticks(angles[:-1])
-    ax.set_xticklabels([c.replace("_", " ").title() for c in criteria], fontsize=10)
+    ax.set_xticklabels([c.replace("_", " ").title() for c in CRITERIA], fontsize=10)
     ax.set_ylim(10, 25)
     ax.set_title("Per-Criteria Strengths (Top Models)", fontsize=12, pad=20)
     ax.legend(loc="upper right", bbox_to_anchor=(1.3, 1.0), fontsize=9)
@@ -208,12 +259,16 @@ def plot_criteria_radar(df, output_dir, top_n=4):
     plt.tight_layout()
     plt.savefig(output_dir / "criteria_radar.png", dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  Saved: {output_dir / 'criteria_radar.png'}")
+    logger.info("  Saved: %s", output_dir / "criteria_radar.png")
 
 
-def plot_artifact_breakdown(df, output_dir):
-    """Grouped bar chart: per-artifact scores for each model."""
-    artifacts = ["github_issue", "lld", "review", "testing"]
+def _plot_artifact_breakdown(df: pd.DataFrame, output_dir: Path) -> None:
+    """Generate a grouped bar chart of per-artifact scores for each model.
+
+    Args:
+        df: DataFrame of all scores from ``_load_all_scores``.
+        output_dir: Directory to write the chart into.
+    """
     artifact_labels = ["GitHub Issue", "LLD", "Review", "Testing"]
 
     avg_scores = df.groupby("model")["task_score"].mean().sort_values(ascending=False)
@@ -223,7 +278,7 @@ def plot_artifact_breakdown(df, output_dir):
     x = np.arange(len(models))
     width = 0.2
 
-    for i, (artifact, label) in enumerate(zip(artifacts, artifact_labels)):
+    for i, (artifact, label) in enumerate(zip(ARTIFACTS, artifact_labels)):
         col = f"{artifact}_total"
         means = [df[df["model"] == m][col].mean() for m in models]
         ax.bar(x + i * width, means, width, label=label)
@@ -238,45 +293,66 @@ def plot_artifact_breakdown(df, output_dir):
     plt.tight_layout()
     plt.savefig(output_dir / "artifact_breakdown.png", dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  Saved: {output_dir / 'artifact_breakdown.png'}")
+    logger.info("  Saved: %s", output_dir / "artifact_breakdown.png")
 
 
-def export_csv(df, matrix, output_dir):
-    """Export raw data as CSV."""
+def _export_csv(df: pd.DataFrame, matrix: pd.DataFrame, output_dir: Path) -> None:
+    """Export raw data as CSV.
+
+    Args:
+        df: DataFrame of all scores from ``_load_all_scores``.
+        matrix: Task x model score matrix from ``_build_matrix``.
+        output_dir: Directory to write the CSV files into.
+    """
     df.to_csv(output_dir / "all_scores.csv", index=False)
     matrix.to_csv(output_dir / "score_matrix.csv")
-    print(f"  Saved: {output_dir / 'all_scores.csv'}")
-    print(f"  Saved: {output_dir / 'score_matrix.csv'}")
+    logger.info("  Saved: %s", output_dir / "all_scores.csv")
+    logger.info("  Saved: %s", output_dir / "score_matrix.csv")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Generate benchmark report from judge results.")
-    parser.add_argument("--output-dir", default=str(BENCH_DIR / "reports"),
-                        help="Output directory for charts and CSV (default: .../reports/)")
-    args = parser.parse_args()
+def _parse_args() -> argparse.Namespace:
+    """Parse command-line arguments.
+
+    Returns:
+        Parsed arguments namespace.
+    """
+    parser = argparse.ArgumentParser(
+        description="Generate benchmark report from judge results."
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=str(BENCH_DIR / "reports"),
+        help="Output directory for charts and CSV (default: .../reports/)",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    """Parse arguments, load scores, and generate all report charts and CSVs."""
+    args = _parse_args()
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Loading judge scores...")
-    df = load_all_scores()
-    print(f"  Found {len(df)} scored (task × model) cells")
-    print(f"  Models: {sorted(df['model'].unique())}")
-    print(f"  Tasks: {sorted(df['task'].unique())}")
+    logger.info("Loading judge scores...")
+    df = _load_all_scores()
+    logger.info("  Found %d scored (task x model) cells", len(df))
+    logger.info("  Models: %s", sorted(df["model"].unique()))
+    logger.info("  Tasks: %s", sorted(df["task"].unique()))
 
-    matrix = build_matrix(df)
+    matrix = _build_matrix(df)
 
-    print("\nGenerating charts...")
-    plot_heatmap(matrix, output_dir)
-    plot_leaderboard(df, output_dir)
-    plot_task_difficulty(df, output_dir)
-    plot_criteria_radar(df, output_dir)
-    plot_artifact_breakdown(df, output_dir)
+    logger.info("Generating charts...")
+    _plot_heatmap(matrix, output_dir)
+    _plot_leaderboard(df, output_dir)
+    _plot_task_difficulty(df, output_dir)
+    _plot_criteria_radar(df, output_dir)
+    _plot_artifact_breakdown(df, output_dir)
 
-    print("\nExporting data...")
-    export_csv(df, matrix, output_dir)
+    logger.info("Exporting data...")
+    _export_csv(df, matrix, output_dir)
 
-    print(f"\nDone. All outputs in: {output_dir}")
+    logger.info("Done. All outputs in: %s", output_dir)
 
 
 if __name__ == "__main__":

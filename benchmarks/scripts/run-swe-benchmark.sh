@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# run-swe-benchmark.sh — Run /swe benchmark for all 5 tasks against a model.
+# run-swe-benchmark.sh - Run /swe benchmark for all 5 tasks against a model.
 #
 # Uses Claude Code headless mode (claude -p) with the non-interactive /swe skill.
 # All answers are pre-populated so no human input is needed.
@@ -74,9 +74,9 @@ PASSED=0
 FAILED=0
 
 for problem in "${PROBLEMS[@]}"; do
-  echo "────────────────────────────────────────────"
+  echo "--------------------------------------------"
   echo "Running: ${problem}"
-  echo "────────────────────────────────────────────"
+  echo "--------------------------------------------"
 
   OUTPUT_DIR="${REPO_ROOT}/benchmarks/swe-benchmark-data/mcp-gateway-registry/${problem}/${MODEL}"
 
@@ -110,10 +110,10 @@ for problem in "${PROBLEMS[@]}"; do
 
   # Check if artifacts were created
   if [[ -f "${OUTPUT_DIR}/github-issue.md" && -f "${OUTPUT_DIR}/lld.md" ]]; then
-    echo "  [done] ${ELAPSED}s — artifacts at ${OUTPUT_DIR}"
+    echo "  [done] ${ELAPSED}s - artifacts at ${OUTPUT_DIR}"
     PASSED=$((PASSED + 1))
   else
-    echo "  [FAIL] ${ELAPSED}s — artifacts missing. Check /tmp/swe-${MODEL}-${problem}.json"
+    echo "  [FAIL] ${ELAPSED}s - artifacts missing. Check /tmp/swe-${MODEL}-${problem}.json"
     FAILED=$((FAILED + 1))
   fi
   echo ""

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# run-swe-claude-p.sh — Run /swe benchmark headless via claude -p
+# run-swe-claude-p.sh - Run /swe benchmark headless via claude -p
 #
 # Uses Claude Code's headless mode with the non-interactive /swe skill.
 # Works with Opus on Bedrock (default) or any model via LiteLLM proxy.

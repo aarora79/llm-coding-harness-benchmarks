@@ -14,17 +14,28 @@ Requires: requests
 
 import argparse
 import json
-import os
+import logging
 import re
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import requests
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s,p%(process)s,{%(filename)s:%(lineno)d},%(levelname)s,%(message)s",
+)
+logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).parent.parent.parent
 BENCH_DIR = REPO_ROOT / "benchmarks" / "swe-benchmark-data" / "mcp-gateway-registry"
 REPO_DIR = BENCH_DIR / "repo"
+
+DEFAULT_MAX_TOKENS = 16000
+REQUEST_TIMEOUT_SECONDS = 600
+EXPECTED_ARTIFACT_COUNT = 4
 
 PROBLEMS = {
     "ssrf-hardening-outbound-url-validation": {
@@ -80,17 +91,27 @@ PROBLEMS = {
 }
 
 
-def read_file_range(relative_path, line_range=None):
-    """Read a file or a range of lines from the repo."""
+def _read_file_range(
+    relative_path: str, line_range: tuple[int, int] | None = None
+) -> str:
+    """Read a file or a range of lines from the repo.
+
+    Args:
+        relative_path: Path relative to the benchmark repo directory.
+        line_range: Optional (start, end) 1-indexed inclusive line range.
+
+    Returns:
+        The requested file content with a header, or a not-found marker.
+    """
     full_path = REPO_DIR / relative_path
     if not full_path.exists():
         return f"[FILE NOT FOUND: {relative_path}]"
 
-    lines = full_path.read_text().splitlines()
+    lines = full_path.read_text(encoding="utf-8").splitlines()
 
     if line_range:
         start, end = line_range
-        lines = lines[max(0, start - 1):end]
+        lines = lines[max(0, start - 1) : end]
         header = f"--- {relative_path} (lines {start}-{end}) ---"
     else:
         header = f"--- {relative_path} ---"
@@ -98,8 +119,15 @@ def read_file_range(relative_path, line_range=None):
     return f"{header}\n" + "\n".join(lines)
 
 
-def build_context(problem_key):
-    """Build the codebase context for a problem."""
+def _build_context(problem_key: str) -> str:
+    """Build the codebase context for a problem.
+
+    Args:
+        problem_key: Slug identifying the problem in PROBLEMS.
+
+    Returns:
+        Concatenated source snippets for the problem's key files.
+    """
     problem = PROBLEMS[problem_key]
     context_parts = []
 
@@ -107,26 +135,40 @@ def build_context(problem_key):
         if ":" in file_spec:
             path, range_str = file_spec.rsplit(":", 1)
             start, end = map(int, range_str.split("-"))
-            context_parts.append(read_file_range(path, (start, end)))
+            context_parts.append(_read_file_range(path, (start, end)))
         else:
-            context_parts.append(read_file_range(file_spec))
+            context_parts.append(_read_file_range(file_spec))
 
     return "\n\n".join(context_parts)
 
 
-def build_prompt(problem_key):
-    """Build the full prompt for a problem."""
-    problem = PROBLEMS[problem_key]
-    context = build_context(problem_key)
+def _build_structure_text() -> str:
+    """Build a top-2-levels directory listing of the repo.
 
-    # Get project structure
+    Returns:
+        Newline-joined directory paths (up to the first 50 entries).
+    """
     structure = []
     for p in sorted(REPO_DIR.rglob("*")):
         if ".git" in p.parts or "__pycache__" in p.parts or "node_modules" in p.parts:
             continue
         if p.is_dir() and len(p.relative_to(REPO_DIR).parts) <= 2:
             structure.append(str(p.relative_to(REPO_DIR)) + "/")
-    structure_text = "\n".join(structure[:50])
+    return "\n".join(structure[:50])
+
+
+def _build_prompt(problem_key: str) -> str:
+    """Build the full prompt for a problem.
+
+    Args:
+        problem_key: Slug identifying the problem in PROBLEMS.
+
+    Returns:
+        The complete prompt string to send to the model.
+    """
+    problem = PROBLEMS[problem_key]
+    context = _build_context(problem_key)
+    structure_text = _build_structure_text()
 
     return f"""You are a senior software engineer. You will produce 4 markdown design documents for the task below.
 
@@ -189,9 +231,16 @@ Write a testing plan covering:
 Begin producing the artifacts now. Do not include any preamble or explanation outside the artifacts."""
 
 
-def parse_artifacts(response_text):
-    """Parse the 4 artifacts from the model's response."""
-    artifacts = {}
+def _parse_artifacts(response_text: str) -> dict[str, str]:
+    """Parse the 4 artifacts from the model's response.
+
+    Args:
+        response_text: Raw text returned by the model.
+
+    Returns:
+        Mapping of artifact filename to its content.
+    """
+    artifacts: dict[str, str] = {}
     pattern = r"=== (github-issue\.md|lld\.md|review\.md|testing\.md) ==="
     parts = re.split(pattern, response_text)
 
@@ -204,8 +253,23 @@ def parse_artifacts(response_text):
     return artifacts
 
 
-def send_request(endpoint, model, prompt, max_tokens=16000):
-    """Send the prompt to the API endpoint."""
+def _send_request(
+    endpoint: str,
+    model: str,
+    prompt: str,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+) -> dict[str, Any]:
+    """Send the prompt to the API endpoint.
+
+    Args:
+        endpoint: Base URL of the Anthropic-compatible API.
+        model: Model name to request.
+        prompt: The prompt text to send.
+        max_tokens: Maximum output tokens to generate.
+
+    Returns:
+        Dictionary with response text, token counts, latency, and model name.
+    """
     url = f"{endpoint}/v1/messages"
     headers = {
         "Content-Type": "application/json",
@@ -219,11 +283,21 @@ def send_request(endpoint, model, prompt, max_tokens=16000):
     }
 
     start = time.time()
-    response = requests.post(url, headers=headers, json=payload, timeout=600)
+    try:
+        response = requests.post(
+            url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT_SECONDS
+        )
+    except requests.RequestException:
+        logger.exception(
+            "Request to %s failed. Check that the server is running and reachable.", url
+        )
+        sys.exit(1)
     elapsed = time.time() - start
 
     if response.status_code != 200:
-        print(f"Error {response.status_code}: {response.text[:500]}", file=sys.stderr)
+        logger.error(
+            "Error %s from %s: %s", response.status_code, url, response.text[:500]
+        )
         sys.exit(1)
 
     data = response.json()
@@ -238,54 +312,40 @@ def send_request(endpoint, model, prompt, max_tokens=16000):
     }
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Run SWE benchmark headless")
-    parser.add_argument("--endpoint", required=True, help="API endpoint (e.g. http://127.0.0.1:4000)")
-    parser.add_argument("--model", required=True, help="Model name")
-    parser.add_argument("--problem", required=True, choices=list(PROBLEMS.keys()), help="Problem slug")
-    parser.add_argument("--max-tokens", type=int, default=16000, help="Max output tokens")
-    parser.add_argument("--dry-run", action="store_true", help="Print prompt without sending")
-    args = parser.parse_args()
+def _log_result(result: dict[str, Any]) -> None:
+    """Log token counts, latency, and generation rate for a response.
 
-    print(f"Problem: {args.problem}")
-    print(f"Model: {args.model}")
-    print(f"Endpoint: {args.endpoint}")
-    print(f"Max tokens: {args.max_tokens}")
+    Args:
+        result: The response dictionary returned by _send_request.
+    """
+    logger.info("Response received")
+    logger.info("  Input tokens: %s", f"{result['input_tokens']:,}")
+    logger.info("  Output tokens: %s", f"{result['output_tokens']:,}")
+    logger.info("  Latency: %ss", result["latency_seconds"])
+    logger.info(
+        "  Generation: %.1f tok/s", result["output_tokens"] / result["latency_seconds"]
+    )
 
-    prompt = build_prompt(args.problem)
-    print(f"Prompt length: {len(prompt)} chars (~{len(prompt)//4} tokens)")
 
-    if args.dry_run:
-        print("\n--- PROMPT ---")
-        print(prompt)
-        return
+def _save_outputs(
+    result: dict[str, Any],
+    artifacts: dict[str, str],
+    args: argparse.Namespace,
+) -> None:
+    """Write parsed artifacts and run metrics to the output directory.
 
-    print("\nSending request...")
-    result = send_request(args.endpoint, args.model, prompt, args.max_tokens)
-
-    print(f"\nResponse received:")
-    print(f"  Input tokens: {result['input_tokens']:,}")
-    print(f"  Output tokens: {result['output_tokens']:,}")
-    print(f"  Latency: {result['latency_seconds']}s")
-    print(f"  Generation: {result['output_tokens'] / result['latency_seconds']:.1f} tok/s")
-
-    # Parse artifacts
-    artifacts = parse_artifacts(result["text"])
-    print(f"  Artifacts parsed: {list(artifacts.keys())}")
-
-    if len(artifacts) < 4:
-        print(f"\n  WARNING: Only {len(artifacts)}/4 artifacts found. Response may be truncated.")
-        print(f"  Try increasing --max-tokens (currently {args.max_tokens})")
-
-    # Save artifacts
+    Args:
+        result: The response dictionary returned by _send_request.
+        artifacts: Mapping of artifact filename to content.
+        args: Parsed command-line arguments.
+    """
     output_dir = BENCH_DIR / args.problem / args.model
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for filename, content in artifacts.items():
-        (output_dir / filename).write_text(content + "\n")
-        print(f"  Saved: {output_dir / filename}")
+        (output_dir / filename).write_text(content + "\n", encoding="utf-8")
+        logger.info("  Saved: %s", output_dir / filename)
 
-    # Save metrics
     metrics = {
         "model": args.model,
         "problem": args.problem,
@@ -293,17 +353,91 @@ def main():
         "input_tokens": result["input_tokens"],
         "output_tokens": result["output_tokens"],
         "latency_seconds": result["latency_seconds"],
-        "generation_tokens_per_sec": round(result["output_tokens"] / result["latency_seconds"], 1),
+        "generation_tokens_per_sec": round(
+            result["output_tokens"] / result["latency_seconds"], 1
+        ),
         "artifacts_produced": len(artifacts),
         "max_tokens": args.max_tokens,
     }
-    (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
-    print(f"  Saved: {output_dir / 'metrics.json'}")
+    (output_dir / "metrics.json").write_text(
+        json.dumps(metrics, indent=2) + "\n", encoding="utf-8"
+    )
+    logger.info("  Saved: %s", output_dir / "metrics.json")
 
-    if len(artifacts) == 4:
-        print("\nDone — all 4 artifacts produced.")
+
+def _run(args: argparse.Namespace) -> None:
+    """Build the prompt, run the request, and persist the outputs.
+
+    Args:
+        args: Parsed command-line arguments.
+    """
+    logger.info("Problem: %s", args.problem)
+    logger.info("Model: %s", args.model)
+    logger.info("Endpoint: %s", args.endpoint)
+    logger.info("Max tokens: %s", args.max_tokens)
+
+    prompt = _build_prompt(args.problem)
+    logger.info("Prompt length: %s chars (~%s tokens)", len(prompt), len(prompt) // 4)
+
+    if args.dry_run:
+        print("\n--- PROMPT ---")
+        print(prompt)
+        return
+
+    logger.info("Sending request...")
+    result = _send_request(args.endpoint, args.model, prompt, args.max_tokens)
+    _log_result(result)
+
+    artifacts = _parse_artifacts(result["text"])
+    logger.info("  Artifacts parsed: %s", list(artifacts.keys()))
+
+    if len(artifacts) < EXPECTED_ARTIFACT_COUNT:
+        logger.warning(
+            "Only %s/%s artifacts found. Response may be truncated.",
+            len(artifacts),
+            EXPECTED_ARTIFACT_COUNT,
+        )
+        logger.warning("Try increasing --max-tokens (currently %s)", args.max_tokens)
+
+    _save_outputs(result, artifacts, args)
+
+    if len(artifacts) == EXPECTED_ARTIFACT_COUNT:
+        logger.info("Done - all %s artifacts produced.", EXPECTED_ARTIFACT_COUNT)
     else:
-        print(f"\nPartial — {len(artifacts)}/4 artifacts. Increase --max-tokens or check the response.")
+        logger.warning(
+            "Partial - %s/%s artifacts. Increase --max-tokens or check the response.",
+            len(artifacts),
+            EXPECTED_ARTIFACT_COUNT,
+        )
+
+
+def _parse_args() -> argparse.Namespace:
+    """Parse command-line arguments.
+
+    Returns:
+        The parsed argument namespace.
+    """
+    parser = argparse.ArgumentParser(description="Run SWE benchmark headless")
+    parser.add_argument(
+        "--endpoint", required=True, help="API endpoint (e.g. http://127.0.0.1:4000)"
+    )
+    parser.add_argument("--model", required=True, help="Model name")
+    parser.add_argument(
+        "--problem", required=True, choices=list(PROBLEMS.keys()), help="Problem slug"
+    )
+    parser.add_argument(
+        "--max-tokens", type=int, default=DEFAULT_MAX_TOKENS, help="Max output tokens"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print prompt without sending"
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    """Parse arguments and delegate to the run orchestrator."""
+    args = _parse_args()
+    _run(args)
 
 
 if __name__ == "__main__":
