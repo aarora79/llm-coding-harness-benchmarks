@@ -1,156 +1,255 @@
-# Expert Review: Remove FAISS from the codebase
+# Expert Review: Remove FAISS from the Codebase
 
-*Created: 2026-07-06*
-*Author: Claude (qwen3.6-35b)*
-*Status: Draft*
+*Created: 2026-07-22*
+*Author: Claude*
+*Related LLD: `./lld.md`*
 
----
+## Review Personas
 
-## Frontend Engineer — Pixel
-
-### Strengths
-- No UI changes are involved, so no frontend impact.
-
-### Concerns
-- **N/A** — This is a backend/cleanup task.
-
-### Recommendations
-- None for frontend.
-
-### Questions for Author
-- None.
-
-### Verdict
-**APPROVED**
+| Role | Reviewer | Focus |
+|------|----------|-------|
+| Frontend Engineer | Pixel | UI/UX, components, API integration |
+| Backend Engineer | Byte | API design, data models, business logic, performance |
+| SRE/DevOps Engineer | Circuit | Deployment, monitoring, scaling, infrastructure |
+| Security Engineer | Cipher | AuthN/AuthZ, validation, OWASP, data protection |
+| SMTS (Overall) | Sage | Architecture, code quality, maintainability |
 
 ---
 
-## Backend Engineer — Byte
+## 1. Pixel (Frontend Engineer)
 
 ### Strengths
-- Clear mapping of every file that references FAISS, with approximate line counts.
-- Step-by-step implementation plan ordered by dependency (delete core files first, then remove calls, then update configs, then clean tests and docs).
-- Correctly identifies that the factory pattern should be simplified, not patched with a stub.
-- Notes that `faiss_service` is imported lazily in route handlers (inside function bodies), so removing calls does not affect import order or startup.
+- No frontend changes required. The FAISS removal is entirely backend/infrastructure.
+- The search API response shape is preserved, so the frontend (React/TypeScript UI)
+  continues to work without modification.
+- The LLD correctly identifies that no new API endpoints or signature changes are needed.
 
 ### Concerns
-1. **test_safe_eval_arithmetic.py faiss __spec__ patching**: This test patches `faiss.__spec__` because transformers internally calls `importlib.util.find_spec("faiss")`. After removing faiss-cpu, this patch will no longer be needed — but the test file needs to be checked carefully to ensure the patch removal does not break the test itself. The patch is inside a conditional block (`if "faiss" in sys.modules`), so it should be safe to remove.
-2. **test_factory_aliases.py**: The test checks that `get_search_repository()` returns a class starting with "File" or named "FaissSearchRepository". Removing FaissSearchRepository means this test needs to be updated to expect "DocumentDB" instead. The LLD mentions this but does not show the exact code change.
-3. **migrate-file-to-mongodb.py**: This script exists in the repo. Should it be deleted along with FAISS? The LLD flags it as an open question but does not make a recommendation. If FAISS indices exist in production, this script may still be useful for one-time migration. However, the issue states that DocumentDB is the active backend — suggesting no migration is needed.
+- None significant.
 
 ### Recommendations
-- Resolve the migrate-file-to-mongodb.py question explicitly. If no FAISS indices exist in production, delete the script. If they do, keep it but update its description to say "migration from removed FAISS backend — use with caution."
-- Add explicit validation in config.py: if storage_backend is not in MONGODB_BACKENDS, raise ValueError. This prevents accidental reverts to a non-DocumentDB config.
-- The LLD should list the exact line numbers for each edit in server_routes.py. There are ~14 import locations — a simple `grep` + manual verification is needed.
+- Verify the frontend E2E tests that exercise search still pass after this change.
+  The LLD should explicitly mention running Playwright E2E tests.
 
 ### Questions for Author
-- What happens if someone sets storage_backend to an empty string or a non-DocumentDB value after this change? Is there validation?
-- Are there any production FAISS index files (service_index.faiss, service_metadata.json) that need cleanup in deployed servers?
+- Does the frontend ever display "FAISS" in UI strings (e.g., "Powered by FAISS")?
+  Review `frontend/src/` for any hardcoded FAISS references. The LLD should
+  explicitly check for this.
 
-### New Libraries / Infra Dependencies
-- None.
-
-### Better Alternatives Considered
-- None. The chosen approach (full removal) is the simplest and most correct.
-
-### Verdict
-**APPROVED WITH CHANGES**
-- Blocker: Add config validation for storage_backend.
-- Blocker: Decide on migrate-file-to-mongodb.py fate.
+### Verdict: APPROVED
 
 ---
 
-## SRE/DevOps Engineer — Circuit
+## 2. Byte (Backend Engineer)
 
 ### Strengths
-- Correctly identifies Docker, docker-compose, build-config.yaml, and Terraform as affected surfaces.
-- Notes that removing faiss-cpu will reduce container image size by eliminating the native FAISS library pull.
+- The LLD correctly identifies the factory pattern as the key integration point
+  for search backend routing.
+- Reusing `DocumentDBSearchRepository` for the file-backend search path is a
+  sensible choice that consolidates on a single tested implementation.
+- The LLD provides detailed line-level guidance for factory.py changes.
+- Graceful degradation (lexical-only fallback when DocumentDB is unavailable)
+  matches the prior FAISS fallback behavior.
 
 ### Concerns
-1. **Dockerfile**: The LLD does not mention the Dockerfile. There may be `RUN pip install` or `pip install -e .` lines that install faiss-cpu as a transitive dependency. After removing it from pyproject.toml, pip will no longer install it, but the Dockerfile itself may have explicit references that should be cleaned up.
-2. **Helm charts**: The `charts/` directory was not explicitly mentioned in the file changes table. Helm values files may reference storage_backend or have FAISS-related comments.
-3. **Container image layers**: If the Dockerfile caches pip install layers, removing faiss-cpu may not reduce image size on the first deploy (cached layers still exist). Operators may need to rebuild with --no-cache or use a fresh build cache.
-4. **ECS task definitions**: The Terraform files reference FAISS in comments but the actual ECS task definition may have environment variables for storage_backend. Need to verify.
+- **Concern 1 (Medium):** The LLD says `registry/repositories/file/search_repository.py`
+  will be deleted entirely, and the factory will always route to
+  `DocumentDBSearchRepository`. But the `file` storage backend is still used by
+  non-search repositories (ServerRepository, AgentRepository, SkillRepository,
+  etc.). The LLD should explicitly confirm that deleting
+  `file/search_repository.py` does not break other file-based repositories that
+  might import from the `file/` package.
+
+  **Recommendation:** Before deleting the file, check what else (if anything) lives
+  in `registry/repositories/file/`. If other repositories exist there (e.g.,
+  `file/server_repository.py`), the directory should stay and only
+  `search_repository.py` should be deleted.
+
+- **Concern 2 (Low):** The LLD says `faiss-cpu` should be removed from
+  `pyproject.toml`. It does not mention that `sentence-transformers` depends on
+  `torch`, and `torch` is a heavy dependency (~2GB) that also complicates Docker
+  builds. If the goal is build simplicity, the team might consider migrating
+  embeddings to LiteLLM-only (cloud providers). This is out of scope for this
+  task but worth noting.
+
+- **Concern 3 (Low):** The LLD mentions updating `registry/servers/mcpgw.json`
+  server schema comments. This is a JSON configuration file -- ensure the change
+  does not affect runtime behavior. The LLD correctly notes these are comments
+  only.
 
 ### Recommendations
-- Check the Dockerfile for any explicit FAISS references (RUN commands, ENV vars, COPY of FAISS-specific assets).
-- Check charts/ directory for FAISS references in Helm values, templates, or comments.
-- Document the expected Docker image size reduction in release notes.
-- Add a rollback verification test in testing.md: verify that a previous version of the image (with FAISS) can still run while the new version deploys.
+- Before deleting `registry/repositories/file/search_repository.py`, run:
+  ```bash
+  grep -rn "from.*file.search_repository" registry/
+  ```
+  to confirm no other file in the `file/` directory imports from it.
+- The LLD should verify that `registry/repositories/file/__init__.py` does not
+  export `FaissSearchRepository`. If it does, the `__init__.py` needs updating
+  (not deletion).
 
 ### Questions for Author
-- What is the current Docker image size? What is the expected reduction?
-- Are there any CI/CD pipelines that build Docker images? Do they need updating (e.g., build args for FAISS)?
+- Does `registry/repositories/file/` contain any files other than
+  `search_repository.py`? (The LLD assumes it does but doesn't confirm.)
+- After removing `faiss-cpu`, will `uv tree` show any transitive FAISS
+  dependencies? If so, which package pulls it in?
 
-### New Libraries / Infra Dependencies
-- None.
+### Verdict: APPROVED WITH CHANGES
 
-### Verdict
-**APPROVED WITH CHANGES**
-- Blocker: Check Dockerfile for FAISS references.
-- Blocker: Check charts/ for FAISS/Helm references.
-- Recommendation: Document expected image size reduction.
+**Required changes before merge:**
+1. Verify `registry/repositories/file/` contents before deleting `search_repository.py`
+2. Check `file/__init__.py` for exports
+3. Run `uv tree` after `faiss-cpu` removal to check for transitive dependencies
 
 ---
 
-## Security Engineer — Cipher
+## 3. Circuit (SRE/DevOps Engineer)
 
 ### Strengths
-- Removing faiss-cpu reduces the attack surface by one fewer native library to audit.
-- No new dependencies are introduced, which is a security positive.
+- Removing FAISS directly improves Docker build simplicity and reduces image size
+  (FAISS native libraries are not needed).
+- The LLD correctly identifies all Docker, Terraform, and Helm comment updates.
+- The metrics service schema cleanup (`faiss_search_time_ms`) is handled.
+- The LLD provides explicit verification commands including `uv sync` and
+  dependency tree checks.
 
 ### Concerns
-1. **No auth/AuthZ changes**: This is a cleanup task, so there are no new authentication or authorization concerns.
-2. **Telemetry data**: The telemetry.py change removes the "faiss" fallback string. This is purely cosmetic and does not affect telemetry data collection security.
-3. **Migration script**: If `scripts/migrate-file-to-mongodb.py` is kept, it may read FAISS index files from disk. These files could contain sensitive server metadata. The script should be reviewed for data leakage risks if kept.
+- **Concern 1 (Medium):** The LLD says operators using `storage_backend=file`
+  (local development) will lose vector search unless they configure a MongoDB
+  connection. The Docker Compose setup includes MongoDB, so this is not a
+  regression for Docker Compose users. But operators who run the registry outside
+  Docker Compose (e.g., `uv run` directly) will lose vector search. The LLD
+  should recommend operators add `DATABASE_URL` or `DOCUMENTDB_*` environment
+  variables for local development.
+
+- **Concern 2 (Medium):** The LLD does not address the `uv.lock` regeneration
+  process. After removing `faiss-cpu` from `pyproject.toml`, `uv lock` must be
+  run and the resulting `uv.lock` committed. The LLD should explicitly mention
+  this step.
+
+- **Concern 3 (Low):** The Terraform variable `OPERATIONS.md` references the
+  registry image size (~4.6GB). After removing FAISS (and potentially torch
+  in the future), the image size may decrease. The LLD should note that this
+  figure may need updating.
 
 ### Recommendations
-- If migrate-file-to-mongodb.py is kept, add a note that it handles potentially sensitive server metadata and should not be run on untrusted data.
-- No other security concerns identified.
+- Add a migration guide section to the release notes: "For local development
+  without Docker Compose, set `DATABASE_URL=mongodb://localhost:27017/registry`
+  to retain vector search."
+- Update the release note to explicitly state that `uv lock` must be run after
+  the change.
+- Consider adding a startup check that warns if `storage_backend=file` and no
+  DocumentDB is configured (similar to the existing embedding-failure warning).
 
 ### Questions for Author
-- Does the telemetry collector schema regex change (`"^(faiss|documentdb)$"` to `"^documentdb$"`) affect any running telemetry collectors?
+- What is the approximate Docker image size reduction from removing FAISS?
+- Should the Dockerfile or docker-compose be updated to remove any FAISS-specific
+  system dependencies? (The FAISS agent report did not find any native library
+  installs in the Dockerfile, suggesting FAISS is installed purely via pip/uv.)
 
-### Verdict
-**APPROVED**
+### Verdict: APPROVED WITH CHANGES
+
+**Required changes before merge:**
+1. Add migration guidance for local development operators in release notes
+2. Explicitly document `uv lock` step in the implementation plan
+3. Verify Dockerfile has no FAISS-specific system dependencies to remove
 
 ---
 
-## SMTS (Overall) — Sage
+## 4. Cipher (Security Engineer)
 
 ### Strengths
-- Thorough codebase analysis with accurate file counts and line estimates.
-- Implementation plan is well-ordered: core files first, then callers, then configs, then tests, then docs.
-- Correctly identifies the factory pattern simplification as the architectural improvement.
-- No new dependencies are introduced — a clean reduction.
-- Estimated net code reduction of ~400 lines is realistic given the 328 non-test FAISS references found.
+- FAISS removal does not introduce any new security surface area.
+- The LLD correctly preserves the search API authentication and authorization
+  (all search endpoints remain behind existing auth middleware).
+- Removing FAISS code reduces the attack surface by eliminating untrusted
+  input paths (FAISS index files were written from application state, which is
+  benign but adds surface area).
 
 ### Concerns
-1. **Documentation coverage is incomplete**: The LLD lists 40+ documentation files but only a few have specific line counts. Many are listed as "Multiple" without detail. The implementer will need to carefully read each file to determine what to change vs. what to leave (historical content in release notes, for example, should not be altered).
-2. **Historical content risk**: The LLD mentions updating `release-notes/v1.0.17.md` but historical release notes should not be altered — they document what was true at that release time. The implementer should add a NEW release note (e.g., v1.25.0 or next version) documenting FAISS removal, not retroactively edit old notes.
-3. **tests/README.md**: The LLD lists this as "Modified" but test documentation may be valuable to keep as historical reference for contributors who encounter old test fixtures. Consider moving old test fixtures to a `tests/_legacy/` directory instead of deleting immediately.
-4. **Factory pattern simplification**: Removing the else-branch entirely is correct, but the `MONGODB_BACKENDS` import in factory.py should be checked. If other factory functions still use it, the import stays. If not, it should be removed from that file's imports.
-5. **Edge case: empty storage_backend**: The LLD flags adding config validation but does not show the exact code. If storage_backend defaults to a DocumentDB value, existing deployments are unaffected. But if it defaults to empty or a non-DocumentDB value, the app will crash. Need to verify the default.
+- **Concern 1 (Low):** The LLD removes `verify_faiss_metadata()` from shell
+  scripts. This function verified FAISS index consistency, which included checks
+  for stale or corrupted index files. The LLD should confirm that DocumentDB
+  search does not have a similar consistency check that is being lost.
+
+- **Concern 2 (Low):** The metrics service schema change (removing
+  `faiss_search_time_ms`) means historical metrics data will have a NULL column
+  for this field. If there are dashboards or alerting rules that query this
+  column, they will need updating.
 
 ### Recommendations
-- Add a release note for the next version documenting FAISS removal and expected image size reduction.
-- Do NOT edit historical release notes — only add new ones.
-- Show the exact config validation code in the LLD (not just a pseudocode comment).
-- Verify the default value of storage_backend to ensure no regression.
-- Consider adding a TODO or issue for migrating `scripts/migrate-file-to-mongodb.py` if it should be kept.
+- Verify that no `faiss` index files (`.faiss`, `.index`) are generated at
+  runtime and stored in application directories. If they are, the cleanup
+  procedure should delete them.
+- Add a note to the release notes about the metrics service schema change for
+  operators using Grafana dashboards or Prometheus queries that reference
+  `faiss_search_time_ms`.
 
 ### Questions for Author
-- What is the default value of `storage_backend`? Is it guaranteed to be a DocumentDB backend?
-- Are there any integration tests that explicitly test the FAISS code path (via `storage_backend` not in MONGODB_BACKENDS)? These tests will need to be deleted or rewritten.
-- Should the `registry/repositories/file/` directory be deleted entirely (if it contains ONLY search_repository.py), or does it have other file-based repositories?
+- Are there any `*.faiss` or `*.index` files generated at runtime that would
+  need cleanup in deployment?
+- Do any Grafana dashboards or Prometheus alerts reference `faiss_search_time_ms`?
 
-### Verdict
-**APPROVED WITH CHANGES**
-- Blocker: Do NOT edit historical release notes.
-- Blocker: Show exact config validation code in LLD.
-- Blocker: Verify default storage_backend value.
-- Recommendation: Check if `registry/repositories/file/` directory should be deleted.
-- Recommendation: Add new release note documenting FAISS removal.
+### Verdict: APPROVED
+
+---
+
+## 5. Sage (SMTS - Overall)
+
+### Strengths
+- The LLD is thorough and specific, providing line-level guidance for every file
+  change.
+- The dependency analysis is accurate: `faiss-cpu` is the only Python dependency
+  being removed; `sentence-transformers` and `torch` are correctly retained.
+- The factory pattern change is minimal and correct: replacing one import with
+  another in the `else` branch.
+- The LLD correctly identifies that `SearchRepositoryBase` interface is
+  unchanged, so no interface-level changes are needed.
+- The comparison matrix for alternatives is fair and well-reasoned.
+
+### Concerns
+- **Concern 1 (Medium):** The LLD recommends deleting the entire
+  `registry/search/service.py` file. This file contains not just `FaissService`
+  but also the shared `faiss_service` singleton instance at module level.
+  However, after reviewing the file, `faiss_service = FaissService()` is the
+  only global. The LLD should explicitly note that no other classes or functions
+  in this file need preservation.
+
+  **Recommendation:** Before deleting, run:
+  ```bash
+  grep -c "^class \|^def " registry/search/service.py
+  ```
+  to confirm the file only contains `FaissService` and helper classes. If there
+  are standalone utility functions, they should be migrated.
+
+- **Concern 2 (Low):** The LLD says `cli/service_mgmt.sh` and
+  `terraform/aws-ecs/scripts/service_mgmt.sh` should have `verify_faiss_metadata()`
+  deleted. These are bash scripts -- verify they do not contain any critical
+  operational logic beyond the FAISS verification that would be lost.
+
+- **Concern 3 (Low):** The LLD does not address the `docs/llms.txt` file, which
+  is a comprehensive reference that includes FAISS references. This file is
+  likely consumed by LLM agents and should be updated to remove FAISS mentions.
+
+### Recommendations
+- Verify `registry/search/service.py` contains only FAISS-related code before
+  deleting it.
+- Update `docs/llms.txt` to replace FAISS references with DocumentDB.
+- Consider whether `registry/search/` directory becomes empty after deleting
+  `service.py`. If so, the entire directory can be removed (including
+  `__init__.py` if it exists).
+
+### Questions for Author
+- What is the full content of `registry/search/__init__.py`? Does it export
+  anything besides `faiss_service`?
+- Does `registry/search/` contain any other files besides `service.py`?
+
+### Verdict: APPROVED WITH CHANGES
+
+**Required changes before merge:**
+1. Verify `registry/search/service.py` has no preserve-worthy code before deletion
+2. Verify `registry/search/__init__.py` contents and decide on directory removal
+3. Update `docs/llms.txt`
+4. Verify `service_mgmt.sh` scripts contain no critical non-FAISS logic
 
 ---
 
@@ -158,19 +257,19 @@
 
 | Reviewer | Verdict | Blockers | Key Recommendations |
 |----------|---------|----------|---------------------|
-| Frontend (Pixel) | APPROVED | 0 | None |
-| Backend (Byte) | APPROVED WITH CHANGES | 2 | Add config validation; decide on migrate-file-to-mongodb.py |
-| SRE (Circuit) | APPROVED WITH CHANGES | 2 | Check Dockerfile; check charts/ for FAISS references |
-| Security (Cipher) | APPROVED | 0 | No security concerns |
-| SMTS (Sage) | APPROVED WITH CHANGES | 3 | Do not edit historical release notes; show exact validation code; verify default storage_backend |
+| Pixel (Frontend) | APPROVED | 0 | Verify frontend E2E tests still pass |
+| Byte (Backend) | APPROVED WITH CHANGES | 2 | Check `file/` directory contents; verify no transitive FAISS deps |
+| Circuit (SRE) | APPROVED WITH CHANGES | 2 | Add local dev migration guide; document `uv lock` step |
+| Cipher (Security) | APPROVED | 0 | Note metrics schema change in release notes |
+| Sage (SMTS) | APPROVED WITH CHANGES | 3 | Verify `service.py` contents; update `docs/llms.txt`; check `search/` dir |
 
-**Overall: APPROVED WITH CHANGES** (5 blockers across 3 reviewers, 0 blockers from 2 reviewers)
+**Total blockers across all reviewers: 7** (all are actionable, non-blocking for implementation but should be addressed before merging the PR)
 
 ## Next Steps
-1. Add config validation for storage_backend (Backend, SMTS consensus).
-2. Check Dockerfile and charts/ directory for additional FAISS references (SRE).
-3. Decide on migrate-file-to-mongodb.py fate (Backend).
-4. Do NOT edit historical release notes; add a new release note for this change (SMTS).
-5. Verify default storage_backend value is a DocumentDB backend (SMTS).
-6. Check if `registry/repositories/file/` directory can be fully deleted (SMTS).
-7. Add exact config validation code snippet to the LLD implementation steps.
+
+1. Address Byte's concern: verify `registry/repositories/file/` directory contents
+2. Address Circuit's concern: add `uv lock` step to implementation plan
+3. Address Sage's concern: verify `registry/search/service.py` and directory contents
+4. Address Cipher's concern: note metrics schema change in release notes
+5. Proceed with implementation per LLD step-by-step plan
+6. Run full test suite post-implementation

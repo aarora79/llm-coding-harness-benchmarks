@@ -1,61 +1,98 @@
 # GitHub Issue: Remove FAISS from the codebase and documentation
 
 ## Title
-Remove FAISS — obsolete file-based vector search backend and all references
+Remove obsolete FAISS dependency and replace with DocumentDB hybrid search
 
 ## Labels
-- cleanup
+- refactor
 - tech-debt
-- docs
-- dependencies
+- documentation
 
 ## Description
 
 ### Problem Statement
-The mcp-gateway-registry project migrated from FAISS (a file-based vector search library) to DocumentDB hybrid search for all vector operations. FAISS remains as dead code: unused imports, stale pip dependencies, configuration properties, API route calls, documentation references, and test fixtures. This creates confusion for contributors who may think FAISS is still active, and causes operators to pull unnecessary native dependencies (faiss-cpu, faiss-gpu) into container images.
+
+This repository uses FAISS (Facebook AI Similarity Search) as the vector search
+backend for semantic search and hybrid search. FAISS has become an unnecessary
+dependency that complicates deployment due to its native library requirements
+(C/C++ build dependencies, platform-specific binary wheels).
+
+FAISS has already been superseded by the DocumentDB native hybrid search
+implementation (BM25 + vector k-NN) which is actively maintained and used in
+production. The DocumentDB backend provides equal or better search quality with
+a simpler operational footprint.
+
+Keeping FAISS in the codebase creates:
+
+- Deployment complexity (native library dependencies, torch/FAISS version
+  conflicts)
+- Dual maintenance burden (two vector search backends to maintain)
+- Test complexity (FAISS mocking infrastructure that masks real behavior)
+- Documentation drift (FAISS referenced in 60+ doc locations as the primary
+  backend)
 
 ### Proposed Solution
-Remove FAISS entirely:
-1. Delete the FAISS service module (`registry/search/service.py`) and its search repository (`registry/repositories/file/search_repository.py`)
-2. Remove the `faiss-cpu` dependency from `pyproject.toml`
-3. Remove `faiss_index_path` and `faiss_metadata_path` properties from config
-4. Remove all `faiss_service` imports and calls from API routes, agents routes, and batch processors
-5. Update the search repository factory to no longer support the file-based (FAISS) fallback — always use DocumentDB
-6. Clean up FAISS references from schemas, telemetry, metrics, and CLI modules
-7. Remove or rewrite all documentation referencing FAISS
-8. Remove FAISS mock fixtures and test files
 
-Expected outcome: `storage_backend` defaults to and only accepts a DocumentDB backend. All search operations route through `DocumentDBSearchRepository`. No imports of `faiss`, `FaissService`, or `FaissSearchRepository` remain anywhere in the codebase.
+Remove all FAISS code, dependencies, test fixtures, and documentation references.
+Migrate the file-based storage backend's search path to use the DocumentDB hybrid
+search repository directly, so that operators who use `storage_backend=file` (for
+local development) still get vector-capable search without FAISS.
+
+This change consolidates on the DocumentDB hybrid search implementation that
+already exists in `registry/repositories/documentdb/search_repository.py`.
 
 ### User Stories
-- As a contributor, I want the codebase to contain no references to FAISS so I am not confused about whether it is active.
-- As an operator, I want Docker images and deployments to exclude FAISS dependencies so container images are smaller and native library issues are avoided.
-- As a developer, I want search to use only DocumentDB so the codebase is simpler to maintain.
+
+- As an operator, I want to deploy the registry without FAISS native library
+  dependencies so that Docker builds are simpler and faster.
+- As a developer, I want a single vector search implementation so that I do not
+  need to maintain two separate backends.
+- As a developer, I want test fixtures to not depend on FAISS mocks so that test
+  infrastructure is simpler.
+- As an end user, I want search to continue working exactly as before after the
+  FAISS removal.
 
 ### Acceptance Criteria
-- [ ] `faiss-cpu` removed from `pyproject.toml` dependencies
-- [ ] No Python file imports `faiss` or references `FaissService`, `FaissSearchRepository`, or `faiss_service`
-- [ ] `registry/search/service.py` (the FAISS service module) deleted
-- [ ] `registry/repositories/file/search_repository.py` deleted
-- [ ] `faiss_index_path` and `faiss_metadata_path` removed from `registry/core/config.py`
-- [ ] `FaissMetadata` schema removed from `registry/core/schemas.py`
-- [ ] Search repository factory (`get_search_repository()`) no longer branches to `FaissSearchRepository`; always returns `DocumentDBSearchRepository`
-- [ ] All `faiss_service.add_or_update_service`, `faiss_service.remove_service`, `faiss_service.add_or_update_agent`, `faiss_service.remove_agent`, `faiss_service.add_or_update_entity`, `faiss_service.save_data` calls removed from API routes and batch processors
-- [ ] `faiss_search_time_ms` field removed from metrics/telemetry schemas and client code
-- [ ] Comments in API routes updated to remove FAISS mentions
-- [ ] All documentation files updated: `docs/`, `release-notes/`, `terraform/`, `cli/`, `api/`, and any other markdown with FAISS references
-- [ ] FAISS mock fixture (`tests/fixtures/mocks/mock_faiss.py`) and related test files removed
-- [ ] Docker, docker-compose, and build config comments updated to remove FAISS
-- [ ] `grep -ri faiss` across the entire repository returns zero results (excluding git history)
-- [ ] Existing tests pass without importing faiss
+
+- [ ] `faiss-cpu` removed from `pyproject.toml` and `uv.lock` regenerates cleanly
+- [ ] `registry/search/service.py` (FaissService class) is deleted
+- [ ] `registry/repositories/file/search_repository.py` (FaissSearchRepository)
+      is deleted or rewritten to delegate to DocumentDBSearchRepository
+- [ ] `registry/repositories/factory.py` routes all backends to
+      DocumentDBSearchRepository
+- [ ] No remaining `import faiss` or `from ... import faiss_service` in
+      production source code under `registry/` or `auth_server/`
+- [ ] Metrics service `faiss_search_time_ms` fields are removed or deprecated
+- [ ] All FAISS references removed from documentation under `docs/` and
+      `release-notes/`
+- [ ] Shell scripts (`cli/service_mgmt.sh`, `terraform/aws-ecs/scripts/`) updated
+      or FAISS verification removed
+- [ ] Terraform/Helm/Docker references to FAISS updated in comments
+- [ ] Test fixtures for FAISS (`mock_faiss.py`, `test_faiss_service.py`) deleted
+- [ ] `tests/conftest.py` FAISS auto-mock removed
+- [ ] Integration tests that patch `faiss_service` updated to use DocumentDB mock
+- [ ] `uv sync` succeeds without FAISS
+- [ ] Existing search API endpoints return the same response shape
+- [ ] DocumentDB hybrid search correctly handles search requests from all callers
+- [ ] No `grep -r "faiss" .` returns matches in source or docs (excluding this issue)
 
 ### Out of Scope
-- Changes to the DocumentDB search implementation itself (existing and working)
-- Migration of existing FAISS index data (no data migration needed since DocumentDB is the active backend)
-- Adding new features
+
+- Migration of existing FAISS index data to DocumentDB (operators should re-index)
+- Removing `sentence-transformers` or embedding providers (embeddings are still
+  needed by DocumentDB hybrid search)
+- Removing the `file` storage backend for other repositories (servers, agents,
+  skills, etc. continue to use file-based storage)
+- Removing embeddings admin routes or embedding configuration
 
 ### Dependencies
-- None. DocumentDB search already works and is the active backend.
+
+- None. The DocumentDB hybrid search repository already implements the full
+  `SearchRepositoryBase` interface.
+- `sentence-transformers` and embedding providers remain needed for generating
+  embeddings used by DocumentDB hybrid search.
 
 ### Related Issues
-- N/A (this is a standalone cleanup task)
+
+- #955 (storage backend configuration alignment)
+- DocumentDB hybrid search design: `docs/design/hybrid-search-architecture.md`

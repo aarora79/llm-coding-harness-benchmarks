@@ -1,85 +1,82 @@
-# GitHub Issue: SSRF Hardening - Block Private/Reserved IPs on Outbound HTTP Requests
+# GitHub Issue: SSRF Hardening - Promote Shared URL Validation to Agent Card and Health Check Paths
 
 ## Title
-SSRF hardening: add URL-to-IP validation to block outbound requests to private/reserved IP ranges
+SSRF hardening: promote existing `_is_safe_url()` into a shared utility and apply it to agent-card fetch and server health-check outbound URLs
 
 ## Labels
-- enhancement
 - security
+- enhancement
+- backend
 
 ## Description
 
 ### Problem Statement
 
-The mcp-gateway-registry makes outbound HTTP requests to URLs supplied by users in multiple places:
+The MCP Gateway Registry makes outbound HTTP requests to user-supplied URLs in several code paths without SSRF protection:
 
-1. **Server health checks** (`registry/health/service.py`): Background and immediate health checks use httpx to probe `proxy_pass_url` from registered MCP server configurations.
-2. **Agent health checks** (`registry/api/agent_routes.py`): The `POST /api/agents/{path}/health` endpoint fetches URLs from `agent_card.url` via httpx GET/HEAD.
-3. **Agent card validation** (`registry/utils/agent_validator.py`): `_check_endpoint_reachability` calls `httpx.get()` on the well-known agent card URL.
-4. **MCP client connections** (`registry/core/mcp_client.py`): Connects to MCP servers at user-supplied base URLs via streamable-http and SSE transports.
+1. **Agent card fetch during registration** - `registry/utils/agent_validator.py` calls `httpx.get()` on a well-known agent-card URL from a user-supplied `url` field. The function `_check_endpoint_reachability()` has no SSRF guard.
 
-None of these code paths validate the resolved IP address of the destination URL before making the request. An attacker who can register servers or agents with URLs pointing to private IP ranges can use the registry server as an SSRF proxy to reach:
+2. **Agent health check endpoint** - `registry/api/agent_routes.py` exposes `POST /api/agents/{path:path}/health` which fetches `/.well-known/agent-card.json` and the agent's base URL via httpx GET/HEAD. Neither URL is validated before the request.
 
-- AWS EC2 Instance Metadata Service (`169.254.169.254`)
-- Internal services on `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`
-- Localhost services (`127.0.0.0/8`, `::1`)
-- Link-local addresses (`169.254.0.0/16`)
-- Documentation/multicast ranges (`224.0.0.0/4`, `240.0.0.0/4`)
+3. **Server health check service** - `registry/health/service.py` has `HealthMonitoringService._check_single_service()` and `perform_immediate_health_check()` that make transport-aware httpx requests to the server's `proxy_pass_url` without any SSRF guard.
 
-Platform operators running this service on AWS ECS Fargate are especially exposed, since the registry runs in a VPC with direct network access to internal services and the metadata endpoint.
+4. **MCP client connections** - `registry/core/mcp_client.py` connects to user-supplied base URLs via streamable-http and SSE transports without SSRF validation.
+
+An SSRF guard already exists in `registry/services/skill_service.py` as the `_is_safe_url()` function. It correctly validates URLs by checking scheme (http/https only), resolving hostnames to IPs, checking against a trusted domains allowlist, and blocking private/loopback/link-local/reserved addresses. However, this guard is **not reused** outside the skill-fetch code path.
+
+An attacker who can register an agent or MCP server can cause the registry to:
+- Access the EC2 Instance Metadata Service at `169.254.169.254`
+- Reach internal services on private IP ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
+- Scan internal network topology
+
+Platform operators running this service on AWS ECS Fargate are especially exposed, since the registry runs in a VPC with direct access to internal services.
 
 ### Proposed Solution
 
-Add a URL validation utility that resolves the hostname to an IP address and rejects URLs whose resolved IP falls within private, reserved, or otherwise unsafe ranges. Apply this validation at the boundaries where outbound HTTP requests originate.
+1. Promote the existing `_is_safe_url()` function from `registry/services/skill_service.py` into a shared utility module (e.g., `registry/utils/url_security.py`). This avoids code duplication and ensures all callers use the same validation logic. The function signature and behaviour remain identical.
 
-The validation function should:
+2. Create a companion exception class (e.g., `SSRFBlockedError`) so callers can distinguish SSRF blocks from other errors.
 
-1. Parse the URL to extract the hostname.
-2. Resolve the hostname to one or more IP addresses (both IPv4 and IPv6).
-3. Check each resolved address against a deny list of private/reserved ranges.
-4. Raise an exception or return a failure result if any resolved address is blocked.
+3. Apply the promoted `_is_safe_url()` at every new outbound-fetch boundary:
+   - `registry/api/agent_routes.py`: In `check_agent_health()` before any httpx call on the agent URL. Also in the agent registration flow so the `url` field is validated before the reachability check.
+   - `registry/utils/agent_validator.py`: In `_check_endpoint_reachability()` before calling `httpx.get()`.
+   - `registry/health/service.py`: In `_check_single_service()` and `perform_immediate_health_check()` before calling `_check_server_endpoint_transport_aware()` with `proxy_pass_url`.
 
-Use only Python standard library modules (`urllib.parse`, `socket`, `ipaddress`) to avoid new dependencies.
+4. Add a configuration setting `MCP_GATEWAY_EXTRA_TRUSTED_HOSTS` (or reuse the existing `github_extra_hosts` pattern) to allowlist specific hostnames that skip the private-IP check. This follows the existing pattern where `settings.github_extra_hosts` is merged into `_trusted_domains()` at runtime.
 
 ### User Stories
 
-- As a platform operator running mcp-gateway-registry in AWS, I want the registry to block outbound connections to private IPs so that I am protected against SSRF attacks via user-supplied server/agent URLs.
-- As a platform operator, I want the change to not break legitimate external URLs so that existing registered servers and agents continue to work.
-- As a developer, I want clear error messages when a URL is blocked so that I can understand why the request was rejected.
+- As a registry operator running on AWS ECS, I want all outbound HTTP requests validated so that the registry cannot be abused for SSRF attacks.
+- As a downstream team registering an MCP server, I want the registry to reject requests to private IPs so that misconfigured server URLs fail fast with a clear error.
+- As a security auditor, I want consistent SSRF protection across all code paths so there are no gaps.
 
 ### Acceptance Criteria
 
-- [ ] A new utility function `validate_outbound_url(url: str) -> None` exists in `registry/utils/url_security.py` (or similar) and uses only stdlib (`ipaddress`, `socket`, `urllib.parse`).
-- [ ] The function blocks requests to these IP ranges:
-  - `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` (private)
-  - `127.0.0.0/8` (loopback)
-  - `169.254.0.0/16` (link-local, includes EC2 IMDS)
-  - `0.0.0.0/8` (nowhere)
-  - `224.0.0.0/4` (multicast)
-  - `240.0.0.0/4` (reserved)
-  - IPv6 equivalents: `::1`, `fc00::/7`, `fe80::/10`, `::ffff:0:0/96` (IPv4-mapped)
-- [ ] The validation is applied at all outbound HTTP entry points:
-  - `registry/health/service.py`: `_perform_health_checks` and `perform_immediate_health_check`
-  - `registry/api/agent_routes.py`: `check_agent_health`
-  - `registry/utils/agent_validator.py`: `_check_endpoint_reachability`
-  - `registry/core/mcp_client.py`: connection functions
-- [ ] The validation is called once before the HTTP client is created, not on every redirect. If a redirect follows a URL to a blocked IP, the validation should run on the redirect target as well (or httpx `follow_redirects=False` should be used).
-- [ ] Unit tests exist for the validation utility covering all blocked ranges and a set of allowed public IPs.
-- [ ] Existing tests continue to pass (update test mocks to use allowed test URLs like `http://example.com`).
-- [ ] No new Python dependencies are added.
+- [ ] `_is_safe_url()` is moved from `registry/services/skill_service.py` into `registry/utils/url_security.py` (or equivalent) and re-exported from `skill_service.py` for backward compatibility.
+- [ ] A new exception `SSRFBlockedError` is added and raised by `_is_safe_url()` when a URL is blocked.
+- [ ] Agent registration endpoint validates the agent `url` with `_is_safe_url()` before storing or fetching the card.
+- [ ] Agent health check endpoint (`POST /api/agents/{path}/health`) validates the URL with `_is_safe_url()` before any httpx request.
+- [ ] `_check_endpoint_reachability()` in `agent_validator.py` validates the URL before calling `httpx.get()`.
+- [ ] `HealthMonitoringService._check_single_service()` validates `proxy_pass_url` before the transport-aware check.
+- [ ] `HealthMonitoringService.perform_immediate_health_check()` validates `proxy_pass_url` before starting.
+- [ ] Redirect targets are validated after every httpx request that follows redirects (same pattern already used in `skill_service.py`).
+- [ ] A configuration setting `MCP_GATEWAY_EXTRA_TRUSTED_HOSTS` is added to `Settings` in `registry/core/config.py` for operator-supplied hostname allowlist entries.
+- [ ] All httpx.AsyncClient instantiations in the affected code paths use `follow_redirects=False` to prevent redirect-based SSRF bypass.
+- [ ] New unit tests cover SSRF blocking for agent and server health check paths.
+- [ ] All existing tests continue to pass.
 
 ### Out of Scope
 
-- Rate limiting or blocking of repeated SSRF attempts (future work).
-- URL allowlisting (operators who need allowlists can deploy a network-level control).
-- Changes to the Docker Compose, Terraform, or Helm deployment manifests (no config parameter needed).
-- Handling of hostname resolution failures that cause DNS rebinding (future enhancement).
+- Changing the existing `_is_safe_url()` validation algorithm.
+- Adding SSRF protection to webhook calls or federation peer-sync calls (different trust model).
+- Modifying the httpx client library, timeout settings, or redirect policy.
+- DNS rebinding protection (infrastructure-level control).
 
 ### Dependencies
 
-- This is a self-contained change with no external dependencies.
-- Existing dependency: `httpx` (already in pyproject.toml).
+- Self-contained within `registry/`. No new Python packages.
 
 ### Related Issues
 
-- Security hardening related to outbound requests from server-hosted applications.
+- This is a security audit finding addressing gaps identified in the registry's outbound request handling.
+- Reference issue: #1282

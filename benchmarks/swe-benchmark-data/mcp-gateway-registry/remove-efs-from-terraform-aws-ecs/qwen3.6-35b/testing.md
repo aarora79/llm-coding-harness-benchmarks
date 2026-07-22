@@ -1,23 +1,26 @@
-# Testing Plan: Remove EFS from terraform/aws-ecs
+# Testing Plan: Remove EFS from terraform/aws-ecs/
 
-*Created: 2026-07-06*
+*Created: 2026-07-22*
 *Related LLD: `./lld.md`*
 *Related Issue: `./github-issue.md`*
 
 ## Overview
 
 ### Scope of Testing
-Verify that all EFS resources, variables, outputs, and references are removed from the `terraform/aws-ecs/` directory without breaking `terraform validate` or `terraform plan`. This covers 3 `.tf` resource files, 2 `.tf` variable/output files, 2 root output/README files, and 2 shell scripts.
+
+This testing plan covers verification that EFS has been completely removed from the terraform/aws-ecs/ deployment without breaking `terraform validate`, `terraform plan`, or the ECS service configurations. It covers code-level greps, Terraform validation, script behavior, and deployment surface verification.
 
 ### Prerequisites
-- [ ] Repository cloned at tag `1.24.4`
-- [ ] `terraform` CLI installed (any version >= 1.0)
-- [ ] Working directory is the repo root
+
+- [ ] Target repo checked out (at tag 1.24.4 or desired branch)
+- [ ] All changes from the LLD implemented (files deleted, files modified)
+- [ ] `terraform` CLI installed (version >= 1.2)
+- [ ] No actual AWS credentials needed for `terraform validate`
 
 ### Shared Variables
+
 ```bash
 export TF_DIR="terraform/aws-ecs"
-export REPO_ROOT="$(git rev-parse --show-toplevel)"
 ```
 
 ## 1. Functional Tests
@@ -26,295 +29,333 @@ export REPO_ROOT="$(git rev-parse --show-toplevel)"
 
 **Command:**
 ```bash
-cd "$REPO_ROOT/$TF_DIR"
-terraform validate
+cd "$TF_DIR" && terraform init -backend=false && terraform validate
 ```
 
-**Expected Result:**
+**Expected:**
 - Exit code 0
-- Output: "Success! The configuration is valid."
-- No errors or warnings about missing references
+- Output: `Success! The configuration is valid.`
 
-**Assertion:**
-The exit code must be 0. If it is non-zero, there are stale references to `module.efs` or the removed variables in some other `.tf` file.
+**Assertions:**
+- No errors about missing modules, missing variables, or undefined references
+- No errors about `module.efs` (since storage.tf is deleted, any remaining reference is an error)
+- No errors about removed variables `efs_throughput_mode` or `efs_provisioned_throughput`
 
-### 1.2 Terraform Plan - No EFS Resources
-
-**Command:**
-```bash
-cd "$REPO_ROOT/$TF_DIR"
-terraform plan -input=false -detailed-exitcode \
-  -var "name=test-efs-removal" \
-  -var "aws_region=us-east-1" \
-  -var "keycloak_admin_password=test123" \
-  -var "keycloak_database_password=test123" \
-  -var "documentdb_admin_password=test123" \
-  -var "storage_backend=file"
-```
-
-**Expected Result:**
-- Exit code 0 (no changes to existing state) or 2 (changes to destroy EFS)
-- The plan output must NOT contain any of:
-  - `aws_efs_file_system`
-  - `aws_efs_mount_target`
-  - `aws_efs_access_point`
-  - `aws_vpc_security_group_rule` with "efs" in the description
-  - `aws_vpc_security_group_egress_rule` with "efs" in the name
-  - `module.efs`
-
-**Negative Case:**
-If the plan shows `aws_efs_file_system` resources, some EFS reference was missed in the `.tf` files.
-
-### 1.3 Grep Verification - No EFS References in .tf Files
+### 1.2 Terraform Plan
 
 **Command:**
 ```bash
-grep -rn "aws_efs\|efs_volume_configuration\|module\.efs\|var\.efs_\|mount.*efs\|efs_id\|efs_arn\|efs_access" \
-  --include="*.tf" "$REPO_ROOT/$TF_DIR/" || echo "PASS: No EFS references found"
+cd "$TF_DIR" && terraform init -backend=false && terraform plan -input=false \
+  -var='aws_region=us-east-1' \
+  -var='name=test-efs-removal' \
+  -var='storage_backend=file' \
+  -var='keycloak_admin_password=test' \
+  -var='documentdb_credentials_secret_arn=' \
+  -var='ingress_cidr_blocks=["10.0.0.0/8"]' \
+  -var='enable_monitoring=false' \
+  -var='enable_autoscaling=false' 2>&1
 ```
 
-**Expected Result:**
-- Zero matches from `grep`
-- Exit code 1 from grep (no matches) is acceptable
+**Expected:**
+- Exit code 0
+- Plan succeeds with zero errors
+- No EFS-related resources in the plan
 
-**Negative Case:**
-If grep finds any match, that file still references EFS and was missed in the removal.
+**Assertions:**
+- Plan output contains no `aws_efs_file_system`
+- Plan output contains no `aws_efs_mount_target`
+- Plan output contains no `aws_efs_access_point`
+- Plan output contains no `aws_vpc_security_group_rule` referencing port 2049 from the EFS module
 
-### 1.4 Grep Verification - No EFS References in README
+### 1.3 EFS Reference Grep in Terraform Files
 
 **Command:**
 ```bash
-grep -n "elasticfilesystem" "$REPO_ROOT/$TF_DIR/README.md" || echo "PASS: No elasticfilesystem references"
+grep -rni 'module\.efs\|efs_volume_configuration\|efs_throughput' "$TF_DIR" --include="*.tf" | grep -v '.terraform/' | grep -v 'Binary'
 ```
 
-**Expected Result:**
+**Expected:**
 - Zero matches
 
-### 1.5 Verify Removed Variables No Longer Exist
+**Assertions:**
+- No files contain `module.efs`
+- No files contain `efs_volume_configuration`
+- No files contain `efs_throughput_mode` or `efs_provisioned_throughput`
+
+### 1.4 EFS Reference Grep in Shell Scripts
 
 **Command:**
 ```bash
-grep -n "efs_throughput_mode\|efs_provisioned_throughput" \
-  "$REPO_ROOT/$TF_DIR/modules/mcp-gateway/variables.tf" || echo "PASS: EFS variables removed"
+grep -rni 'mcp_gateway_efs\|EFS_ID\|efs_access_point' "$TF_DIR/scripts/" 2>/dev/null || echo "No EFS references in scripts (PASS)"
 ```
 
-**Expected Result:**
-- Zero matches in the module variables file
+**Expected:**
+- No meaningful EFS references (commented-out deprecation messages are acceptable)
 
-### 1.6 Verify Removed Outputs No Longer Exist
-
-**Command:**
-```bash
-# Module outputs
-grep -n 'output "efs_' \
-  "$REPO_ROOT/$TF_DIR/modules/mcp-gateway/outputs.tf" || echo "PASS: Module EFS outputs removed"
-
-# Root outputs
-grep -n 'output "mcp_gateway_efs_' \
-  "$REPO_ROOT/$TF_DIR/outputs.tf" || echo "PASS: Root EFS outputs removed"
-```
-
-**Expected Result:**
-- Zero matches in both files
-
-### 1.7 Verify storage.tf is Deleted
-
-**Command:**
-```bash
-test -f "$REPO_ROOT/$TF_DIR/modules/mcp-gateway/storage.tf" && echo "FAIL: storage.tf still exists" || echo "PASS: storage.tf removed"
-```
-
-**Expected Result:**
-- File does not exist
+**Assertions:**
+- `run-scopes-init-task.sh` does not reference EFS IDs (or has been deprecated entirely)
+- `post-deployment-setup.sh` does not validate `mcp_gateway_efs_id`
 
 ## 2. Backwards Compatibility Tests
 
-### 2.1 Existing Deployments Without EFS Variables
-
-**Scenario:** A deployment that does not set `efs_throughput_mode` or `efs_provisioned_throughput` (most deployments, since these had defaults).
+### 2.1 No EFS References in ECS Service Definitions
 
 **Command:**
 ```bash
-cd "$REPO_ROOT/$TF_DIR"
-terraform plan -input=false -detailed-exitcode \
-  -var "storage_backend=file" \
-  -var "keycloak_admin_password=test123" \
-  -var "keycloak_database_password=test123" \
-  -var "documentdb_admin_password=test123"
+grep -n 'efs\|EFS' "$TF_DIR/modules/mcp-gateway/ecs-services.tf" || echo "No EFS references found (PASS)"
 ```
 
-**Expected Result:**
-- Exit code 0 (no planned changes) or 2 (EFS resources to destroy)
-- No error about missing variable values
+**Expected:**
+- No matches, or only comments about EFS removal
 
-**Justification:** The variables had defaults (`bursting`, `100`) and most deployments did not explicitly set them. Removing them should not cause validation errors for deployments that didn't override them.
+**Assertions:**
+- `volume = {}` appears in both auth service and MCPGW service blocks (not an EFS volume block)
+- No `sourceVolume` references to `mcp-logs`, `auth-config`, or `mcpgw-data`
+- `SCOPES_CONFIG_PATH` in auth service section is `/app/auth_server/scopes.yml` (not `/efs/`)
 
-### 2.2 Terraform State Compatibility
-
-**Scenario:** A deployment with existing EFS resources in Terraform state.
+### 2.2 No EFS Outputs in Module
 
 **Command:**
 ```bash
-cd "$REPO_ROOT/$TF_DIR"
-terraform plan -input=false
+grep -n 'efs' "$TF_DIR/modules/mcp-gateway/outputs.tf" || echo "No EFS references found (PASS)"
 ```
 
-**Expected Result:**
-- Plan shows the EFS resources being **destroyed**:
-  - `~ aws_efs_file_system.mcp_gateway_efs` -> `destroy`
-  - `~ aws_efs_mount_target.*` -> `destroy`
-  - `~ aws_efs_access_point.*` -> `destroy`
-  - `~ aws_vpc_security_group.*` (EFS SG) -> `destroy`
-  - `~ aws_vpc_security_group_egress_rule.efs_all_outbound` -> `destroy`
-- No other unexpected resources are modified or added
+**Expected:**
+- No matches
 
-**Justification:** Terraform reconciles state by matching resource addresses. Removing the `.tf` definitions means Terraform will plan to destroy the orphaned resources.
+**Assertions:**
+- No `output "efs_id"`, `output "efs_arn"`, `output "efs_access_points"`
+- Service Discovery outputs and other non-EFS outputs still exist
+
+### 2.3 No EFS Outputs in Root Module
+
+**Command:**
+```bash
+grep -n 'mcp_gateway_efs' "$TF_DIR/outputs.tf" || echo "No EFS output passthrough found (PASS)"
+```
+
+**Expected:**
+- No matches
+
+**Assertions:**
+- No `output "mcp_gateway_efs_id"`, `output "mcp_gateway_efs_arn"`, `output "mcp_gateway_efs_access_points"`
+- Monitoring outputs and other non-EFS outputs still exist
+
+### 2.4 No EFS Variables in Module
+
+**Command:**
+```bash
+grep -n 'efs_throughput\|efs_provisioned' "$TF_DIR/modules/mcp-gateway/variables.tf" || echo "No EFS variables found (PASS)"
+```
+
+**Expected:**
+- No matches
+
+### 2.5 Registry Service Unchanged
+
+**Command:**
+```bash
+grep -A5 'ecs_service_registry' "$TF_DIR/modules/mcp-gateway/ecs-services.tf" | head -10
+```
+
+**Expected:**
+- Registry service still has `volume = {}` (was already non-EFS before this change)
+- Registry service SCOPES_CONFIG_PATH still `/app/auth_server/scopes.yml`
+
+### 2.6 Auth Service SCOPES_CONFIG_PATH
+
+**Command:**
+```bash
+grep -A2 'SCOPES_CONFIG_PATH' "$TF_DIR/modules/mcp-gateway/ecs-services.tf" | head -6
+```
+
+**Expected:**
+- Auth service sets `SCOPES_CONFIG_PATH` to `/app/auth_server/scopes.yml`
+- No reference to `/efs/` in auth service section
+
+### 2.7 MCPGW Volume Configuration
+
+**Command:**
+```bash
+grep -B5 -A10 'ecs_service_mcpgw' "$TF_DIR/modules/mcp-gateway/ecs-services.tf" | grep -A5 'volume'
+```
+
+**Expected:**
+- MCPGW service has `volume = {}` (no EFS volumes)
 
 ## 3. UX Tests
 
-### 3.1 terraform plan Output Clarity
+### 3.1 Script Error Messages
 
-**Scenario:** An operator reviews `terraform plan` output and confirms no EFS resources are present.
-
-**Command:**
-```bash
-cd "$REPO_ROOT/$TF_DIR"
-terraform plan -input=false -var "storage_backend=file" -var "keycloak_admin_password=test123" -var "keycloak_database_password=test123" -var "documentdb_admin_password=test123" 2>&1 | grep -i "efs" && echo "FAIL: EFS still visible" || echo "PASS: No EFS in plan"
-```
-
-**Expected Result:**
-- The word "EFS" or "efs" does not appear in the plan output (except possibly in the resource destruction section for resources being removed)
-
-**Post-deployment note:** After `terraform apply`, the plan should show zero EFS references in both "Resources to add", "Resources to change", and "Resources to destroy" sections.
-
-### 3.2 README Documentation Accuracy
-
-**Scenario:** A new platform engineer reads the IAM permissions section in README.md and does not see `elasticfilesystem:*`.
+**Test:** Run `run-scopes-init-task.sh` after EFS removal.
 
 **Command:**
 ```bash
-grep -c "elasticfilesystem" "$REPO_ROOT/$TF_DIR/README.md"
+cd "$TF_DIR" && bash scripts/run-scopes-init-task.sh --skip-build 2>&1 || true
 ```
 
-**Expected Result:**
-- Exit code 1 (zero matches from grep, meaning the permission was removed)
+**Expected:**
+- Script fails gracefully with a clear error message indicating EFS has been removed
+- Error message guides users to bundle scopes.yml in the container image or use an alternative mechanism
+
+### 3.2 Post-Deployment Setup Validation
+
+**Test:** Run `post-deployment-setup.sh` with EFS outputs missing.
+
+**Command:**
+```bash
+# Simulate: create a terraform-outputs.json that has all required fields EXCEPT mcp_gateway_efs_id
+echo '{"vpc_id":{"value":"vpc-123"},"ecs_cluster_name":{"value":"test"},"ecs_cluster_arn":{"value":"arn:aws:ecs:..."},"mcp_gateway_url":{"value":"http://test"},"mcp_gateway_auth_url":{"value":"http://test"},"keycloak_url":{"value":"http://test"}}' > /tmp/test-outputs.json
+```
+
+**Expected:**
+- Validation passes (mcp_gateway_efs_id is no longer required)
+- No error about missing EFS output
+
+### 3.3 Post-Deployment Setup EFS Fallback
+
+**Test:** Verify that the `_initialize_scopes` function does not attempt EFS initialization when DocumentDB is absent.
+
+**Command:**
+```bash
+grep -A15 '_initialize_scopes' "$TF_DIR/scripts/post-deployment-setup.sh" | grep -i 'efs\|run-scopes-init' || echo "No EFS fallback in _initialize_scopes (PASS)"
+```
+
+**Expected:**
+- No EFS fallback in the `_initialize_scopes` function (or it explicitly errors instead of silently running the deprecated script)
 
 ## 4. Deployment Surface Tests
 
-### 4.1 Terraform Wiring
-
-**Check:** All `.tf` files in `terraform/aws-ecs/` and its subdirectories parse without errors.
+### 4.1 storage.tf Deletion
 
 **Command:**
 ```bash
-cd "$REPO_ROOT/$TF_DIR"
-# Verify no stray references
-for f in $(find . -name "*.tf"); do
-  terraform fmt -check "$f" || echo "FORMAT ISSUE: $f"
-done
+test -f "$TF_DIR/modules/mcp-gateway/storage.tf" && echo "FAIL: storage.tf still exists" || echo "PASS: storage.tf deleted"
 ```
 
-**Expected Result:**
-- All files pass `terraform fmt -check` (or are auto-fixed by `terraform fmt`)
-- No syntax errors
+**Expected:**
+- storage.tf does not exist
 
-### 4.2 Helm / EKS Wiring
-
-**Verdict:** **Not Applicable** - This change is scoped to `terraform/aws-ecs/` only. Helm charts under `charts/` are out of scope per the issue definition. A follow-up issue should be filed for Helm chart cleanup.
-
-### 4.3 Docker Compose Wiring
-
-**Verdict:** **Not Applicable** - Docker Compose files under `docker/` are out of scope per the issue definition. A follow-up issue should be filed for Docker Compose cleanup.
-
-### 4.4 Deploy and Verify (Dry Run)
-
-**Scenario:** Full dry-run plan to verify no unexpected changes.
+### 4.2 README IAM Permissions
 
 **Command:**
 ```bash
-cd "$REPO_ROOT/$TF_DIR"
-terraform plan -input=false -detailed-exitcode \
-  -var "name=test-efs-dryrun" \
-  -var "aws_region=us-east-1" \
-  -var "vpc_cidr=10.0.0.0/16" \
-  -var "keycloak_admin_password=test123" \
-  -var "keycloak_database_password=test123" \
-  -var "documentdb_admin_password=test123" \
-  -var "storage_backend=file" \
-  -var "enable_cloudfront=false" \
-  -var "enable_route53_dns=false" \
-  -var "enable_waf=false" \
-  -var "enable_monitoring=false" \
-  -var "enable_observability=false" \
-  -var "enable_demo_servers=false" \
-  2>&1 | tee /tmp/terraform-plan-output.txt
-
-# Verify no EFS resources in plan
-grep -i "efs" /tmp/terraform-plan-output.txt && echo "WARNING: EFS references found in plan" || echo "PASS: No EFS in plan output"
+grep 'elasticfilesystem' "$TF_DIR/README.md" || echo "No elasticfilesystem reference found (PASS)"
 ```
 
-**Expected Result:**
-- Exit code 0 (no changes) or 2 (changes to destroy EFS)
-- No EFS resources in the plan output for resources being created or modified
+**Expected:**
+- No `elasticfilesystem:*` in README.md
 
-### 4.5 Rollback Verification
-
-**Scenario:** The change needs to be rolled back.
+### 4.3 README Features List
 
 **Command:**
 ```bash
-# Revert all changes via git
-git checkout -- terraform/aws-ecs/
+grep -i 'EFS Shared Storage' "$TF_DIR/README.md" || echo "No EFS Shared Storage feature mentioned (PASS)"
 ```
 
-**Expected Result:**
-- All EFS resources, variables, outputs, and references are restored
-- `terraform validate` passes with EFS resources present
+**Expected:**
+- No mention of "EFS Shared Storage" in README.md
 
-**Justification:** Since this is a pure code change with no external API calls, rolling back is a `git checkout` of the changed files.
+### 4.4 terraform.tfvars.example
+
+**Command:**
+```bash
+grep -i 'efs' "$TF_DIR/terraform.tfvars.example" || echo "No EFS entries found (PASS)"
+```
+
+**Expected:**
+- No EFS-related entries (confirmed: there were none to begin with)
+
+### 4.5 Module Variable Wiring
+
+**Command:**
+```bash
+grep 'efs_throughput_mode\|efs_provisioned_throughput' "$TF_DIR/main.tf" || echo "No EFS wiring in main.tf (PASS)"
+```
+
+**Expected:**
+- No EFS variable wiring in main.tf (confirmed: there was none to begin with)
+
+### 4.6 Helm Charts (No EFS)
+
+**Command:**
+```bash
+grep -ri 'efs' "$TF_DIR/../charts/" 2>/dev/null | grep -v 'global\.' || echo "No EFS references in Helm charts (PASS)"
+```
+
+**Expected:**
+- No EFS references in Helm chart templates (the charts target Kubernetes, not ECS)
+
+### 4.7 Deploy and Verify (Full Plan Simulation)
+
+**Command:**
+```bash
+cd "$TF_DIR" && terraform init -backend=false && terraform plan -input=false \
+  -var='aws_region=us-east-1' \
+  -var='name=test-efs-removal' \
+  -var='storage_backend=file' \
+  -var='keycloak_admin_password=test' \
+  -var='documentdb_credentials_secret_arn=' \
+  -var='ingress_cidr_blocks=["10.0.0.0/8"]' \
+  -var='enable_monitoring=false' \
+  -var='enable_autoscaling=false' 2>&1
+```
+
+**Expected:**
+- Plan succeeds
+- No EFS resources in plan
+
+**Assertions:**
+- Plan contains no `aws_efs_file_system`
+- Plan contains no `aws_efs_mount_target`
+- Plan contains no `aws_efs_access_point`
+- Plan contains no `aws_vpc_security_group_rule` or `aws_vpc_security_group_egress_rule` for port 2049 or EFS
+
+### 4.8 Rollback Verification (State Safety)
+
+**Note:** This test verifies that the Terraform configuration is syntactically valid and can be re-initialized. In a real deployment, operators should:
+1. Export current state: `terraform state list`
+2. Review planned changes: `terraform plan -out=tfplan`
+3. Verify no unexpected resource deletions (beyond EFS resources being destroyed)
+
+**Command:**
+```bash
+cd "$TF_DIR" && terraform init -backend=false && terraform state list 2>&1 | head -5
+```
+
+**Expected:**
+- State list command succeeds (even with no state, it should not error)
 
 ## 5. End-to-End API Tests
 
-**Verdict:** **Not Applicable** - This change does not modify any HTTP endpoints or CLI commands. The ECS task definitions are rendered by Terraform but the application code (registry, auth-server, mcpgw) is not modified. No API-level testing is needed.
+**Not Applicable** - This change does not modify any HTTP endpoints or CLI commands. It only modifies Terraform infrastructure configuration.
 
 ## 6. Test Execution Checklist
 
 - [ ] Section 1 (Functional) passes
-  - [ ] 1.1 `terraform validate` returns exit code 0
-  - [ ] 1.2 `terraform plan` shows no EFS resources (or only EFS destruction)
-  - [ ] 1.3 Grep returns zero EFS references in .tf files
-  - [ ] 1.4 Grep returns zero EFS references in README.md
-  - [ ] 1.5 EFS variables removed from module variables
-  - [ ] 1.6 EFS outputs removed from module and root outputs
-  - [ ] 1.7 storage.tf is deleted
+  - [ ] `terraform validate` succeeds
+  - [ ] `terraform plan` succeeds
+  - [ ] No `module.efs` references in `.tf` files
+  - [ ] No `efs_volume_configuration` references in `.tf` files
 - [ ] Section 2 (Backwards Compat) verified
-  - [ ] 2.1 Deployments without EFS variables still plan
-  - [ ] 2.2 Existing state shows EFS destruction
+  - [ ] No EFS references in ecs-services.tf
+  - [ ] No EFS outputs in module outputs.tf
+  - [ ] No EFS outputs in root outputs.tf
+  - [ ] No EFS variables in module variables.tf
+  - [ ] Registry service unchanged
+  - [ ] Auth service SCOPES_CONFIG_PATH updated to `/app/auth_server/scopes.yml`
+  - [ ] MCPGW volume is `volume = {}`
 - [ ] Section 3 (UX) verified
-  - [ ] 3.1 terraform plan output is clean
-  - [ ] 3.2 README IAM permissions no longer include elasticfilesystem
+  - [ ] run-scopes-init-task.sh fails gracefully
+  - [ ] post-deployment-setup.sh does not require mcp_gateway_efs_id
+  - [ ] post-deployment-setup.sh EFS fallback removed
 - [ ] Section 4 (Deployment) verified
-  - [ ] 4.1 terraform fmt check passes
-  - [ ] 4.2 Dry-run plan succeeds
-  - [ ] 4.3 Rollback via git checkout works
+  - [ ] storage.tf deleted
+  - [ ] README IAM permissions updated (no elasticfilesystem)
+  - [ ] README features list updated (no EFS Shared Storage)
+  - [ ] terraform.tfvars.example has no EFS entries
+  - [ ] main.tf has no EFS wiring
+  - [ ] terraform plan produces no EFS resources
 - [ ] Section 5 (E2E) verified or marked Not Applicable
-- [ ] `terraform validate` passes with no regressions
-
-## Pre-Deployment Warning for Live Environments
-
-Before running `terraform apply` on a live deployment, operators should:
-
-1. **Verify the EFS file system is empty or that data loss is acceptable:**
-   ```bash
-   aws efs describe-file-systems --query "FileSystems[*].[Id,Name]"
-   aws efs describe-access-points --file-system-id <EFS_ID>
-   ```
-
-2. **Run `terraform plan` first and review the destruction list:**
-   ```bash
-   terraform plan -detailed-exitcode 2>&1 | grep -i "destroy"
-   ```
-
-3. **Confirm scopes.yml availability:** The auth-server needs scopes.yml at a path other than `/efs/auth_config/`. Verify it is available in the Docker image or via an alternative mechanism.
-
-4. **Accept that EFS destruction is irreversible:** AWS EFS has a 7-day pending-deletion state, but data is unrecoverable after deletion.
+- [ ] Unit tests: N/A (no application code changes)
+- [ ] Integration tests: N/A (Terraform validation is the integration test)

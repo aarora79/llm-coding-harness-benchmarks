@@ -1,148 +1,185 @@
-# Expert Review: Remove EFS from terraform/aws-ecs
+# Expert Review: Remove EFS from terraform/aws-ecs/
 
-*Created: 2026-07-06*
-*Related LLD: `./lld.md`*
-*Related Issue: `./github-issue.md`*
-
-## Reviewer 1: Pixel (Frontend Engineer)
-
-**Focus:** UI/UX, components, state, API integration
-
-**Verdict:** APPROVED (Not Applicable)
-
-**Strengths:**
-- This change has no UI impact. The registry frontend communicates via REST API and MCP protocol, neither of which depends on the storage backend being EFS.
-
-**Concerns:**
-- None. This is a pure infrastructure change.
-
-**Questions for Author:**
-- None.
-
----
-
-## Reviewer 2: Byte (Backend Engineer)
-
-**Focus:** API design, data models, business logic, performance
-
-**Verdict:** APPROVED WITH CHANGES
-
-**Strengths:**
-- The LLD correctly identifies that the registry service already removed its EFS mounts (line 1367: "EFS volumes removed").
-- The approach to remove the entire `storage.tf` file is correct - EFS is a self-contained module that doesn't feed into other resources.
-- The comparison matrix is thorough.
-
-**Concerns:**
-1. **SCOPES_CONFIG_PATH mismatch**: The auth-server at line 221 sets `SCOPES_CONFIG_PATH` to `/efs/auth_config/auth_config/scopes.yml`. The LLD says to change it to `/app/auth_server/scopes.yml` (matching mcpgw at line 822). However, I need to verify that the auth-server Docker image actually has scopes.yml at `/app/auth_server/scopes.yml`. The auth-server and mcpgw may use different image paths. If scopes.yml is no longer available at the new path, the auth-server will fail to start.
-
-2. **The mcpgw `app_log_dir` variable**: The LLD flags line 1760 where `app_log_dir` is set for mcpgw. If the default path for app logs on ECS is the container's ephemeral storage (as stated in the variable description at line 1053-1055), then removing the EFS volume for mcpgw is fine. But if `app_log_dir` was previously set to an EFS path, it needs to be verified.
-
-3. **The `volume = {}` assignment**: The LLD correctly identifies that both auth-server and mcpgw should have `volume = {}` after removing EFS volumes. This matches the pattern already used by the registry service.
-
-**Recommendations:**
-- Verify that scopes.yml is baked into the Docker image for both auth-server and mcpgw, or that it can be provided via an alternative mechanism (e.g., init container from S3).
-- Verify the default value of `app_log_dir` and whether mcpgw needs it explicitly set to empty string after EFS removal.
-
----
-
-## Reviewer 3: Circuit (SRE/DevOps Engineer)
-
-**Focus:** Deployment, monitoring, scaling, infrastructure
-
-**Verdict:** APPROVED WITH CHANGES
-
-**Strengths:**
-- The LLD's file-by-file change plan is excellent and complete.
-- The observation that registry already follows the `volume = {}` pattern provides a safe template.
-- Correctly identifies the 7-day pending-deletion behavior of EFS as a safety net.
-
-**Concerns:**
-1. **Destructive operation warning**: For production deployments that have the EFS file system already provisioned with data, `terraform apply` will attempt to destroy the EFS file system. Even with force deletion, this could lose any data that was written to the EFS mount points (though they are unused, the file system itself may contain old data from the migration period). The LLD should explicitly recommend a dry-run first and add a warning in README.md.
-
-2. **Terraform state consistency**: If any operator has already run `terraform apply` against the current state with EFS resources, the plan output will show 1 EFS file system, 3 mount targets (per private subnet), 6 access points, 2 security groups (one from the module, one manual egress rule), and 3 outputs being destroyed. This is expected and correct.
-
-3. **Script dependencies**: The `run-scopes-init-task.sh` and `post-deployment-setup.sh` scripts are called by platform engineers after deployment. If these scripts fail because they reference EFS outputs that no longer exist, it will cause confusion. The LLD correctly identifies these but should recommend either:
-   - Removing the scripts entirely if they are no longer useful
-   - Updating them to use a non-EFS scopes initialization method
-   - Adding a deprecation notice and redirect to the new method
-
-4. **CloudWatch monitoring**: EFS generates CloudWatch metrics (BurstBalance, TotalIOBytes, etc.). Removing EFS means these metrics will stop. This is fine since nothing was using them, but operators monitoring dashboards should be aware.
-
-**Recommendations:**
-- Add a "Pre-deployment checklist" to the README:
-  - Verify no data exists on the EFS file system (or accept data loss)
-  - Run `terraform plan` first and review the destruction list
-  - Ensure scopes.yml is available via the Docker image or alternative mechanism
-- Recommend removing or replacing the EFS-dependent scripts in the same PR.
-
----
-
-## Reviewer 4: Cipher (Security Engineer)
-
-**Focus:** AuthN/AuthZ, validation, OWASP, data protection
-
-**Verdict:** APPROVED
-
-**Strengths:**
-- Removing EFS eliminates a potential attack surface (NFS port 2049 is no longer exposed).
-- The EFS security group ingress rule (NFS from VPC CIDR) is removed, reducing the network attack surface.
-- The IAM permission `elasticfilesystem:*` is removed from the README, reducing the principle of least privilege footprint.
-
-**Concerns:**
-1. **No data loss risk**: EFS was encrypted (`encrypted = true` in storage.tf line 16). When the file system is destroyed, the data is unrecoverable. This is acceptable for unused infrastructure but should be documented.
-
-2. **Access point POSIX users**: The EFS access points use `posix_user` with `uid = 1000, gid = 1000`. These are not security-sensitive (they are just ownership mappings for the file system) and are not credentials.
-
-3. **Transit encryption**: The EFS volumes had `transit_encryption = "ENABLED"`. Removing EFS eliminates the need for transit encryption configuration, which is a simplification.
-
-**Questions for Author:**
-- None. This change only removes infrastructure, not adds security-sensitive features.
-
----
-
-## Reviewer 5: Sage (SMTS - Overall Architecture)
-
-**Focus:** Architecture, code quality, maintainability
-
-**Verdict:** APPROVED WITH CHANGES
-
-**Strengths:**
-- The LLD demonstrates thorough understanding of the codebase. The grep-based analysis found all EFS references and correctly identified dead vs. active code paths.
-- The decision to remove the entire `storage.tf` file (183 lines) rather than conditionally disable EFS is correct for a fully obsolete dependency.
-- The estimated lines of code (-268) is accurate and shows this is a net reduction in complexity.
-- The alternatives considered section correctly rejects both the `prevent_destroy` and `enable_efs` variable approaches.
-
-**Concerns:**
-1. **Script removal or update is critical**: The `run-scopes-init-task.sh` script creates an entire ECS task definition with EFS volumes. If this script is removed, it should be done carefully - there may be operators who have not yet migrated their scopes.yml management. The LLD should recommend adding a deprecation notice in the README before script removal, or providing an alternative mechanism in the same PR.
-
-2. **Helm charts and Docker Compose**: The LLD correctly marks these as out of scope. However, if the Helm charts still reference EFS volumes for auth-server or mcpgw, there will be an inconsistency between the Terraform deployment and the Helm deployment. The LLD should note this and recommend filing a follow-up issue for the Helm chart cleanup.
-
-3. **Module coupling**: The mcp_gateway module passes EFS IDs via `module.efs.id` to the ECS service modules. After removal, these references will cause compilation errors. The LLD correctly plans to remove all references in the correct order (storage.tf first, then ecs-services.tf, then outputs).
-
-**Recommendations:**
-- Add a follow-up task for Helm chart and Docker Compose EFS cleanup.
-- Add a deprecation notice before removing the EFS-dependent scripts.
-- The overall approach (full removal, no toggle) is the right call for infrastructure that is fully obsolete.
-
----
+*Created: 2026-07-22*
+*Author: Claude*
+*Status: Draft*
 
 ## Review Summary
 
+This is a straightforward infrastructure cleanup task. The EFS file system has become obsolete since the application migrated to S3/DocumentDB for all persistent storage. The registry ECS service has already been migrated away from EFS (confirmed by comments in `ecs-services.tf` lines 1367 and 1419), confirming this is the right direction. The task scope is well-defined: remove EFS resources, update ECS volume mounts, and clean up scripts.
+
+### Final Verdicts
+
+| Reviewer | Verdict | Blockers |
+|----------|---------|----------|
+| Frontend (Pixel) | APPROVED | 0 |
+| Backend (Byte) | APPROVED WITH CHANGES | 1 |
+| SRE (Circuit) | APPROVED WITH CHANGES | 1 |
+| Security (Cipher) | APPROVED | 0 |
+| SMTS (Sage) | APPROVED WITH CHANGES | 1 |
+
+---
+
+## Frontend Engineer: Pixel
+
+### Strengths
+- Clean separation of concerns: only Terraform files and shell scripts are modified, no application code changes required.
+- The pattern follows the existing migration of the registry service (volume = {}, updated SCOPES_CONFIG_PATH).
+- The LLD provides before/after code snippets for every change, making it easy to verify.
+
+### Concerns
+- None relevant to UI/frontend.
+
+### Recommendations
+- None.
+
+### Questions for Author
+- None.
+
+### Verdict: APPROVED
+
+---
+
+## Backend Engineer: Byte
+
+### Strengths
+- The LLD correctly identifies that EFS variables (`efs_throughput_mode`, `efs_provisioned_throughput`) are not passed through from root module to child module, simplifying the scope.
+- The analysis correctly notes that the registry service already uses `/app/auth_server/scopes.yml` as the non-EFS alternative.
+- The file-change table is comprehensive with line numbers.
+- Correctly identifies that 3 of 6 EFS access points (servers, models, agents) are unused.
+
+### Concerns
+
+1. **Critical: SCOPES_CONFIG_PATH change assumes container image bundling.** The LLD proposes changing `SCOPES_CONFIG_PATH` from `/efs/auth_config/auth_config/scopes.yml` to `/app/auth_server/scopes.yml`. This assumes the auth service container image already includes `scopes.yml` at that path. If the image does not include it, the auth service will fail to start. The LLD should explicitly state this as a deployment prerequisite.
+
+2. **MCPGW `/app/data` persistence gap.** The MCPGW service mounts EFS at `/app/data` for persistence. The LLD notes this but does not detail what happens to existing data when EFS is removed. If MCPGW stores state in `/app/data`, that state will be lost on the next deployment. The LLD should recommend verifying that MCPGW re-syncs its state from DocumentDB/S3 on startup, or that `/app/data` is ephemeral.
+
+3. **Auth service logs volume.** The auth service mounts EFS for `/app/logs`. Removing this volume mount means logs go to stdout/CloudWatch (which is the desired behavior for ECS/Fargate with `enable_cloudwatch_logging = true`). The LLD should explicitly confirm that the auth service's log configuration uses CloudWatch.
+
+### Recommendations
+1. Add a deployment prerequisite note: "Ensure the auth service container image includes scopes.yml at the new path before applying the Terraform change."
+2. Verify MCPGW does not depend on `/app/data` persistence across restarts, or document the expected state-loss behavior.
+3. Confirm auth service logs go to CloudWatch and the EFS logs mount is not the primary log destination.
+
+### Questions for Author
+- Q1: Does the auth service container image include `scopes.yml` at `/app/auth_server/scopes.yml`?
+- Q2: Does the MCPGW service store persistent state in `/app/data`, or is that directory used only for transient data?
+- Q3: Is the auth service's EFS logs mount redundant given `enable_cloudwatch_logging = true`?
+
+### Verdict: APPROVED WITH CHANGES
+
+---
+
+## SRE/DevOps Engineer: Circuit
+
+### Strengths
+- Comprehensive identification of all files with EFS references across the terraform directory.
+- The file-change table with line numbers is excellent for the implementer.
+- Correctly identifies that `run-scopes-init-task.sh` is entirely EFS-dependent and should be deprecated or rewritten.
+- The LLD's comparison matrix (Chosen vs. Keep Trimmed EFS vs. S3 + Mountpoint) is well-reasoned.
+
+### Concerns
+
+1. **Critical: `terraform plan` will produce a large destroy-only plan for existing EFS resources.** If operators have existing deployments with EFS file systems, running `terraform apply` after this change will attempt to destroy the EFS file system, all mount targets, and the security group. If any of these resources have data (especially the EFS file system itself), that data will be permanently lost. The LLD recommends a staged approach but should be more explicit about this being a breaking change.
+
+2. **`run-scopes-init-task.sh` needs migration guidance.** This script is used to initialize scopes.yml on EFS. After EFS is removed, operators will need a new mechanism to distribute scopes.yml. The LLD suggests deprecation, but operators need a concrete migration path. The recommended approach is to bundle scopes.yml in the container image and remove the script. If that is not feasible, the script should be rewritten to use a different mechanism (e.g., write to Secrets Manager and mount as a secret).
+
+3. **Terraform state management.** The LLD should recommend that operators export their current state, apply the changes to a staging environment first, and verify the destroy plan looks correct before applying to production.
+
+4. **The `_initialize_scopes` function in `post-deployment-setup.sh` has an EFS fallback.** When DocumentDB is not configured, the script falls through to "EFS mode (default)" and runs `run-scopes-init-task.sh`. After EFS removal, this fallback becomes a silent failure point. Operators who have not configured DocumentDB will not get their scopes initialized and may not notice until the auth service fails. The script should be updated to error explicitly rather than silently skip.
+
+### Recommendations
+1. Add a phased rollout plan: (a) deploy ECS changes first (removes mounts), (b) verify services run without EFS, (c) run `terraform apply` to destroy EFS resources.
+2. Provide a concrete migration path for `run-scopes-init-task.sh` (bundle in image, deprecate script, or rewrite for new mechanism).
+3. Include terraform state verification steps in the testing plan.
+4. Update `post-deployment-setup.sh` to error explicitly rather than silently skip when EFS outputs are missing.
+
+### Questions for Author
+- Q1: What is the migration strategy for operators with existing EFS data?
+- Q2: Will the auth service container image be updated to include scopes.yml before or after the Terraform change?
+- Q3: What happens to the `_initialize_scopes` fallback path for operators who have not configured DocumentDB?
+
+### Verdict: APPROVED WITH CHANGES
+
+---
+
+## Security Engineer: Cipher
+
+### Strengths
+- Removing EFS reduces the attack surface (no NFS port 2049 open to VPC CIDR).
+- All EFS volumes used `transit_encryption = "ENABLED"`, which is good practice.
+- Removing `elasticfilesystem:*` IAM permission is consistent with least-privilege.
+- The EFS security group (created by `terraform-aws-modules/efs/aws`) had ingress from VPC CIDR only and an egress rule for all outbound. Both are removed, reducing the network attack surface.
+
+### Concerns
+
+1. **EFS security group removal.** The EFS security group has ingress rules for NFS from VPC CIDR and an egress rule for all outbound. When the EFS module is removed, the security group is also destroyed. The analysis confirms no other resources reference `module.efs.security_group_id`, which is good. However, operators should verify that any Network ACLs or security group rules referencing the EFS security group by ID (beyond Terraform) are cleaned up.
+
+2. **No encryption key dependency.** The EFS module uses `encrypted = true` with AWS-managed keys. Removing EFS also removes this encryption dependency. No KMS key changes are needed.
+
+3. **No new security risks introduced.** The change only removes resources; it does not introduce new network paths, IAM permissions, or data exposure vectors.
+
+### Recommendations
+- None. The change reduces attack surface.
+
+### Questions for Author
+- Q1: Has the EFS security group been referenced by any other security group rules in the Terraform config? (Answer: No, confirmed during analysis.)
+
+### Verdict: APPROVED
+
+---
+
+## SMTS (Overall): Sage
+
+### Strengths
+- The LLD is thorough and includes exact line numbers, before/after code snippets, and a comprehensive file-change table.
+- The pattern follows an existing precedent (registry service migration) which reduces risk.
+- No new dependencies are introduced; this is a pure removal change.
+- The LLD correctly identifies that EFS variables are not passed through from the root module, simplifying the scope.
+- The alternatives considered section is well-reasoned and the comparison matrix is useful.
+- Net deletion of ~581 lines of code is a positive outcome.
+
+### Concerns
+
+1. **Data loss risk.** The biggest concern is that operators with existing EFS deployments will lose all data on the EFS file system when `terraform apply` is run. The LLD mentions this in the error handling section but should provide a more prominent warning in the rollout plan. This should be a required acknowledgment before applying to production.
+
+2. **Auth service SCOPES_CONFIG_PATH migration.** The change from `/efs/auth_config/auth_config/scopes.yml` to `/app/auth_server/scopes.yml` is correct, but it assumes the container image already includes the file. If not, the first deployment after this change will fail. The LLD should recommend updating the container image as a prerequisite.
+
+3. **`run-scopes-init-task.sh` deprecation.** The script is entirely EFS-dependent. The LLD's recommendation to "replace with graceful error" is reasonable but operators need a clear migration path. The recommendation should be: deprecate the script entirely if scopes.yml is bundled in the container image, or rewrite it for a different storage mechanism if external distribution is still needed.
+
+4. **MCPGW `/app/data` persistence.** The LLD correctly identifies this gap but should more strongly recommend verifying that MCPGW does not require persistent local storage. If MCPGW stores important data in `/app/data`, that data will be lost.
+
+5. **post-deployment-setup.sh silent failure.** The `_initialize_scopes` function's EFS fallback (lines 549-567) will become a silent failure point. When operators run post-deployment setup without DocumentDB configured, the script will silently skip scopes initialization and not notify anyone. This should be an explicit error.
+
+### Recommendations
+1. Add a prominent data-loss warning before the EFS destruction step in the rollout plan.
+2. Require container image update as a deployment prerequisite.
+3. Provide a clear deprecation path for `run-scopes-init-task.sh`.
+4. Verify MCPGW persistence assumptions before applying to production.
+5. Update `post-deployment-setup.sh` to error explicitly when EFS outputs are missing and DocumentDB is not configured.
+
+### Open Questions
+- Q1: What data exists on the EFS file system, and can it be safely lost?
+- Q2: Is there a separate PR to update the auth service container image with bundled scopes.yml?
+- Q3: What happens to the `_initialize_scopes` fallback for operators who have not configured DocumentDB?
+
+### Verdict: APPROVED WITH CHANGES
+
+---
+
+## Final Summary
+
 | Reviewer | Verdict | Blockers | Key Recommendations |
 |----------|---------|----------|---------------------|
-| Pixel (Frontend) | APPROVED | 0 | N/A - no UI impact |
-| Byte (Backend) | APPROVED WITH CHANGES | 0 | Verify scopes.yml availability in Docker image; verify app_log_dir default |
-| Circuit (SRE) | APPROVED WITH CHANGES | 0 | Add dry-run warning; remove/update EFS-dependent scripts; note CloudWatch metric loss |
-| Cipher (Security) | APPROVED | 0 | None - security posture improves with EFS removal |
-| Sage (SMTS) | APPROVED WITH CHANGES | 0 | Add follow-up task for Helm/Docker; add deprecation notice for scripts |
+| Frontend (Pixel) | APPROVED | 0 | N/A |
+| Backend (Byte) | APPROVED WITH CHANGES | 1 | Verify container image includes scopes.yml; check MCPGW /app/data persistence |
+| SRE (Circuit) | APPROVED WITH CHANGES | 1 | Phased rollout; provide migration path for run-scopes-init-task.sh |
+| Security (Cipher) | APPROVED | 0 | N/A |
+| SMTS (Sage) | APPROVED WITH CHANGES | 1 | Data-loss warning; container image prerequisite; script deprecation |
 
-**Total blockers: 0**
-**Total concerns: 3 (all addressable in the implementation)**
-
-## Next Steps
-
-1. Verify that scopes.yml is available in the Docker images for both auth-server and mcpgw (or define the alternative mechanism).
-2. Add a pre-deployment warning to README.md for operators performing this change on live infrastructure.
-3. Decide whether to remove or update the EFS-dependent scripts (run-scopes-init-task.sh, post-deployment-setup.sh) in the same PR or as a follow-up.
-4. File a follow-up issue for Helm chart and Docker Compose EFS cleanup.
-5. Execute the implementation per the LLD step-by-step plan.
+### Next Steps
+1. Address Byte's concerns about the auth service SCOPES_CONFIG_PATH and MCPGW /app/data persistence
+2. Add a prominent data-loss warning to the rollout plan
+3. Clarify the migration path for run-scopes-init-task.sh (deprecate vs. rewrite)
+4. Verify container image includes scopes.yml before applying Terraform changes
+5. Update post-deployment-setup.sh to error explicitly when EFS outputs are missing

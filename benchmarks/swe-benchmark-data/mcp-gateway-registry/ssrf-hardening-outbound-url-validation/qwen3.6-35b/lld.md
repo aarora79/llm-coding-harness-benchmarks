@@ -1,6 +1,6 @@
-# Low-Level Design: SSRF Hardening - Outbound URL Validation
+# Low-Level Design: SSRF Hardening - Promote Shared URL Validation
 
-*Created: 2026-07-06*
+*Created: 2026-07-22*
 *Author: Claude*
 *Status: Draft*
 
@@ -24,30 +24,33 @@
 
 ### Problem Statement
 
-The mcp-gateway-registry makes outbound HTTP requests to URLs supplied by users in multiple code paths:
+The MCP Gateway Registry makes outbound HTTP requests to user-supplied URLs in multiple code paths without SSRF protection. A guard function `_is_safe_url()` exists in `registry/services/skill_service.py` and is correctly applied to SKILL.md fetches (skill registration, health checks, content fetching), but is **not reused** in the agent-card fetch and server health-check paths.
 
-1. **Server health checks** (`registry/health/service.py`): Background and immediate health checks probe `proxy_pass_url` from registered MCP server configurations using httpx.
-2. **Agent health checks** (`registry/api/agent_routes.py`): The `POST /api/agents/{path}/health` endpoint fetches URLs from `agent_card.url` via httpx GET/HEAD.
-3. **Agent card validation** (`registry/utils/agent_validator.py`): `_check_endpoint_reachability` calls `httpx.get()` on the well-known agent card URL during registration.
-4. **MCP client connections** (`registry/core/mcp_client.py`): Connects to MCP servers at user-supplied base URLs via streamable-http and SSE transports.
+The vulnerable endpoints:
 
-None of these code paths validate the resolved IP address before making the outbound request. An attacker who can register servers or agents with URLs pointing to private or reserved IPs can use the registry server as an SSRF proxy to reach the AWS EC2 Instance Metadata Service (169.254.169.254), internal services on private IP ranges, or localhost services.
+| Code Path | File | Function | User-Supplied URL Field |
+|-----------|------|----------|------------------------|
+| Agent registration reachability check | `registry/utils/agent_validator.py` | `_check_endpoint_reachability()` | `url` from `AgentCard` |
+| Agent health check endpoint | `registry/api/agent_routes.py` | `check_agent_health()` | `agent_card.url` |
+| Server background health checks | `registry/health/service.py` | `_check_single_service()` | `proxy_pass_url` from server info |
+| Server immediate health check | `registry/health/service.py` | `perform_immediate_health_check()` | `proxy_pass_url` from server info |
+| MCP client connections | `registry/core/mcp_client.py` | `get_mcp_connection_result()` | `base_url` |
 
 ### Goals
 
-- Block outbound HTTP requests to private, loopback, link-local, multicast, and reserved IP ranges.
-- Use only Python standard library modules (`urllib.parse`, `socket`, `ipaddress`) - no new dependencies.
-- Apply validation consistently across all four outbound HTTP entry points.
-- Preserve functionality for legitimate external URLs (DNS-resolved hostnames pointing to public IPs).
-- Provide clear error messages when a URL is rejected.
-- Ensure health checks do not follow redirects to blocked IPs (use `follow_redirects=False` in httpx).
+- Promote the existing `_is_safe_url()` into a shared utility so all outbound-fetch callers use the same logic.
+- Apply the promoted function to the five vulnerable code paths identified above.
+- Add an operator-configurable hostname allowlist (`MCP_GATEWAY_EXTRA_TRUSTED_HOSTS`) for internal hosts that must remain reachable.
+- Validate redirect targets after every HTTP request (same pattern already used in `skill_service.py`).
+- Prevent redirect-based SSRF bypass by using `follow_redirects=False` on all affected httpx.AsyncClient instantiations.
+- Zero new Python dependencies.
 
 ### Non-Goals
 
-- Rate limiting or account locking for repeated SSRF attempts.
-- URL allowlisting (operators who need allowlists should use network-level controls).
-- DNS rebinding protection (future enhancement).
-- Changes to deployment manifests (Docker Compose, Terraform, Helm).
+- Changing the `_is_safe_url()` validation algorithm (IP private-check, DNS resolution, trusted domains).
+- Adding SSRF protection to webhook calls or federation peer-sync.
+- Modifying httpx, timeout settings, or redirect policy beyond `follow_redirects=False`.
+- DNS rebinding protection (infrastructure-level control only).
 
 ## Codebase Analysis
 
@@ -55,51 +58,72 @@ None of these code paths validate the resolved IP address before making the outb
 
 | File/Directory | Purpose | Relevance to This Change |
 |----------------|---------|--------------------------|
-| `registry/health/service.py` | HealthMonitoringService performs periodic and immediate health checks on registered servers | Primary SSRF vector: makes outbound HTTP requests to `proxy_pass_url` and resolved endpoints via httpx |
-| `registry/api/agent_routes.py` | Agent CRUD endpoints including `check_agent_health` | SSRF vector: fetches `agent_card.url` via httpx GET/HEAD |
-| `registry/utils/agent_validator.py` | Validates A2A agent cards during registration | SSRF vector: `_check_endpoint_reachability` makes `httpx.get()` to user-supplied URLs |
-| `registry/core/mcp_client.py` | MCP client for connecting to external MCP servers | SSRF vector: connects to user-supplied base URLs via streamable-http and SSE transports |
-| `registry/core/endpoint_utils.py` | Resolves endpoint URLs from server info | Helper that constructs URLs - validation should happen after resolution |
-| `registry/utils/request_utils.py` | Contains `get_client_ip` for inbound IP extraction | Already uses `ipaddress` module - good pattern reference |
-| `registry/core/config.py` | Pydantic Settings with all configuration | No config parameter needed for this change |
-| `tests/unit/utils/test_url_normalize.py` | Tests for URL normalization utility | Pattern reference for testing URL utilities |
-| `tests/unit/health/test_health_service.py` | Tests for health monitoring | Existing tests will need updates for validation |
+| `registry/services/skill_service.py` | Contains `_is_safe_url()`, `_is_private_ip()`, `_trusted_domains()` | Source of the existing SSRF guard to be promoted |
+| `registry/api/agent_routes.py` | Agent CRUD endpoints, `check_agent_health()` at line 883 | Agent card fetch with NO SSRF guard |
+| `registry/utils/agent_validator.py` | `_check_endpoint_reachability()` at line 196 | Agent registration reachability check with NO SSRF guard |
+| `registry/health/service.py` | `HealthMonitoringService`, `_check_single_service()` at line 410 | Server health checks with NO SSRF guard |
+| `registry/core/config.py` | Pydantic Settings (`Settings` class) | Pattern reference for new config parameter |
+| `registry/core/mcp_client.py` | MCP client connections to user-supplied base URLs | Additional candidate for validation |
+| `registry/utils/request_utils.py` | `get_client_ip()` using `ipaddress` module | Pattern reference for IP validation |
+| `tests/unit/services/test_skill_service_ssrf_allowlist.py` | Existing tests for `_trusted_domains()` | Test pattern reference |
 
 ### Existing Patterns Identified
 
-1. **Pydantic Settings**: All configuration lives in `registry/core/config.py` using pydantic_settings BaseSettings. Fields use `Field()` with descriptions.
+1. **SSRF guard in skill_service.py** (`_is_safe_url()`, lines 128-192):
+   - Parses URL scheme (only `http`/`https` allowed).
+   - Checks hostname against `_trusted_domains()` allowlist (built-in + `github_extra_hosts`).
+   - Resolves hostname via `socket.getaddrinfo()` and checks each IP with `_is_private_ip()`.
+   - `_is_private_ip()` blocks `is_private`, `is_loopback`, `is_link_local`, `is_reserved`, and `169.254.169.254`.
+   - Returns `False` on any exception (fail-closed).
 
-2. **HTTP Client**: httpx.AsyncClient is the standard HTTP client. Timeouts are configured via `httpx.Timeout()`. The `follow_redirects=True` parameter is used in health checks.
+2. **Trusted domains pattern** (`_trusted_domains()`, lines 81-91):
+   - Uses `@lru_cache(maxsize=1)` for immutability.
+   - Reads `settings.github_extra_hosts` (comma-separated) and merges with `_DEFAULT_TRUSTED_DOMAINS`.
+   - **Design decision for this change**: The new shared module will read `settings.mcp_gateway_extra_trusted_hosts` instead. The `github_extra_hosts` field is used only by GitHub-specific code paths (PAT/auth). A single `MCP_GATEWAY_EXTRA_TRUSTED_HOSTS` env var is the correct general-purpose setting for all SSRF trust decisions. This is a one-line change in `_trusted_domains()`.
 
-3. **Logging**: The codebase uses Python standard `logging` module with `logging.basicConfig()`. Logger names follow `logger = logging.getLogger(__name__)`.
+3. **Redirect validation** (used in `_validate_skill_md_url`, `_parse_skill_md_content`, `_check_skill_health`, `_fetch_authenticated_content`):
+   - After each httpx request with `follow_redirects=True`, the final URL is validated with `_is_safe_url()` again.
+   - If the redirect target is unsafe, a validation error is raised.
 
-4. **URL validation (format only)**: `registry/utils/agent_validator.py` has `_validate_agent_url()` which checks URL format with a regex but does NOT validate resolved IPs.
+4. **Pydantic Settings** (`registry/core/config.py`):
+   - All settings are fields on the `Settings(BaseSettings)` class.
+   - Configuration is loaded from environment variables (e.g., `GITHUB_EXTRA_HOSTS`).
+   - Fields use `Field()` with `default`, `description`.
+   - `model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)`.
 
-5. **IP address usage**: `registry/utils/request_utils.py` uses `ipaddress.ip_address()` for validating inbound client IPs. This is the pattern to follow for outbound validation.
+5. **HTTP client pattern**:
+   - `httpx.AsyncClient` is the standard client.
+   - Timeouts set via `httpx.Timeout()`.
+   - `follow_redirects=True` used as default in health checks. **This design mandates `follow_redirects=False` for all new call sites and existing call sites in the five affected code paths.**
 
-6. **Error handling**: FastAPI endpoints raise `HTTPException` with appropriate status codes. Internal utilities raise custom exceptions or return tuples of (success, error_message).
+6. **Logging pattern**:
+   - `logging.basicConfig(level=logging.INFO, format="%(asctime)s,p%(process)s,{%(filename)s:%(lineno)d},%(levelname)s,%(message)s")`.
+   - Logger: `logger = logging.getLogger(__name__)`.
+   - SSRF events use `logger.warning()`.
 
 ### Integration Points
 
 | Component | Integration Type | Details |
 |-----------|------------------|---------|
-| `registry/health/service.py._perform_health_checks` | Calls validation before httpx request | Validate `proxy_pass_url` and each resolved endpoint URL before making the health check request |
-| `registry/health/service.py.perform_immediate_health_check` | Calls validation before httpx request | Validate `proxy_pass_url` before the immediate check |
-| `registry/api/agent_routes.py.check_agent_health` | Calls validation on agent_card.url | Validate the base URL and each URL in `_build_agent_health_urls` before making requests |
-| `registry/utils/agent_validator.py._check_endpoint_reachability` | Calls validation on agent card URL | Validate the well_known_url before httpx.get() |
-| `registry/core/mcp_client.py` functions | Calls validation on base URLs | Validate base_url before any transport detection or connection attempt |
+| `skill_service.py._is_safe_url()` | Source to extract | Promote to shared module |
+| `skill_service.py._trusted_domains()` | Source to adapt | Read `mcp_gateway_extra_trusted_hosts` instead of `github_extra_hosts` |
+| `agent_routes.py.check_agent_health()` | Add validation | Before httpx GET/HEAD on agent URL; use `follow_redirects=False` |
+| `agent_validator.py._check_endpoint_reachability()` | Add validation | Before `httpx.get()` on well-known URL; use `follow_redirects=False` |
+| `health/service.py._check_single_service()` | Add validation | Before `_check_server_endpoint_transport_aware()` |
+| `health/service.py.perform_immediate_health_check()` | Add validation | Before httpx client creation |
+| `mcp_client.py.get_mcp_connection_result()` | Add validation | Before establishing MCP connection |
 
 ### Constraints and Limitations Discovered
 
-1. **DNS resolution needed for validation**: The function must resolve hostnames to IPs before checking, which adds latency (typically < 50ms for cached DNS). This is acceptable for health checks and registration validation.
+1. **DNS resolution latency**: `_is_safe_url()` performs DNS resolution on every call. Health checks are already batched (10 per batch, 0.5s between batches), so the extra ~10-50ms per validation is negligible.
 
-2. **Multiple IP addresses**: A single hostname can resolve to multiple IPs (round-robin DNS, CDN). The validation should reject if ANY resolved IP is in a blocked range.
+2. **Multiple IP addresses per hostname**: A hostname can resolve to both public and private IPs (e.g., dual-stack with IPv6 mapped to private). The current code rejects if ANY resolved IP is private, which is the safe choice.
 
-3. **Redirect handling**: httpx `follow_redirects=True` will automatically follow 3xx responses to new URLs. If a redirect target points to a blocked IP, the current code would connect without validation. Either:
-   - Use `follow_redirects=False` and validate each redirect target manually, or
-   - Accept that httpx will follow at most one redirect by default and validate the redirect URL in the response handler.
+3. **Redirect handling in health checks**: The current `health/service.py` uses `follow_redirects=True` (inherited from httpx defaults). **This design mandates `follow_redirects=False` on all affected httpx.AsyncClient calls and manual redirect validation** (see Step 6 below).
 
-4. **Local development**: Developers may register servers with `http://localhost:8000` or `http://127.0.0.1:8000`. The validation must block these in production but there is no mechanism to whitelist localhost for dev environments. This is intentional - localhost access should be handled via direct access, not through the registry.
+4. **Local development**: Developers may register servers with `http://localhost:8000`. The guard will block these. The new `MCP_GATEWAY_EXTRA_TRUSTED_HOSTS` setting does NOT provide a localhost bypass - localhost should be accessed directly, not through the registry.
+
+5. **Existing callers**: `skill_service.py` imports and uses `_is_safe_url()` and `_trusted_domains()` internally. After promotion, `skill_service.py` will import them from the shared module to avoid duplication.
 
 ## Architecture
 
@@ -112,47 +136,63 @@ None of these code paths validate the resolved IP address before making the outb
 |  Registers       |-------->|                   |-------->|                  |
 |  Server/Agent    |   URL   |  +-------------+  |   URL   |  Public IPs: OK  |
 |  with URL        |-------->|  | SSRF Guard  |  |         |  Private IPs:    |
-|                  |         |  | (new)       |  |         |  BLOCKED         |
-|                  |<--------|  +-------------+  |<--------|                  |
-+------------------+  Result |         |         |   Result  +------------------+
-                            |         v         |
-                            |  +-------------+  |
-                            |  | httpx       |  |
-                            |  | AsyncClient |  |
-                            |  +-------------+  |
-                            +-------------------+
+|                  |<--------|  | (shared)    |  |<--------|  BLOCKED         |
++------------------+  Result  +-------------+  |   Result  +------------------+
+                               |         |         |
+                               v         v         |
+                              +-------------+      |
+                              | httpx       |      |
+                              | AsyncClient |      |
+                              | (no redirects) |    |
+                              +-------------+      |
+                                             +------------------+
+                                             |  Internal        |
+                                             |  Services / IMDS |
+                                             |  BLOCKED BY SSRF |
+                                             +------------------+
 ```
 
 ### Flow Diagram
 
 ```
-User registers server/agent with URL
+Outbound HTTP request handler
     |
     v
-Outbound HTTP handler (health check / MCP connect / validation)
+_is_safe_url(url)                       <-- Shared utility, imported everywhere
+    |
+    +---> Scheme not http/https --> return False
+    |
+    +---> Hostname in trusted domains --> return True
+    |
+    +---> Bare IP in blocked ranges --> return False
+    |
+    +---> Resolve hostname to IPs
+    |       |
+    |       +---> DNS failure --> return False
+    |       |
+    |       +---> ANY IP is private --> return False
+    |       |
+    |       +---> All IPs public --> return True
     |
     v
-validate_outbound_url(url)
-    |
-    +---> URL cannot be parsed --> raise ValueError("Invalid URL")
-    |
-    +---> Hostname resolves to blocked IP --> raise SSRFBlockedError("Blocked")
-    |
-    +---> All IPs are public --> proceed with httpx request
+httpx.AsyncClient(follow_redirects=False)
     |
     v
-httpx.AsyncClient.get/post(url, ...)
+Handle redirects manually:
+    |
+    +---> 3xx response with Location header
+    |       |
+    |       +---> Validate redirect target with _is_safe_url()
+    |       |       |
+    |       |       +---> Unsafe --> block, return 403
+    |       |       |
+    |       |       +---> Safe --> follow redirect
+    |       |
+    |       +---> 2xx response --> process
+    |
+    v
+Process response
 ```
-
-### Component: validate_outbound_url
-
-The new utility function will:
-
-1. Parse the URL using `urllib.parse.urlparse()` to extract the hostname.
-2. Resolve the hostname using `socket.getaddrinfo()` to get all IP addresses.
-3. Check each IP against the blocked ranges using `ipaddress.ip_address()`.
-4. Raise `SSRFBlockedError` if any IP is in a blocked range.
-5. Return `None` (void) if all IPs are allowed.
 
 ## Data Models
 
@@ -162,292 +202,556 @@ The new utility function will:
 class SSRFBlockedError(Exception):
     """Raised when a URL resolves to a blocked (private/reserved) IP address."""
 
-    def __init__(self, url: str, blocked_ips: list[str] | None = None):
+    def __init__(self, url: str, blocked_ips: list[str] | None = None) -> None:
         self.url = url
         self.blocked_ips = blocked_ips or []
-        message = f"SSRF protection: URL resolves to blocked IP range: {url}"
+        parts = [f"SSRF protection: URL resolves to blocked IP range: {url}"]
         if self.blocked_ips:
-            message += f" (blocked: {', '.join(self.blocked_ips)})"
-        super().__init__(message)
+            parts.append(f"blocked: {', '.join(self.blocked_ips)}")
+        super().__init__(" ".join(parts))
 ```
 
-### Validation Utility: registry/utils/url_security.py
+### Shared Utility Module: `registry/utils/url_security.py`
 
-```python
-import ipaddress
-import logging
-import socket
-from urllib.parse import urlparse
-
-logger = logging.getLogger(__name__)
-
-# Single comprehensive IPv4 blocked network set
-_BLOCKED_IPV4: list[ipaddress.IPv4Network] = [
-    ipaddress.IPv4Network("0.0.0.0/8"),       # "This" network
-    ipaddress.IPv4Network("10.0.0.0/8"),      # Private
-    ipaddress.IPv4Network("100.64.0.0/10"),   # CGNAT
-    ipaddress.IPv4Network("127.0.0.0/8"),     # Loopback
-    ipaddress.IPv4Network("169.254.0.0/16"),  # Link-local (EC2 IMDS)
-    ipaddress.IPv4Network("172.16.0.0/12"),   # Private
-    ipaddress.IPv4Network("192.168.0.0/16"),  # Private
-    ipaddress.IPv4Network("224.0.0.0/4"),     # Multicast
-    ipaddress.IPv4Network("240.0.0.0/4"),     # Reserved
-]
-
-# IPv6 blocked networks
-_BLOCKED_IPV6: list[ipaddress.IPv6Network] = [
-    ipaddress.IPv6Network("::1/128"),              # Loopback
-    ipaddress.IPv6Network("::/128"),               # Unspecified
-    ipaddress.IPv6Network("::ffff:0:0/96"),        # IPv4-mapped
-    ipaddress.IPv6Network("fc00::/7"),             # Unique local
-    ipaddress.IPv6Network("fe80::/10"),            # Link-local
-    ipaddress.IPv6Network("ff00::/8"),             # Multicast
-]
-```
-
-### Configuration
-
-No new configuration parameters are needed. The SSRF guard is always-on with no toggle. This is a security control that should never be disabled by operators.
-
-## New Dependencies
-
-No new dependencies. This change uses only Python standard library modules:
-- `urllib.parse` - URL parsing
-- `socket` - DNS resolution
-- `ipaddress` - IP address validation
-
-## Implementation Details
-
-### Step 1: Create the validation utility
-
-**File:** `registry/utils/url_security.py` (new file)
+This module centralizes all SSRF protection logic.
 
 ```python
 """SSRF protection: validate outbound URLs against blocked IP ranges.
 
-This module provides a single public function, validate_outbound_url(), that
-resolves a URL's hostname to IP addresses and rejects any that fall within
-private, loopback, link-local, multicast, or otherwise reserved ranges.
-
-Uses only Python standard library modules (urllib.parse, socket, ipaddress).
+Promoted from registry/services/skill_service.py to make the guard reusable
+across all outbound-fetch code paths (agent cards, server health checks, etc.).
 """
 
 import ipaddress
 import logging
 import socket
+from functools import lru_cache
 from urllib.parse import urlparse
+
+from registry.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-_BLOCKED_IPV4 = [
-    ipaddress.IPv4Network("0.0.0.0/8"),
-    ipaddress.IPv4Network("10.0.0.0/8"),
-    ipaddress.IPv4Network("100.64.0.0/10"),
-    ipaddress.IPv4Network("127.0.0.0/8"),
-    ipaddress.IPv4Network("169.254.0.0/16"),
-    ipaddress.IPv4Network("172.16.0.0/12"),
-    ipaddress.IPv4Network("192.168.0.0/16"),
-    ipaddress.IPv4Network("224.0.0.0/4"),
-    ipaddress.IPv4Network("240.0.0.0/4"),
-]
+SSRF_BLOCKED_STATUS = "blocked: ssrf"
 
-_BLOCKED_IPV6 = [
-    ipaddress.IPv6Network("::/128"),
-    ipaddress.IPv6Network("::1/128"),
-    ipaddress.IPv6Network("::ffff:0:0/96"),
-    ipaddress.IPv6Network("fc00::/7"),
-    ipaddress.IPv6Network("fe80::/10"),
-    ipaddress.IPv6Network("ff00::/8"),
-]
+# Built-in trusted domains that skip IP validation (SSRF allowlist).
+_DEFAULT_TRUSTED_DOMAINS: frozenset = frozenset({
+    "github.com",
+    "gitlab.com",
+    "raw.githubusercontent.com",
+    "bitbucket.org",
+})
 
 
-class SSRFBlockedError(Exception):
-    """Raised when a URL resolves to a blocked IP range."""
+def _is_private_ip(ip_str: str) -> bool:
+    """Check if an IP address is private, loopback, link-local, or reserved.
 
-    def __init__(self, url: str, blocked_ips: list[str] | None = None) -> None:
-        self.url = url
-        self.blocked_ips = blocked_ips or []
-        parts: list[str] = [f"SSRF protection: URL resolves to blocked IP range: {url}"]
-        if self.blocked_ips:
-            parts.append(f"blocked: {', '.join(self.blocked_ips)}")
-        super().__init__(" ".join(parts))
-
-
-def _is_blocked_ipv4(addr: str) -> bool:
-    """Return True if addr is in a blocked IPv4 range."""
-    network = ipaddress.IPv4Address(addr)
-    for blocked in _BLOCKED_IPV4:
-        if network in blocked:
-            return True
-    return False
-
-
-def _is_blocked_ipv6(addr: str) -> bool:
-    """Return True if addr is in a blocked IPv6 range."""
-    network = ipaddress.IPv6Address(addr)
-    for blocked in _BLOCKED_IPV6:
-        if network in blocked:
-            return True
-    return False
-
-
-def validate_outbound_url(url: str) -> None:
-    """Validate that a URL does not resolve to a blocked IP address.
-
-    Resolves the hostname via DNS and checks every returned IP address
-    against the standard private/reserved ranges.  Raises
-    SSRFBlockedError if any address is blocked.
+    This uses Python's built-in ipaddress module checks, which cover
+    RFC 1918 private ranges, loopback, link-local, reserved, and
+    multicast. An explicit check for the cloud metadata endpoint
+    (169.254.169.254) is included for defense-in-depth.
 
     Args:
-        url: The full URL to validate (e.g. "https://example.com/path").
+        ip_str: IP address string to check.
 
-    Raises:
-        ValueError: If the URL cannot be parsed.
-        SSRFBlockedError: If the resolved IP is in a blocked range.
-        socket.gaierror: If DNS resolution fails.
+    Returns:
+        True if the IP is blocked, False otherwise.
     """
-    parsed = urlparse(url)
-    hostname = parsed.hostname
-
-    if not hostname:
-        raise ValueError(f"Cannot extract hostname from URL: {url}")
-
-    # Block bare IPs directly (no DNS needed)
     try:
-        addr = ipaddress.ip_address(hostname)
-        if isinstance(addr, ipaddress.IPv4Address) and _is_blocked_ipv4(str(addr)):
-            raise SSRFBlockedError(url, [str(addr)])
-        if isinstance(addr, ipaddress.IPv6Address) and _is_blocked_ipv6(str(addr)):
-            raise SSRFBlockedError(url, [str(addr)])
-        return  # Public IP literal - allowed
+        addr = ipaddress.ip_address(ip_str)
     except ValueError:
-        pass  # Not a bare IP, must be a hostname - resolve it
+        return True
 
-    # Resolve hostname to IPs
+    if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+        return True
+
+    if ip_str == "169.254.169.254":
+        return True
+
+    return False
+
+
+def _is_trusted_hostname(hostname_lower: str) -> bool:
+    """Check if a hostname is in the trusted domains allowlist.
+
+    Trusted domains skip the IP-check because they are known good hosts.
+    The allowlist includes built-in defaults plus any hosts configured
+    via the MCP_GATEWAY_EXTRA_TRUSTED_HOSTS setting.
+
+    Args:
+        hostname_lower: Lowercase hostname to check.
+
+    Returns:
+        True if the hostname is trusted.
+    """
+    return hostname_lower in _trusted_domains()
+
+
+@lru_cache(maxsize=1)
+def _trusted_domains() -> frozenset[str]:
+    """Return SSRF allowlist: built-in defaults plus configured extra hosts.
+
+    Reads settings.mcp_gateway_extra_trusted_hosts (comma-separated) so a
+    single config knob covers all SSRF trust decisions. Cached because
+    settings are immutable per-process.
+
+    Returns:
+        Frozenset of allowed hostnames that skip IP validation.
+    """
+    extra_raw = getattr(settings, "mcp_gateway_extra_trusted_hosts", "") or ""
+    extra = frozenset(
+        h.strip().lower() for h in extra_raw.split(",") if h.strip()
+    )
+    return _DEFAULT_TRUSTED_DOMAINS | extra
+
+
+def is_safe_url(url: str) -> bool:
+    """Check if a URL is safe to fetch (SSRF protection).
+
+    This function validates that a URL:
+    1. Uses http or https scheme.
+    2. Does not resolve to a private/loopback/link-local IP address.
+    3. Does not target cloud metadata endpoints.
+
+    Trusted domains (github.com, gitlab.com, etc., plus any host configured
+    via MCP_GATEWAY_EXTRA_TRUSTED_HOSTS) skip the IP check so internal hosts
+    on private networks remain reachable.
+
+    Args:
+        url: URL to validate.
+
+    Returns:
+        True if the URL is safe to fetch, False otherwise.
+    """
     try:
-        infos = socket.getaddrinfo(hostname, None)
-    except socket.gaierror as exc:
-        logger.warning("DNS resolution failed for %s: %s", url, exc)
-        raise
+        parsed = urlparse(url)
 
-    blocked_ips: list[str] = []
-    for fam, _socktype, _proto, _canonical, sockaddr in infos:
-        ip_str = sockaddr[0]
-        if fam == socket.AF_INET and _is_blocked_ipv4(ip_str):
-            blocked_ips.append(ip_str)
-        elif fam == socket.AF_INET6 and _is_blocked_ipv6(ip_str):
-            blocked_ips.append(ip_str)
+        # Check scheme - only allow http and https
+        if parsed.scheme not in ("http", "https"):
+            logger.warning("SSRF protection: Blocked URL with scheme '%s'", parsed.scheme)
+            return False
 
-    if blocked_ips:
-        raise SSRFBlockedError(url, blocked_ips)
+        hostname = parsed.hostname
+        if not hostname:
+            logger.warning("SSRF protection: URL has no hostname")
+            return False
 
-    logger.debug("Outbound URL validated: %s (resolved to public IPs)", url)
+        # Check if hostname is in trusted domains allowlist
+        hostname_lower = hostname.lower()
+        if _is_trusted_hostname(hostname_lower):
+            logger.debug("SSRF protection: Trusted domain '%s'", hostname_lower)
+            return True
+
+        # Block bare IPs that match blocked ranges (no DNS needed)
+        try:
+            addr = ipaddress.ip_address(hostname)
+            if _is_private_ip(str(addr)):
+                logger.warning(
+                    "SSRF protection: Blocked bare %s address %s in URL %s",
+                    type(addr).__name__, addr, url,
+                )
+                return False
+        except ValueError:
+            pass  # Not a bare IP, must be a hostname - resolve it
+
+        # Resolve hostname to IP addresses
+        try:
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            addr_info = socket.getaddrinfo(
+                hostname, port, proto=socket.IPPROTO_TCP,
+            )
+        except socket.gaierror as exc:
+            logger.warning(
+                "SSRF protection: Failed to resolve hostname '%s': %s", hostname, exc,
+            )
+            return False
+
+        # Check all resolved IP addresses
+        blocked_ips: list[str] = []
+        for _family, _socktype, _proto, _canonname, sockaddr in addr_info:
+            ip_address = sockaddr[0]
+            if _is_private_ip(ip_address):
+                blocked_ips.append(ip_address)
+
+        if blocked_ips:
+            logger.warning(
+                "SSRF protection: Blocked URL resolving to private IP(s) %s "
+                "for hostname '%s'",
+                blocked_ips, hostname,
+            )
+            return False
+
+        return True
+
+    except Exception as exc:
+        logger.warning("SSRF protection: Error validating URL: %s", exc)
+        return False
 ```
 
-### Step 2: Apply validation in health check service
+### Backward-Compatible Re-exports in `skill_service.py`
 
-**File:** `registry/health/service.py`
-
-In `_perform_health_checks` (around line 367), validate `proxy_pass_url` before creating the httpx client:
+After promotion, `skill_service.py` imports from the shared module instead of defining its own:
 
 ```python
-from ..utils.url_security import validate_outbound_url, SSRFBlockedError
+# In registry/services/skill_service.py - replace the local definitions with:
+from ..utils.url_security import (
+    SSRF_BLOCKED_STATUS,
+    SSRFBlockedError,
+    _DEFAULT_TRUSTED_DOMAINS,
+    _is_private_ip,
+    _trusted_domains,
+    is_safe_url,
+)
 
-# Inside _perform_health_checks, for each service:
-if server_info and server_info.get("proxy_pass_url"):
-    try:
-        validate_outbound_url(server_info["proxy_pass_url"])
-    except SSRFBlockedError as exc:
-        logger.warning("Health check blocked for %s: %s", service_path, exc)
-        self.server_health_status[service_path] = "blocked: ssrf"
-        continue  # Skip this service's health check
-    except (ValueError, socket.gaierror) as exc:
-        logger.warning("Health check validation error for %s: %s", service_path, exc)
-        continue
+# Keep aliases for existing callers within skill_service.py
+_is_safe_url = is_safe_url
 ```
 
-In `perform_immediate_health_check` (around line 1217), add the same validation before creating the httpx client.
+This ensures no internal import breakage.
 
-In `_check_single_service` (around line 429), add validation for `proxy_pass_url`.
+### New Config Parameter
 
-For resolved endpoint URLs (via `get_endpoint_url_from_server_info`), validate the resolved endpoint URL before making the httpx request in `_check_server_endpoint_transport_aware`.
-
-### Step 3: Apply validation in agent health check endpoint
-
-**File:** `registry/api/agent_routes.py`
-
-In `check_agent_health` (around line 920), validate URLs before making httpx requests:
+Add to `Settings` class in `registry/core/config.py`:
 
 ```python
-from ..utils.url_security import validate_outbound_url, SSRFBlockedError
-
-base_url = str(agent_card.url).rstrip("/")
-health_urls = _build_agent_health_urls(base_url)
-
-# Validate all candidate URLs before attempting connections
-for url in health_urls:
-    try:
-        validate_outbound_url(url)
-    except SSRFBlockedError as exc:
-        logger.warning("Agent health check blocked for %s: %s", path, exc)
-        return JSONResponse(
-            status_code=403,
-            content={"detail": "Health check blocked: URL resolves to a private or reserved IP address"},
-        )
+# SSRF Trusted Hosts (applies to all outbound fetches)
+mcp_gateway_extra_trusted_hosts: str = Field(
+    default="",
+    description=(
+        "Comma-separated extra hostnames that skip the SSRF private-IP check. "
+        "Use for internal service hosts that must be reachable by the registry. "
+        "Example: 'internal.example.com,registry.internal.local'. "
+        "Keep the list tight - only add hosts you explicitly trust."
+    ),
+)
 ```
 
-### Step 4: Apply validation in agent validator
+Environment variable: `MCP_GATEWAY_EXTRA_TRUSTED_HOSTS`.
+
+## Implementation Details
+
+### Step-by-Step Plan (for a future implementer)
+
+#### Step 1: Create the shared URL security utility
+
+**File:** `registry/utils/url_security.py` (new file)
+
+Create the file with the content shown in the Data Models section above. This includes:
+- `SSRF_BLOCKED_STATUS` constant
+- `SSRFBlockedError` exception class
+- `_is_private_ip()` helper (single source of truth for IP checking)
+- `_is_trusted_hostname()` / `_trusted_domains()` functions
+- Main `is_safe_url()` function
+
+Verify syntax:
+```bash
+uv run python -m py_compile registry/utils/url_security.py
+```
+
+#### Step 2: Refactor skill_service.py to use the shared module
+
+**File:** `registry/services/skill_service.py`
+
+1. Remove the local definitions of `_is_safe_url()`, `_is_private_ip()`, `_trusted_domains()`, `_DEFAULT_TRUSTED_DOMAINS` (approximately lines 60-192, 71-91, 94-125).
+2. Add imports from the shared module at the top of the file.
+3. Add `_is_safe_url = is_safe_url` alias at the module level.
+4. Verify existing callers in `skill_service.py` (lines 595, 616, 681, 707, 866, 896, 1042, 1071) still resolve correctly.
+
+#### Step 3: Apply validation in agent validator
 
 **File:** `registry/utils/agent_validator.py`
 
-In `_check_endpoint_reachability` (around line 211), validate the well_known_url:
+In `_check_endpoint_reachability()` (around line 211), add validation before the `httpx.get()` call:
 
 ```python
-from registry.utils.url_security import validate_outbound_url, SSRFBlockedError
+from ..utils.url_security import is_safe_url
 
-try:
-    validate_outbound_url(well_known_url)
-except SSRFBlockedError as exc:
-    logger.warning("Endpoint reachability blocked for %s: %s", url, exc)
-    return (False, "SSRF protection: URL resolves to a blocked IP range")
+def _check_endpoint_reachability(url: str) -> tuple[bool, str | None]:
+    """Check if agent endpoint is reachable."""
+    try:
+        well_known_url = f"{url}/.well-known/agent-card.json"
+
+        # SSRF guard - validate before making the request
+        if not is_safe_url(well_known_url):
+            logger.warning("SSRF protection: Blocked reachability check for %s", url)
+            return (False, "SSRF protection: URL resolves to a blocked IP range")
+
+        response = httpx.get(well_known_url, timeout=5.0)
+        # ... rest of function unchanged
 ```
 
-### Step 5: Apply validation in MCP client
+Also validate the base `url` in `validate_agent_card()` before calling `_check_endpoint_reachability()`:
+
+```python
+if check_reachability and agent_card.url:
+    card_url = str(agent_card.url)
+    if not is_safe_url(card_url):
+        warnings.append("Agent endpoint URL blocked by SSRF guard")
+        logger.warning("SSRF protection: Blocked agent URL %s", card_url)
+    else:
+        reachable, error_msg = _check_endpoint_reachability(card_url)
+```
+
+#### Step 4: Apply validation in agent routes health check
+
+**File:** `registry/api/agent_routes.py`
+
+In `check_agent_health()` (around line 920), validate URLs before making httpx requests:
+
+```python
+from ..utils.url_security import is_safe_url
+
+@router.post("/agents/{path:path}/health")
+async def check_agent_health(path: str, ...):
+    # ... existing code until line 920 ...
+
+    base_url = str(agent_card.url).rstrip("/")
+    health_urls = _build_agent_health_urls(base_url)
+
+    # SSRF guard - validate all candidate URLs before attempting connections
+    for url in health_urls:
+        if not is_safe_url(url):
+            logger.warning(
+                "Agent health check blocked for %s: URL %s failed SSRF validation",
+                path, url,
+            )
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "detail": "Health check blocked: URL resolves to a private or reserved IP address",
+                },
+            )
+
+    # ... rest of function unchanged ...
+```
+
+In the agent registration endpoint (`register_agent`), validate the URL before `verify_endpoint=True`:
+
+```python
+from ..utils.url_security import is_safe_url
+
+# In register_agent(), after building agent_card:
+card_url = str(agent_card.url)
+if not is_safe_url(card_url):
+    logger.warning(
+        "Agent registration blocked for '%s': URL %s failed SSRF validation",
+        request.name, card_url,
+    )
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail={
+            "message": "Agent card validation failed",
+            "errors": ["Agent URL is blocked by SSRF protection"],
+            "warnings": [],
+        },
+    )
+```
+
+#### Step 5: Apply validation in health monitoring service
+
+**File:** `registry/health/service.py`
+
+In `_check_single_service()` (around line 410), validate `proxy_pass_url` before calling `_check_server_endpoint_transport_aware()`:
+
+```python
+from ..utils.url_security import SSRF_BLOCKED_STATUS, is_safe_url
+
+async def _check_single_service(self, client, service_path: str, server_info: dict) -> bool:
+    """Check a single service and return True if status changed."""
+    previous_status = self.server_health_status.get(service_path, HealthStatus.UNKNOWN)
+
+    # Local (stdio) servers ...
+    if server_info.get("deployment") == DeploymentType.LOCAL:
+        # ... existing code ...
+
+    proxy_pass_url = server_info.get("proxy_pass_url")
+    new_status = previous_status
+
+    # SSRF guard - validate proxy_pass_url before any health check
+    if proxy_pass_url and not is_safe_url(proxy_pass_url):
+        logger.warning(
+            "Health check blocked for %s: proxy_pass_url %s failed SSRF validation",
+            service_path, proxy_pass_url,
+        )
+        new_status = SSRF_BLOCKED_STATUS
+        self.server_health_status[service_path] = new_status
+        self.server_last_check_time[service_path] = datetime.now(UTC)
+        return previous_status != new_status
+```
+
+In `perform_immediate_health_check()` (around line 1217), add the same validation:
+
+```python
+async def perform_immediate_health_check(self, service_path: str) -> tuple[str, datetime | None]:
+    # ... existing code ...
+    proxy_pass_url = server_info.get("proxy_pass_url")
+
+    # SSRF guard
+    if proxy_pass_url and not is_safe_url(proxy_pass_url):
+        logger.warning(
+            "Immediate health check blocked for %s: SSRF protection",
+            service_path,
+        )
+        self.server_health_status[service_path] = SSRF_BLOCKED_STATUS
+        last_checked_time = datetime.now(UTC)
+        self.server_last_check_time[service_path] = last_checked_time
+        return SSRF_BLOCKED_STATUS, last_checked_time
+```
+
+In `_perform_health_checks()` (around line 339), add validation at the batch level:
+
+```python
+async def _perform_health_checks(self):
+    # ... existing code ...
+    for service_path in enabled_services:
+        server_info = await server_service.get_server_info(service_path, include_credentials=True)
+        if server_info and server_info.get("proxy_pass_url"):
+            # SSRF guard - skip entire service if URL is blocked
+            if not is_safe_url(server_info["proxy_pass_url"]):
+                logger.warning(
+                    "Skipping health check for %s: URL failed SSRF validation",
+                    service_path,
+                )
+                self.server_health_status[service_path] = SSRF_BLOCKED_STATUS
+                self.server_last_check_time[service_path] = datetime.now(UTC)
+                status_changed = True
+                continue  # Skip this service, don't add to check_tasks
+            check_tasks.append((service_path, server_info))
+```
+
+#### Step 6: Apply validation in MCP client
 
 **File:** `registry/core/mcp_client.py`
 
-In `get_mcp_connection_result` (around line 580), validate `base_url` at the start of the function:
+Add validation at the start of `get_mcp_connection_result()`:
 
 ```python
-from ..utils.url_security import validate_outbound_url, SSRFBlockedError
+from ..utils.url_security import is_safe_url
 
-if not base_url:
-    logger.error("MCP Check Error: Base URL is empty.")
-    return None
+async def get_mcp_connection_result(base_url: str, server_info: dict) -> dict | None:
+    if not base_url:
+        logger.error("MCP Check Error: Base URL is empty.")
+        return None
 
-try:
-    validate_outbound_url(base_url)
-except SSRFBlockedError as exc:
-    logger.warning("MCP connection blocked: %s", exc)
-    return None
-except (ValueError, socket.gaierror) as exc:
-    logger.warning("MCP connection validation error: %s", exc)
-    return None
+    if not is_safe_url(base_url):
+        logger.warning("MCP connection blocked: %s failed SSRF validation", base_url)
+        return {"error": "URL blocked by SSRF protection", "tools": None}
+    # ... rest unchanged ...
 ```
 
-Also validate in `get_tools_from_server_with_server_info` and `detect_server_transport_aware`.
+Also validate resolved endpoint URLs in `_check_server_endpoint_transport_aware` (the `endpoint` and `sse_endpoint` returned by `get_endpoint_url_from_server_info`):
+
+```python
+# After resolving endpoint:
+endpoint = get_endpoint_url_from_server_info(server_info, transport_type="streamable-http")
+
+if not is_safe_url(endpoint):
+    logger.warning("SSRF protection: Resolved endpoint %s blocked", endpoint)
+    return False, "unhealthy: SSRF protection blocked resolved endpoint"
+```
+
+#### Step 7: Redirect handling - mandate `follow_redirects=False`
+
+**IMPORTANT**: All httpx.AsyncClient instantiations in the five affected code paths must use `follow_redirects=False`. This prevents redirect-based SSRF bypass where an attacker controls a domain that returns a 302 redirect to a private IP.
+
+The redirect validation pattern already exists in `skill_service.py` for skill fetches. Apply the same pattern to the new call sites:
+
+```python
+# In check_agent_health() and other affected functions:
+
+# Replace:
+#   response = await client.get(url)
+
+# With:
+response = await client.get(url, follow_redirects=False)
+final_url = str(response.url)
+if response.status_code in (301, 302, 303, 307, 308):
+    location = response.headers.get("location", "")
+    if location and not is_safe_url(location):
+        logger.warning(
+            "SSRF protection: Blocked redirect from %s to %s",
+            url, location,
+        )
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={
+                "detail": "Health check blocked: redirect target is not accessible",
+            },
+        )
+    # Optionally follow the redirect manually if safe
+    # (Most health checks can treat redirects as "not healthy" without
+    # following, which is simpler and safer.)
+```
+
+For the health-service path, the simplest approach is to treat HTTP 3xx responses as "unhealthy" without following redirects:
+
+```python
+response = await client.get(url, follow_redirects=False)
+if response.status_code >= 300 and response.status_code < 400:
+    logger.warning(
+        "Health check: URL %s returned redirect (%s) - not following",
+        url, response.status_code,
+    )
+    return False, "unhealthy: redirect not followed"
+```
+
+For the agent-validator reachability check (synchronous `httpx.get`), apply the same:
+
+```python
+response = httpx.get(well_known_url, timeout=5.0, follow_redirects=False)
+if response.status_code >= 300 and response.status_code < 400:
+    location = response.headers.get("location", "")
+    if location and not is_safe_url(location):
+        logger.warning("SSRF protection: Blocked redirect to %s", location)
+        return (False, "SSRF protection: redirect target is blocked")
+```
+
+#### Step 8: Add unit tests
+
+**File:** `tests/unit/utils/test_url_security.py` (new file)
+
+Create comprehensive tests covering:
+- All blocked IPv4 ranges
+- All blocked IPv6 ranges
+- Allowed public IPv4/IPv6 addresses
+- Hostname resolution (mocked)
+- Redirect target validation
+- Empty/malformed URLs
+- DNS failure handling
+- Integration-level tests for each of the five affected endpoints
+
+#### Step 9: Update existing tests
+
+Review and update existing tests that use private IPs or localhost in URL fields:
+- `tests/unit/services/test_skill_service_ssrf_allowlist.py`
+- `tests/unit/api/test_skill_routes_github_auth.py`
+- `tests/unit/api/test_skill_inline_content.py`
+- Health check tests in `tests/unit/health/`
+- Agent validation tests
+
+Where existing tests use private URLs for mocking, mock `socket.getaddrinfo` or use `http://example.com` instead.
 
 ### Error Handling
 
-- `SSRFBlockedError`: Caught at the endpoint layer, returns HTTP 403 with a clear message. In background health checks, sets status to "blocked: ssrf". In MCP client, returns None (connection failure).
-- `ValueError` (malformed URL): Treated as a validation error. Returns HTTP 400 or skips the health check.
-- `socket.gaierror` (DNS failure): Logged as warning, health check skipped, MCP connection fails gracefully.
+| Exception | Caught By | Response |
+|-----------|-----------|----------|
+| `SSRFBlockedError` | Agent routes | HTTP 403 with generic message |
+| `is_safe_url() == False` | Agent routes | HTTP 403 with generic message |
+| `is_safe_url() == False` | Health service | Status set to `"blocked: ssrf"` |
+| `is_safe_url() == False` | Agent validator | Warning returned, registration not blocked (warn-only) |
+| `is_safe_url() == False` | MCP client | Returns `{"error": "URL blocked", "tools": None}` |
 
 ### Logging
 
-- `DEBUG`: When a URL validates successfully (public IP).
-- `WARNING`: When a URL is blocked or DNS fails.
-- `INFO`: At endpoint level when a blocked URL is rejected.
+| Event | Level | Message |
+|-------|-------|---------|
+| URL blocked | WARNING | "SSRF protection: Blocked URL with scheme '%s'" or "SSRF protection: Blocked URL resolving to private IP(s) %s for hostname '%s'" |
+| URL validated | DEBUG | "SSRF protection: Trusted domain '{hostname}'" or DNS resolution success |
+| DNS failure | WARNING | "SSRF protection: Failed to resolve hostname '{hostname}': {error}" |
+| Health check blocked | WARNING | "Health check blocked for {path}: proxy_pass_url {url} failed SSRF validation" |
+| Agent health blocked | WARNING | "Agent health check blocked for {path}: URL {url} failed SSRF validation" |
+| Redirect blocked | WARNING | "SSRF protection: Blocked redirect from {url} to {location}" |
+| Redirect not followed | WARNING | "Health check: URL {url} returned redirect ({status_code}) - not following" |
 
 ## Observability
 
@@ -455,21 +759,23 @@ Also validate in `get_tools_from_server_with_server_info` and `detect_server_tra
 
 | Event | Level | Message |
 |-------|-------|---------|
-| URL blocked | WARNING | "SSRF protection: URL resolves to blocked IP range: {url} (blocked: ...)" |
-| URL validated | DEBUG | "Outbound URL validated: {url}" |
-| DNS failure | WARNING | "DNS resolution failed for {url}: {error}" |
-| Health check blocked | WARNING | "Health check blocked for {path}: SSRF protection..." |
-| Endpoint blocked response | INFO | "Agent health check blocked for {path}: URL resolves to blocked IP" |
-| MCP connection blocked | WARNING | "MCP connection blocked: SSRF protection..." |
+| URL blocked | WARNING | "SSRF protection: Blocked URL resolving to private IP(s) {ips} for hostname '{host}'" |
+| Trusted domain | DEBUG | "SSRF protection: Trusted domain '{hostname}'" |
+| DNS failure | WARNING | "SSRF protection: Failed to resolve hostname '{hostname}': {error}" |
+| Health check blocked | WARNING | "Health check blocked for {path}: URL failed SSRF validation" |
+| Agent blocked | WARNING | "Agent health check blocked for {path}: URL {url} failed SSRF validation" |
+| Redirect blocked | WARNING | "SSRF protection: Blocked redirect from {from_url} to {to_url}" |
 
-No new metrics are needed. Existing health check status ("blocked: ssrf") provides visibility.
+No new metrics are needed. Existing health check status values (e.g., `"blocked: ssrf"`) provide visibility. The `SSRF_BLOCKED_STATUS` constant ensures consistent status strings across all three health-service locations.
 
 ## Scaling Considerations
 
-- DNS resolution adds ~10-50ms per validation call. Health checks are already batched with 10-item batches and 0.5s delays, so this overhead is negligible.
+- DNS resolution adds ~10-50ms per validation call (cached DNS is typically <10ms).
+- Health checks are already batched (10 per batch with 0.5s delays), so the overhead is negligible.
 - For agent health checks (user-driven), the additional latency is acceptable.
-- For MCP client connections, the DNS lookup happens once during connection setup, which is already slow (10-25s total).
-- No caching is needed - DNS resolution is fast with OS and library-level caching.
+- For MCP client connections, the DNS lookup happens once during connection setup.
+- No caching is needed beyond what `lru_cache` on `_trusted_domains()` provides.
+- `follow_redirects=False` may cause health checks to report "unhealthy" for servers that legitimately use 302 redirects for canonical URL handling. This is an acceptable trade-off for SSRF protection.
 
 ## File Changes
 
@@ -477,26 +783,33 @@ No new metrics are needed. Existing health check status ("blocked: ssrf") provid
 
 | File Path | Description |
 |-----------|-------------|
-| `registry/utils/url_security.py` | SSRF validation utility with `validate_outbound_url()` and `SSRFBlockedError` |
+| `registry/utils/url_security.py` | Shared SSRF validation utility with `is_safe_url()`, `SSRFBlockedError`, helper functions |
 | `tests/unit/utils/test_url_security.py` | Unit tests for the validation utility |
 
 ### Modified Files
 
 | File Path | Lines | Change Description |
 |-----------|-------|--------------------|
-| `registry/health/service.py` | ~370-375, ~1220-1225, ~430-440 | Import and call `validate_outbound_url` before httpx requests in `_perform_health_checks`, `perform_immediate_health_check`, and `_check_single_service` |
-| `registry/api/agent_routes.py` | ~920-940 | Import and call `validate_outbound_url` in `check_agent_health` before httpx requests |
-| `registry/utils/agent_validator.py` | ~212-215 | Import and call `validate_outbound_url` in `_check_endpoint_reachability` before httpx.get() |
-| `registry/core/mcp_client.py` | ~585-595 | Import and call `validate_outbound_url` in `get_mcp_connection_result` and related functions |
+| `registry/services/skill_service.py` | ~60-192 | Remove local `_is_safe_url()`, `_is_private_ip()`, `_trusted_domains()` definitions; import from shared module |
+| `registry/api/agent_routes.py` | ~920-945, ~577-580 | Import and call `is_safe_url()` in `check_agent_health()` and `register_agent()` |
+| `registry/utils/agent_validator.py` | ~211-220, ~313-318 | Import and call `is_safe_url()` in `_check_endpoint_reachability()` and `validate_agent_card()` |
+| `registry/health/service.py` | ~367-375, ~429-438, ~1217-1226 | Import and call `is_safe_url()` in `_perform_health_checks()`, `_check_single_service()`, `perform_immediate_health_check()` |
+| `registry/core/mcp_client.py` | ~580-590 | Import and call `is_safe_url()` in `get_mcp_connection_result()` |
+| `registry/core/config.py` | ~1150 | Add `mcp_gateway_extra_trusted_hosts` field to Settings |
 
 ### Estimated Lines of Code
 
 | Category | Lines |
 |----------|-------|
-| New utility file | ~100 |
-| New test file | ~80 |
-| Modified code (4 files) | ~40 |
-| **Total** | **~220** |
+| New utility file | ~120 |
+| New test file | ~100 |
+| Modified skill_service.py (removal + re-import) | ~-80 net |
+| Modified agent_routes.py | ~20 |
+| Modified agent_validator.py | ~15 |
+| Modified health/service.py | ~30 |
+| Modified mcp_client.py | ~10 |
+| Modified config.py | ~8 |
+| **Total** | **~223** |
 
 ## Testing Strategy
 
@@ -504,7 +817,15 @@ See `testing.md` for the complete testing plan.
 
 ## Alternatives Considered
 
-### Alternative 1: httpx Trustenv + Proxy Configuration
+### Alternative 1: Create a brand-new SSRF utility from scratch
+
+Create a completely new `validate_outbound_url()` function instead of promoting `_is_safe_url()`.
+
+**Pros**: Clean slate, no risk of breaking existing skill_service.py callers.
+**Cons**: Duplicates ~100 lines of working code. Two SSRF guards in the codebase increase maintenance burden and the risk of divergence.
+**Why Rejected**: The existing `_is_safe_url()` is well-tested and working. Promoting it avoids code duplication and ensures consistent behavior.
+
+### Alternative 2: httpx TrustEnv + Proxy Configuration
 
 Use httpx's built-in proxy settings to route all outbound traffic through a proxy that filters requests.
 
@@ -512,43 +833,40 @@ Use httpx's built-in proxy settings to route all outbound traffic through a prox
 **Cons**: Requires infrastructure changes (proxy deployment), adds latency, overkill for this use case.
 **Why Rejected**: Code-level validation is simpler and has no infrastructure cost.
 
-### Alternative 2: DNS-Level Filtering
-
-Configure the Docker container / ECS task to use a DNS resolver that returns blocked responses for private IPs.
-
-**Pros**: Network-level protection.
-**Cons**: DNS resolution for private IPs already fails (they are not resolvable via public DNS), but bare IP access bypasses this.
-**Why Rejected**: Does not protect against bare IP URLs (169.254.169.254). Code-level validation is still needed.
-
 ### Alternative 3: VPC Network Policies
 
 Use VPC security groups or network ACLs to block outbound traffic to private IP ranges from the ECS task.
 
 **Pros**: Infrastructure-level protection that covers all processes.
 **Cons**: Requires Terraform changes, network policies may interfere with legitimate internal communication (e.g., ECS service discovery).
-**Why Rejected**: Network policies are appropriate as defense-in-depth, but code-level validation is the primary control for application-specific SSRF protection. Network policies may also block legitimate internal services that the registry needs to reach.
+**Why Rejected**: Network policies are appropriate as defense-in-depth, but code-level validation is the primary control for application-specific SSRF protection.
 
 ### Comparison Matrix
 
-| Criteria | Code Validation (Chosen) | Proxy | DNS Filtering | VPC Policies |
-|----------|-------------------------|-------|---------------|---------------|
-| Complexity | Low | High | Medium | High |
+| Criteria | Promote Existing (Chosen) | New From Scratch | Proxy | VPC Policies |
+|----------|--------------------------|-------------------|-------|--------------|
+| Complexity | Low | Medium | High | High |
 | New dependencies | None | None | None | Terraform changes |
-| Infrastructure changes | None | Yes | Yes | Yes |
-| Protects bare IPs | Yes | Partial | No | Yes |
-| Operational overhead | None | High | Low | Medium |
-| Bypass risk | Low | Medium | High | Low |
+| Infrastructure changes | None | None | Yes | Yes |
+| Code duplication | Eliminated | Created | None | None |
+| Operational overhead | None | Medium (maintain two guards) | High | Medium |
+| Bypass risk | Low | Medium (divergence) | Medium | Low |
 
 ## Rollout Plan
 
-- Phase 1: Implementation - create url_security.py, apply to all four entry points.
-- Phase 2: Testing - unit tests for validation utility, integration tests for each entry point.
-- Phase 3: Deployment - no config changes required, deploy as-is.
+- Phase 1: Create `registry/utils/url_security.py` with the promoted `_is_safe_url()`.
+- Phase 2: Refactor `skill_service.py` to import from the shared module.
+- Phase 3: Apply `is_safe_url()` to the five vulnerable code paths (agent validator, agent routes, health service, MCP client).
+- Phase 4: Apply `follow_redirects=False` and redirect validation to all new call sites.
+- Phase 5: Add new unit tests and update existing tests.
+- Phase 6: Add `MCP_GATEWAY_EXTRA_TRUSTED_HOSTS` config parameter.
+- Phase 7: Run full test suite, verify no regressions.
 
 ## Open Questions
 
-- Should we add an environment variable to allow operators to bypass the check in exceptional cases (e.g., internal URL whitelisting)? **Recommendation: No. Security controls should not be toggleable by operators. Network-level controls are the appropriate escape hatch.**
-- How do we handle DNS rebinding attacks where the IP changes between validation and connection? **Recommendation: Accept the residual risk. DNS rebinding is a sophisticated attack that requires infrastructure-level mitigation (same-origin policy in browsers, not applicable here). The SSRF guard covers the vast majority of attack vectors.**
+- Should we add an environment variable to allow operators to bypass the check in exceptional cases (e.g., internal URL whitelisting)? **Recommendation: No. Security controls should not be toggleable by operators. Network-level controls are the appropriate escape hatch. The `MCP_GATEWAY_EXTRA_TRUSTED_HOSTS` setting only adds hostnames to the trust allowlist, it does not bypass the guard entirely.**
+- How do we handle DNS rebinding attacks where the IP changes between validation and connection? **Recommendation: Accept the residual risk. DNS rebinding is a sophisticated attack that requires infrastructure-level mitigation. The SSRF guard covers the vast majority of attack vectors.**
+- Will `follow_redirects=False` break legitimate health checks that rely on 302 redirects? **Recommendation: Treat redirects as "unhealthy" rather than following them. This is a conservative but safe approach. If legitimate redirects are observed in production, the health check can be updated to follow redirects to a validated target on a case-by-case basis.**
 
 ## References
 
@@ -557,4 +875,5 @@ Use VPC security groups or network ACLs to block outbound traffic to private IP 
 - RFC 1918: Address Allocation for Private Internets
 - RFC 5735: IANA Special-Purpose Address Registry
 - Existing code: `registry/utils/request_utils.py` (get_client_ip pattern)
-- Existing code: `registry/utils/agent_validator.py` (_validate_agent_url - format-only validation)
+- Existing code: `registry/services/skill_service.py` (`_is_safe_url()` at lines 128-192)
+- Existing code: `registry/services/skill_service.py` (`_trusted_domains()` at lines 81-91)

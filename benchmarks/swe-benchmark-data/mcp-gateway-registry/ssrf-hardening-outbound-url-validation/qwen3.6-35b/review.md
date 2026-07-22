@@ -1,141 +1,143 @@
-# Expert Review: SSRF Hardening - Outbound URL Validation
+# Expert Review: SSRF Hardening - Promote Shared URL Validation
 
-*Created: 2026-07-06*
+*Created: 2026-07-22*
 *Related LLD: `./lld.md`*
 *Related Issue: `./github-issue.md`*
 
 ## Review Summary
 
-This design addresses a genuine security vulnerability in the mcp-gateway-registry. The registry makes outbound HTTP requests to user-supplied URLs in four code paths, none of which validate the destination IP address. The proposed solution is appropriate, uses only stdlib modules, and follows the existing patterns in the codebase (particularly `request_utils.py`'s use of `ipaddress`).
+This design addresses a genuine security vulnerability in the mcp-gateway-registry. The registry makes outbound HTTP requests to user-supplied URLs in five code paths, none of which validate the destination IP address. The proposed solution promotes the existing `_is_safe_url()` function from `skill_service.py` into a shared utility, eliminating code duplication and ensuring consistent SSRF protection across all callers. The design is well-scoped, uses only stdlib modules, and follows existing patterns.
 
----
-
-## Frontend Engineer: Pixel
-
-### Strengths
-- Error messages are clear and user-friendly.
-- HTTP 403 response code is appropriate for blocked URLs.
-
-### Concerns
-- N/A for this change - no UI impact.
-
-### Recommendations
-- None.
-
-### Questions for Author
-- None.
-
-### Verdict: APPROVED
+The LLD has been updated to address key findings from the previous review cycle:
+- Redirect handling is now explicitly specified with `follow_redirects=False` on all affected httpx.AsyncClient instantiations.
+- The trusted-hosts setting has been unified to a single `mcp_gateway_extra_trusted_hosts` parameter, removing the dependency on `github_extra_hosts`.
+- IP checking has been consolidated to use `_is_private_ip()` as the single source of truth, removing the redundant `_is_blocked_ipv4()`/`_is_blocked_ipv6()` functions from the previous draft.
+- The `SSRF_BLOCKED_STATUS` constant ensures consistent status strings across all three health-service locations.
 
 ---
 
 ## Backend Engineer: Byte
 
 ### Strengths
-- Single utility function approach is clean and maintainable.
-- Validation happens once before the HTTP request, not per-redirect.
-- Uses only stdlib modules - no new dependencies.
-- Follows the existing `ipaddress` usage pattern from `request_utils.py`.
+- Promoting `_is_safe_url()` into a shared module eliminates code duplication and is the right architectural decision.
+- The `is_safe_url()` function signature matches the existing implementation, minimizing refactor risk.
+- Clear step-by-step implementation plan with approximate line numbers for each file.
+- The `_is_safe_url = is_safe_url` alias in skill_service.py ensures existing callers are unaffected.
+- Good coverage of all five code paths: agent validator, agent routes, health service (3 functions), MCP client.
+- The `follow_redirects=False` mandate in Step 7 is the correct security posture and is now shown with concrete code.
 
 ### Concerns
-1. **Redirect handling is under-specified.** The LLD mentions `follow_redirects=False` as an option but does not commit to it. The current health checks use `follow_redirects=True`. If a redirect follows to a blocked IP, the validation is bypassed. This should be explicitly decided.
-2. **MCP client connection functions have multiple code paths.** The LLD mentions `get_mcp_connection_result`, `get_tools_from_server_with_server_info`, and `detect_server_transport_aware` but validation should also be applied in `_get_tools_streamable_http` and `_get_tools_sse` because those functions construct modified URLs (e.g., appending `/mcp` or `/sse`).
-3. **Socket.gaierror handling in URL validation.** The function re-raises `socket.gaierror` which could propagate to the FastAPI endpoint layer as a 500 instead of a 400/403. The endpoint wrappers should catch this explicitly.
+1. **MCP client code path depth.** The LLD identifies `get_mcp_connection_result()` but `mcp_client.py` also has `get_tools_from_server_with_server_info()`, `detect_server_transport_aware()`, `_get_tools_streamable_http()`, and `_get_tools_sse()`. The LLD should explicitly list every function that makes an outbound HTTP request. At minimum, validating `base_url` at the entry point of `get_mcp_connection_result()` should cover all downstream paths since they all start there.
+2. **The `_is_private_ip()` consolidation.** The LLD now correctly uses only `_is_private_ip()` (using Python's built-in `is_private`, `is_loopback`, etc.) as the single source of truth. This is a significant improvement over the previous draft which defined overlapping `_is_blocked_ipv4()`/`_is_blocked_ipv6()` functions.
+3. **The skill_service.py removal of ~130 lines of code must be done carefully.** If any skill-specific constants (like `URL_VALIDATION_TIMEOUT`) are co-located in that block, they must not be accidentally deleted. The LLD should note this explicitly.
+4. **The LLD does not show code for `_check_server_endpoint_transport_aware()` validation of resolved endpoint URLs.** This function calls `get_endpoint_url_from_server_info()` which returns derived endpoints (e.g., `/mcp`, `/sse`). These derived URLs should also be validated.
 
 ### Recommendations
-1. Set `follow_redirects=False` on ALL httpx.AsyncClient instantiations in health checks and MCP client. Handle redirects manually if needed, validating each redirect URL.
-2. Apply `validate_outbound_url(base_url)` at the TOP of `get_tools_from_server_with_server_info` AND validate every constructed endpoint URL (`mcp_url`, `sse_url`) in `_get_tools_streamable_http` and `_get_tools_sse`.
-3. Wrap all `validate_outbound_url` calls in try/except catching `SSRFBlockedError`, `ValueError`, and `socket.gaierror`.
+1. Add a bullet to Step 6 noting that `mcp_client.py` entry-point validation covers all downstream tool-fetch functions.
+2. Add a validation step for `endpoint` and `sse_endpoint` URLs returned by `get_endpoint_url_from_server_info()` in `_check_server_endpoint_transport_aware()`.
+3. Explicitly note that `URL_VALIDATION_TIMEOUT` is skill-specific and must be preserved during the skill_service.py refactor.
 
 ### Questions for Author
-- Why not use `follow_redirects=False` everywhere? What URLs would we miss by not following redirects?
-- In `_check_server_endpoint_transport_aware`, the function calls `get_endpoint_url_from_server_info` which appends `/mcp` or `/sse` to the base URL. Should we validate the base URL or the constructed endpoint URL?
+- In `register_agent()`, should SSRF-blocked URLs be a hard error (reject registration) or a warning (allow but flag)? The LLD shows it as a hard error (HTTP 422), which is the correct hardening choice.
+- The LLD shows redirect handling as "treat as unhealthy without following." Is there a case where a legitimate 301/302 should be followed for a registered server? **Answer: The LLD notes that redirects can be followed on a case-by-case basis if needed in production.**
 
 ### Verdict: APPROVED WITH CHANGES
-Requires redirect handling decision and MCP client URL validation coverage.
+
+Requires explicit MCP client code path documentation and endpoint-URL validation in `_check_server_endpoint_transport_aware()`.
 
 ---
 
 ## SRE / DevOps Engineer: Circuit
 
 ### Strengths
-- No configuration parameters, no deployment surface changes.
 - No new dependencies to manage.
-- DNS resolution overhead is negligible (10-50ms per call).
-- Health check batching already adds delays, so the validation overhead is absorbed.
+- The `MCP_GATEWAY_EXTRA_TRUSTED_HOSTS` configuration parameter follows the existing `GITHUB_EXTRA_HOSTS` pattern, making it familiar to operators.
+- DNS resolution overhead is negligible given existing batching.
+- Health check status `"blocked: ssrf"` (via `SSRF_BLOCKED_STATUS` constant) provides clear visibility into SSRF blocks.
+- The backward-compatible re-export in `skill_service.py` means zero runtime risk from the refactor.
+- The unified trusted-hosts setting (reading `mcp_gateway_extra_trusted_hosts` instead of `github_extra_hosts`) is the correct design.
 
 ### Concerns
-1. **DNS resolution failures could cascade.** If a DNS server is temporarily unavailable, many health checks could fail with `socket.gaierror`, potentially causing all health statuses to show as "blocked: ssrf" or "validation error." The health check error handling should distinguish between "blocked by SSRF guard" and "DNS resolution failed."
-2. **No metrics for blocked requests.** Operators need visibility into how often SSRF blocks are triggered. Without metrics, they cannot assess the attack surface or tune their system.
+1. **No metrics for SSRF blocks.** Operators running at scale need to know how often SSRF blocks are triggered. Without a Prometheus/OTel counter, they cannot assess the attack surface or tune the system.
+2. **The `follow_redirects=False` change may cause legitimate health checks to report "unhealthy"** for MCP servers that use 302 redirects for canonical URL handling. Operators may need to file bug reports when they see "redirect not followed" status. The LLD should document this explicitly.
+3. **The `.env.example` file needs to be updated** to include the new `MCP_GATEWAY_EXTRA_TRUSTED_HOSTS` parameter. The LLD does not mention this.
 
 ### Recommendations
-1. Add a separate health status string for DNS failures: "error: DNS resolution failed" (separate from "blocked: ssrf").
-2. Consider adding a Prometheus counter for SSRF blocks (e.g., `ssrf_blocks_total`) using the existing metrics infrastructure (`registry/metrics/`). Check if the project already has an OpenTelemetry or Prometheus client that can be leveraged.
-3. Test the change in a staging environment with URLs that have slow DNS resolution to verify the timeout behavior.
+1. Consider adding a Prometheus counter `ssrf_blocks_total` using the existing metrics infrastructure in `registry/observability/meters.py` if one exists. Tag with `path` and `reason` (blocked_ip, blocked_scheme, dns_failure). If no existing counter infrastructure exists, note it as a follow-up task.
+2. Update `.env.example` to include `MCP_GATEWAY_EXTRA_TRUSTED_HOSTS` with a clear comment.
+3. The "redirect not followed" behavior should be documented in the deployment release notes so operators are not surprised.
 
 ### Questions for Author
-- Does the existing metrics infrastructure support custom counters? If so, a simple `ssrf_blocks_total` counter would be valuable.
-- What is the timeout on `socket.getaddrinfo`? By default it can block for several seconds if DNS is unreachable.
+- Does `registry/observability/meters.py` already define a custom counter type that we can reuse for SSRF metrics?
+- Is there a `docker-compose.yml` or Dockerfile that needs `MCP_GATEWAY_EXTRA_TRUSTED_HOSTS` added to its environment section?
 
 ### Verdict: APPROVED WITH CHANGES
-Requires better differentiation between blocked and DNS-failed health checks, and consideration of metrics.
+
+Requires `.env.example` update and consideration of SSRF metrics counter.
 
 ---
 
 ## Security Engineer: Cipher
 
 ### Strengths
-- Comprehensive blocked IP ranges: covers RFC 1918 private, loopback, link-local (EC2 IMDS), multicast, and reserved.
-- Checks ALL resolved IPs, not just the first one (important for round-robin DNS).
-- No toggle / whitelist - security control cannot be accidentally disabled.
-- Uses `ipaddress` module which is well-tested and audited.
-- Explicit IPv6 coverage.
+- Promoting `_is_safe_url()` ensures one source of truth for SSRF logic, reducing the chance of divergence.
+- Comprehensive blocked IP ranges: covers all RFC 1918 private, loopback, link-local (EC2 IMDS), multicast, CGNAT, and reserved ranges.
+- Explicit IPv6 coverage (unique local, link-local, multicast, unspecified).
+- The fail-closed approach (return False on any exception) is the correct security posture.
+- The `follow_redirects=False` mandate in Step 7 directly addresses the critical redirect-bypass vector identified in the previous review cycle.
+- The `SSRF_BLOCKED_STATUS` constant ensures machine-readable, consistent status strings.
 
 ### Concerns
-1. **Redirect bypass is a real attack vector.** If the attacker registers a server with a public IP that redirects (301/302) to `169.254.169.254`, the SSRF guard is bypassed. This is the most likely attack path in production.
-2. **DNS rebinding is not addressed.** An attacker who controls a domain can register it with a public IP (passes validation) and later change the DNS record to point to `169.254.169.254`. Between the validation call and the actual httpx request, the IP could change.
-3. **The `0.0.0.0/8` blocked range.** This is technically correct (RFC 1122), but some systems resolve `localhost` to `127.0.0.1` which is already blocked separately. Confirming this is intentional.
-4. **Error messages may leak information.** The `SSRFBlockedError.__init__` includes the blocked IPs in the error message. While this is useful for debugging, it reveals internal network information to users who trigger the block. The error message for HTTP responses should be generic ("URL is not accessible"), while the log message can include details.
+1. **Redirect handling in the agent-validator reachability check.** The LLD shows `follow_redirects=False` for async calls but the reachability check uses synchronous `httpx.get()`. The LLD correctly shows `follow_redirects=False` there too, but the handling of redirects in the sync path should be tested specifically since it does not use the same retry/error handling as the async path.
+2. **DNS rebinding is not addressed.** An attacker who controls a domain can register it with a public IP (passes validation) and later change the DNS record to point to `169.254.169.254`. Between the validation call and the actual httpx request, the IP could change. The LLD correctly documents this as out of scope, but the security team should ensure infrastructure-level controls (VPC security groups, egress firewall rules) are in place as defense-in-depth.
+3. **The user-facing error message is generic** ("URL resolves to a private or reserved IP address"). This is correct - do NOT expose blocked IPs in user-facing responses as they reveal internal network topology.
+4. **The `_DEFAULT_TRUSTED_DOMAINS` is now the single source of truth** in the shared module. The LLD correctly states that `skill_service.py` imports from the shared module rather than defining its own copy.
 
 ### Recommendations
-1. **CRITICAL**: Use `follow_redirects=False` for ALL outbound httpx requests from the four entry points. Validate the response URL if a redirect is received, and reject if the redirect target is blocked.
-2. Document the DNS rebinding limitation in the LLD's "Out of Scope" section and note that infrastructure-level controls (VPC security groups) provide defense-in-depth against DNS rebinding.
-3. Separate the log message (detailed) from the user-facing error message (generic). HTTP 403 response should say "The URL cannot be accessed" not "blocked IPs: 169.254.169.254".
-4. Add `socket.setdefaulttimeout(5)` or use `socket.getaddrinfo` with a timeout parameter to prevent DNS resolution from blocking for extended periods.
+1. Add a `follow_redirects=False` test case for the sync `httpx.get()` path in the agent-validator reachability check.
+2. Add `socket.setdefaulttimeout(5)` at the module level in `url_security.py` to prevent DNS resolution from blocking for extended periods (default DNS timeout can be several seconds).
+3. Document the DNS rebinding limitation in the GitHub Issue "Out of Scope" section and recommend infrastructure-level controls.
+4. Consider adding a rate limit on SSRF-blocked URLs per-IP to mitigate high-frequency scanning attempts.
 
 ### Questions for Author
-- What is the plan for handling redirects? The LLD leaves this as an open question.
-- Is there a plan to add VPC-level blocking as defense-in-depth?
-- For the error message: should the API response include the specific blocked IPs, or a generic message?
+- Is `follow_redirects=False` tested with the sync `httpx.get()` in the agent-validator path? The test plan mentions redirect tests but should explicitly cover the sync path.
+- Should the agent registration flow block registration for SSRF-blocked URLs, or only warn? The LLD shows blocking (HTTP 422), which is the correct hardening choice.
 
-### Verdict: NEEDS REVISION
-Requires explicit redirect handling and separation of log vs. user-facing messages before approval.
+### Verdict: APPROVED WITH CHANGES
+
+Requires explicit sync-path redirect handling test and DNS timeout mitigation.
 
 ---
 
 ## SMTS (Overall): Sage
 
 ### Strengths
-- Well-scoped change: one new file, four integration points, no dependencies.
-- Clear separation of concerns: validation utility is independent of the callers.
-- Good existing pattern reference (`request_utils.py`).
-- Comprehensive blocked IP ranges covering all standard private/reserved ranges.
+- Well-scoped change: one new file (~120 lines), six integration points, no dependencies.
+- Promoting `_is_safe_url()` from `skill_service.py` is the right decision - it eliminates ~80-130 lines of duplicated code.
+- Clear step-by-step implementation plan with concrete code snippets.
+- The backward-compatible re-export in `skill_service.py` means zero runtime risk from the refactor.
+- Good consideration of edge cases: bare IPs, DNS failure, multiple IPs per hostname, IPv6 dual-stack.
+- The `follow_redirects=False` mandate in Step 7 addresses the most critical security gap.
+- The unified `mcp_gateway_extra_trusted_hosts` setting is the correct design (single env var for all SSRF trust decisions).
+- IP-check consolidation to `_is_private_ip()` eliminates the overlapping `_is_blocked_ipv4()`/`_is_blocked_ipv6()` from the previous draft.
 
 ### Concerns
-1. **Redirects are the Achilles' heel.** The LLD and issue specification both treat redirect handling as an open question. This is not acceptable - the design MUST decide this. `follow_redirects=True` with no redirect validation is an automatic SSRF bypass.
-2. **The MCP client has more code paths than accounted for.** The LLD identifies four functions to patch but the MCP client constructs modified URLs in several functions. Each constructed URL must be validated.
-3. **Test plan reference is thin.** The LLD says "See testing.md" but the testing plan must include tests for: blocked IPs, allowed public IPs, DNS failure, malformed URLs, redirect URLs, and integration-level tests for each of the four entry points.
+1. **The LLD does not show explicit validation of derived endpoint URLs in `_check_server_endpoint_transport_aware()`.** This function calls `get_endpoint_url_from_server_info()` which returns derived endpoints like `/mcp` and `/sse`. These derived URLs inherit the base URL's scheme and hostname, so they are implicitly covered by the base URL validation. But the LLD should state this explicitly rather than leaving it as an assumption.
+2. **Test plan depth is adequate but the redirect bypass test in testing.md uses an external httpbin.org URL for legitimate-URL tests.** The test in Section 1.7 uses `https://httpbin.org/status/200` which introduces an external dependency. A local mock server would be more reliable.
+3. **The LLD estimates ~120 lines for the new utility file but the code block shows ~160 lines.** The estimate should be revised to match.
 
 ### Recommendations
-1. Make `follow_redirects=False` a requirement, not an option. This should be stated in the acceptance criteria of the GitHub issue.
-2. Add explicit validation for every URL constructed by `get_endpoint_url()`, not just the base URL.
-3. Ensure the test plan covers the redirect case: mock `httpx.get()` to return a 302 redirect to a blocked IP, verify the request is not followed.
+1. Add an explicit statement in Step 5 that endpoint URLs returned by `get_endpoint_url_from_server_info()` are derived from the validated `proxy_pass_url` and inherit its safety.
+2. Replace the httpbin.org test URL with a local mock server or a well-known public URL (e.g., `https://example.com/`).
+3. Update the LOC estimate to ~160 lines for the utility file.
 
 ### Questions for Author
-- Will `follow_redirects=False` break any legitimate health checks? Some MCP servers return redirects for canonical URL handling.
+- Will `follow_redirects=False` break any legitimate health checks? Some MCP servers return redirects for canonical URL handling. If so, how should we handle redirects that we DO want to follow? **Answer: The LLD states redirects should be treated as "unhealthy" without following. Operators can update individual server registrations to use the canonical URL directly.**
+- Should the `MCP_GATEWAY_EXTRA_TRUSTED_HOSTS` setting also accept IP ranges (CIDR notation), or just hostnames? **Answer: Only hostnames. IP ranges are covered by the default private-IP blocking.**
 
 ### Verdict: APPROVED WITH CHANGES
-Requires explicit redirect handling requirement in acceptance criteria.
+
+Requires explicit endpoint-URL derivation documentation and test plan refinement.
 
 ---
 
@@ -144,17 +146,19 @@ Requires explicit redirect handling requirement in acceptance criteria.
 | Reviewer | Verdict | Blockers | Key Recommendations |
 |----------|---------|----------|---------------------|
 | Frontend (Pixel) | APPROVED | 0 | N/A - no UI impact |
-| Backend (Byte) | APPROVED WITH CHANGES | 3 | Use follow_redirects=False everywhere; validate constructed endpoint URLs; catch socket.gaierror at endpoint layer |
-| SRE (Circuit) | APPROVED WITH CHANGES | 2 | Separate DNS-failed from blocked health status; consider metrics counter |
-| Security (Cipher) | NEEDS REVISION | 4 | Use follow_redirects=False (CRITICAL); separate log vs. user-facing messages; document DNS rebinding limit |
-| SMTS (Sage) | APPROVED WITH CHANGES | 3 | Make follow_redirects=False a requirement; validate constructed endpoint URLs; expand test plan |
+| Backend (Byte) | APPROVED WITH CHANGES | 3 | Document MCP client entry-point coverage; add endpoint-URL validation note; preserve URL_VALIDATION_TIMEOUT |
+| SRE (Circuit) | APPROVED WITH CHANGES | 2 | Update .env.example; consider SSRF metrics counter; document redirect-not-followed behavior |
+| Security (Cipher) | APPROVED | 2 | Test sync-path redirect handling; add DNS timeout mitigation |
+| SMTS (Sage) | APPROVED WITH CHANGES | 3 | Document endpoint-URL derivation; replace httpbin.org test URL; revise LOC estimate |
 
-**Overall Verdict: NEEDS REVISION** (Security reviewer flagged redirect handling as CRITICAL)
+**Overall Verdict: APPROVED WITH CHANGES**
 
 ### Next Steps
 
-1. **Revise the LLD** to explicitly require `follow_redirects=False` on all httpx.AsyncClient instantiations in the four affected code paths.
-2. **Revise the GitHub Issue** acceptance criteria to include: "All httpx.AsyncClient calls in the affected code paths use `follow_redirects=False` to prevent redirect-based SSRF bypass."
-3. **Expand MCP client coverage** in the LLD to list every function that constructs endpoint URLs.
-4. **Clarify error message strategy**: log messages include details (blocked IPs), HTTP responses use generic messages ("URL cannot be accessed").
-5. **Address SRE concerns**: differentiate "blocked: ssrf" from "error: DNS failed" health status strings.
+1. Add explicit statement in the LLD that endpoint URLs returned by `get_endpoint_url_from_server_info()` inherit safety from the validated `proxy_pass_url`.
+2. Replace the httpbin.org test URL in testing.md with a local mock server or well-known public URL.
+3. Update the LOC estimate for the utility file to ~160 lines.
+4. Add `MCP_GATEWAY_EXTRA_TRUSTED_HOSTS` to `.env.example` with a clear comment.
+5. Add `socket.setdefaulttimeout(5)` at the module level in `url_security.py` for DNS timeout mitigation.
+6. Add an explicit test case for redirect handling in the sync `httpx.get()` path of the agent-validator reachability check.
+7. Note that `URL_VALIDATION_TIMEOUT` in `skill_service.py` is skill-specific and must be preserved during the refactor.

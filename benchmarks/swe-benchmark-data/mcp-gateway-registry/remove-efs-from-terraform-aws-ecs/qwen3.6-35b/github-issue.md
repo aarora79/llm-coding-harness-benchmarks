@@ -1,64 +1,79 @@
-# GitHub Issue: Remove EFS from terraform/aws-ecs deployment
+# GitHub Issue: Remove EFS from terraform/aws-ecs/
 
 ## Title
-Remove EFS file system, mount targets, and security groups from terraform/aws-ecs
+Remove EFS storage layer from terraform/aws-ecs/ deployment
 
 ## Labels
 - enhancement
 - refactor
 - infra
+- tech-debt
 
 ## Description
 
 ### Problem Statement
-The MCP Gateway Registry terraform/aws-ecs deployment provisions an AWS EFS file system with mount targets, security groups, and six access points (servers, models, logs, agents, auth_config, mcpgw_data). The registry application has migrated away from EFS: it now uses ephemeral container storage for temporary files and DocumentDB for persistent data. The EFS infrastructure remains as unused resources that:
 
-1. Cost money (provisioned throughput if throughput_mode is "provisioned", even bursting mode has a baseline cost).
-2. Add complexity to the Terraform state and deployment surface.
-3. Require `elasticfilesystem:*` IAM permissions that platform engineers must grant but never use.
-4. Still appear in terraform plan output, confusing operators about whether EFS is still needed.
+The MCP Gateway Registry deployment uses AWS EFS (Elastic File System) for persistent storage of configuration files, logs, and application data. However, EFS is no longer needed in this deployment. The application has migrated to S3 and DocumentDB for all persistent storage needs:
+
+- The registry ECS service has already removed its EFS volume mounts and switched to ephemeral storage with DocumentDB persistence.
+- Application data is persisted in DocumentDB (MongoDB-compatible).
+- Logs are shipped to CloudWatch Logs.
+- Configuration (scopes.yml) is managed through DocumentDB init scripts.
+- EFS adds unnecessary infrastructure cost (per GB/month storage + IOPS) and operational complexity (security groups, mount targets, NFS protocol).
+
+Removing EFS will:
+- Reduce monthly AWS costs (EFS storage + data transfer costs)
+- Simplify the Terraform configuration
+- Remove a single point of failure in the network topology
+- Reduce security attack surface (fewer security groups, fewer open ports)
 
 ### Proposed Solution
-Remove all EFS-related resources from the terraform/aws-ecs module:
 
-1. **Remove the EFS module** (`module.efs`) and its security group + egress rules from `modules/mcp-gateway/storage.tf`.
-2. **Remove EFS volume configurations** from the auth-server and mcpgw ECS task definitions in `modules/mcp-gateway/ecs-services.tf` (registry already has EFS volumes removed).
-3. **Remove EFS-related variables** (`efs_throughput_mode`, `efs_provisioned_throughput`) from `modules/mcp-gateway/variables.tf`.
-4. **Remove EFS outputs** from `modules/mcp-gateway/outputs.tf` and the root `outputs.tf`.
-5. **Remove the EFS mount target** from the auth-server `mountPoints` block and the EFS volume block.
-6. **Update IAM permissions documentation** in README.md to remove `elasticfilesystem:*`.
-7. **Update scripts** that reference EFS IDs from terraform outputs (post-deployment-setup.sh, run-scopes-init-task.sh).
-8. **Ensure auth-server and mcpgw** still function without the EFS mounts by verifying that their config files (e.g., scopes.yml) can be provided via the existing Docker image layers or environment-based configuration paths.
+Remove all EFS-related Terraform resources and ECS task definition volume mounts from the `terraform/aws-ecs/` module:
+
+1. Delete the EFS file system, mount targets, access points, and security group
+2. Remove EFS volume mounts and volume configurations from active ECS task definitions (auth-server and mcpgw)
+3. Clean up EFS-related variables, outputs, and module references
+4. Remove or update post-deployment scripts that depend on EFS
+5. Update documentation that references EFS
 
 ### User Stories
-- As a platform engineer, I want the terraform plan to not show EFS resources so I see only the infrastructure we actually use.
-- As a platform engineer, I want to skip granting `elasticfilesystem:*` IAM permissions so deployment is simpler and less error-prone.
-- As a platform engineer, I want the deployment to not incur EFS costs so we save money.
+
+- As an operator deploying via Terraform, I want the deployment to not provision EFS resources so that my infrastructure is simpler and cheaper.
+- As a Site Reliability Engineer, I want no EFS mount points in any ECS task definition so that service failures are not caused by EFS network issues.
+- As a cost-conscious organization, I want to eliminate EFS costs so that my monthly AWS bill is lower.
 
 ### Acceptance Criteria
-- [ ] `module.efs` removed from `modules/mcp-gateway/storage.tf`
-- [ ] EFS security group (`aws_vpc_security_group_egress_rule.efs_all_outbound`) removed from `modules/mcp-gateway/storage.tf`
-- [ ] `efs_volume_configuration` blocks removed from auth-server and mcpgw ECS task definitions in `modules/mcp-gateway/ecs-services.tf`
-- [ ] EFS mount points removed from auth-server container definition
-- [ ] `var.efs_throughput_mode` and `var.efs_provisioned_throughput` variables removed from `modules/mcp-gateway/variables.tf`
-- [ ] EFS outputs (`efs_id`, `efs_arn`, `efs_access_points`) removed from `modules/mcp-gateway/outputs.tf`
-- [ ] EFS outputs (`mcp_gateway_efs_id`, `mcp_gateway_efs_arn`, `mcp_gateway_efs_access_points`) removed from root `outputs.tf`
-- [ ] `terraform validate` passes successfully at tag 1.24.4
-- [ ] `terraform plan` shows no EFS-related changes (no `aws_efs_file_system`, `aws_efs_mount_target`, `aws_efs_access_point`, `aws_vpc_security_group_*` for EFS)
-- [ ] README.md no longer lists `elasticfilesystem:*` in the IAM permissions section
-- [ ] Scripts in `terraform/aws-ecs/scripts/` that reference EFS IDs are updated or removed (post-deployment-setup.sh, run-scopes-init-task.sh)
-- [ ] `terraform.tfvars.example` has no EFS-related variables (if any exist)
-- [ ] No remaining references to `module.efs`, `aws_efs_`, or `efs_` in any `.tf` files under `terraform/aws-ecs/`
+
+- [ ] The EFS module (`terraform-aws-modules/efs/aws`) is removed from `storage.tf` and the file itself is deleted
+- [ ] EFS mount targets (one per private subnet) are removed
+- [ ] EFS security group and egress rules are removed
+- [ ] All six EFS access points (`servers`, `models`, `logs`, `agents`, `auth_config`, `mcpgw_data`) are removed
+- [ ] Auth-server ECS service no longer mounts EFS volumes (`mcp-logs`, `auth-config`)
+- [ ] Auth-server `SCOPES_CONFIG_PATH` environment variable is updated to reference a non-EFS path (e.g., the DocumentDB init path at `/app/auth_server/scopes.yml`)
+- [ ] MCPGW ECS service no longer mounts EFS volume (`mcpgw-data`)
+- [ ] EFS-related variables (`efs_throughput_mode`, `efs_provisioned_throughput`) are removed from `variables.tf`
+- [ ] EFS-related outputs (`efs_id`, `efs_arn`, `efs_access_points`) are removed from `outputs.tf` (module and root level)
+- [ ] The `run-scopes-init-task.sh` script (EFS-only scopes initialization) is deleted or made inert
+- [ ] The `post-deployment-setup.sh` script no longer references EFS in required outputs or initialization flow
+- [ ] The root-level `terraform.tfvars.example` file does not contain EFS-specific configuration
+- [ ] `terraform validate` succeeds with no errors
+- [ ] `terraform plan` succeeds with no EFS-related resources in the planned changes
+- [ ] Documentation references to EFS are updated or removed
 
 ### Out of Scope
-- Removing DocumentDB (that is a separate migration)
-- Modifying the Docker image contents (scope.yml injection is handled by the image build)
-- Removing EFS from Helm charts (charts/ directory is a separate deployment surface)
-- Removing EFS from Docker Compose (docker/ directory is a separate deployment surface)
+
+- Migration of existing EFS data to S3/DocumentDB (should be done before this change, documented separately)
+- Changes to the Helm charts directory (`charts/`) - those target Kubernetes deployments, not ECS
+- Changes to the application Python code (the application already supports non-EFS storage via DocumentDB)
+- Changes to the registry ECS service - it already has EFS removed (only comments remain)
+- Demo server services (CurrentTime, RealServerFakeTools, Flight Booking, Travel Assistant) - they do not mount EFS
 
 ### Dependencies
-- The auth-server must be able to find scopes.yml at a path other than the EFS mount. If scopes.yml is baked into the Docker image at `/app/auth_server/scopes.yml` (line 822 of ecs-services.tf shows this path exists as an alternative), this change is safe.
-- The mcpgw app_log_dir must be writable to the container's ephemeral storage.
+
+- Existing EFS data must be migrated before this change is applied in production
+- Operators must ensure `storage_backend` is set to `documentdb` in their Terraform configuration, as the scopes initialization path depends on DocumentDB
 
 ### Related Issues
-- None identified at this time
+
+- GitHub Issue #1286: Remove EFS from terraform/aws-ecs/
