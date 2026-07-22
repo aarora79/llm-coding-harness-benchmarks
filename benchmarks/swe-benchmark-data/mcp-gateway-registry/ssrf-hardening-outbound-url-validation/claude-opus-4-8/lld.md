@@ -1,6 +1,6 @@
-# Low-Level Design: SSRF Hardening for Agent Card Fetch and Health Checks
+# Low-Level Design: SSRF Hardening -- Outbound URL Validation
 
-*Created: 2026-06-24*
+*Created: 2026-07-21*
 *Author: Claude (claude-opus-4-8)*
 *Status: Draft*
 
@@ -19,30 +19,24 @@
 12. [Testing Strategy](#testing-strategy)
 13. [Alternatives Considered](#alternatives-considered)
 14. [Rollout Plan](#rollout-plan)
-15. [Open Questions](#open-questions)
-16. [References](#references)
 
 ## Overview
 
 ### Problem Statement
-The registry persists user-supplied URLs at registration time and later issues outbound HTTP requests to them with no SSRF validation:
-
-- **Agent health check** (`POST /agents/{path}/health`, `registry/api/agent_routes.py:883`) fetches `agent_card.url` (and a derived `/.well-known/agent-card.json`) via `httpx` GET/HEAD.
-- **Server health check** (`registry/health/service.py:674`) requests `proxy_pass_url` via GET/POST with `follow_redirects=True`, injecting stored credentials.
-
-A complete SSRF guard already exists for SKILL.md fetches (`_is_safe_url()` in `registry/services/skill_service.py:128`). It is not reused on these two surfaces. This design promotes that guard into a shared utility and applies it everywhere the registry fetches a user-supplied URL.
+The MCP Gateway Registry makes outbound HTTP requests to URLs supplied by users during server/agent/skill registration. Only one service (`skill_service.py`) validates these URLs against SSRF attacks. Nine other call sites connect to user-originated URLs without any SSRF protection, allowing an attacker to probe internal networks or exfiltrate cloud metadata credentials via `169.254.169.254`.
 
 ### Goals
-- Block outbound requests to private/loopback/link-local/reserved IPs and the cloud metadata address `169.254.169.254` on the agent-card and server health-check paths.
-- Enforce http/https-only schemes and re-validate redirect targets.
-- Reuse the existing, proven validation logic (one source of truth) without changing SKILL.md behavior.
-- Provide a feature flag and host allowlist for operators on private networks.
+- Promote the existing private `_is_safe_url()` logic to a shared, tested utility module
+- Apply SSRF validation uniformly at all user-originated outbound call sites
+- Add early rejection at registration time so downstream consumers never see unsafe URLs
+- Provide operator-configurable trusted-domain allowlist independent of GitHub-specific settings
+- Emit metrics for blocked attempts to support alerting
 
 ### Non-Goals
-- Federation client hardening (separate issue; endpoints are config-driven).
-- Webhook / registration-gate callbacks (config-driven, admin-set).
-- Network-layer egress controls.
-- Any change to the health-check transport selection or agent-card schema.
+- DNS rebinding / connect-time IP pinning (future work)
+- Egress network controls (security groups, NAT gateway restrictions)
+- Backfill validation of previously-registered URLs
+- Rate limiting of outbound requests
 
 ## Codebase Analysis
 
@@ -50,156 +44,199 @@ A complete SSRF guard already exists for SKILL.md fetches (`_is_safe_url()` in `
 
 | File/Directory | Purpose | Relevance to This Change |
 |----------------|---------|--------------------------|
-| `registry/services/skill_service.py` (94-192) | SKILL.md fetch with SSRF guard | Source of `_is_safe_url()`/`_is_private_ip()` to extract and reuse |
-| `registry/api/agent_routes.py` (186-205, 883-1013) | Agent health check + URL builder | Primary unprotected path (GET/HEAD on `agent_card.url`) |
-| `registry/health/service.py` (674-957, tool-fetch task ~1072) | Server health + tool discovery | Second unprotected path (GET/POST on `proxy_pass_url`, injects credentials) |
-| `registry/exceptions.py` (194-204) | `SkillContentSSRFError` | Pattern for an SSRF exception; will generalize naming |
-| `registry/core/config.py` (53, 173-177, 292-296) | `Settings`, health timeout, `github_extra_hosts` | Where new flags live; existing allowlist precedent |
-| `registry/utils/` | Shared helpers (`path_utils`, `url_utils`, `agent_validator`) | Natural home for `ssrf.py` |
-| `tests/unit/health/test_health_service.py`, `tests/unit/core/test_endpoint_utils.py` | Existing unit tests | Test conventions (pytest, async, monkeypatch) |
+| `registry/services/skill_service.py:70-192` | SSRF protection (private functions) | Source of `_is_safe_url()` and `_is_private_ip()` to extract |
+| `registry/core/mcp_client.py:225-451` | MCP transport detection + tool fetch | HIGH-risk: connects to `proxy_pass_url` with no SSRF check |
+| `registry/health/service.py:429-460` | Health checks against registered servers | HIGH-risk: hits `proxy_pass_url` from DB |
+| `registry/utils/agent_validator.py:211-230` | Agent reachability probe | HIGH-risk: `httpx.get()` to user-supplied agent URL |
+| `registry/services/skill_scanner.py:253-264` | Skill content download | HIGH-risk: bare `httpx.get()` on SKILL.md URL |
+| `auth_server/server.py:~4024` | MCP proxy streaming | HIGH-risk: streams to `X-Upstream-Url` header value |
+| `registry/core/config.py` | Pydantic Settings class | Integration point for new env var |
+| `registry/utils/` | Shared utilities (24 modules) | Destination for new `ssrf.py` |
+| `tests/unit/services/test_skill_service_ssrf_allowlist.py` | Existing SSRF unit tests | Migrate to test shared module |
+| `cli/mcp_utils.py:35-51` | Scheme-only CLI validation | Reference only; CLI stays as-is |
 
 ### Existing Patterns Identified
-1. **SSRF guard for SKILL.md**: `_is_safe_url(url)` parses with `urlparse`, enforces http/https, allowlists trusted domains, resolves via `socket.getaddrinfo`, and rejects private IPs through `_is_private_ip()`. Redirect targets are re-checked after the fetch.
+
+1. **Private-function-per-service pattern**: Each service defines private helpers prefixed with `_`. The SSRF functions follow this pattern today but should be promoted to a shared module since the logic is needed across multiple services.
    - Files: `registry/services/skill_service.py`
-   - How to follow: extract verbatim into `registry/utils/ssrf.py`, then import it back into `skill_service.py` so behavior is byte-for-byte identical.
-2. **Module-level functions over classes for stateless helpers**: utils are plain functions with `lru_cache` for config-derived sets (`_trusted_domains()`).
-   - How to follow: keep `is_safe_url()` a pure function; cache the merged allowlist.
-3. **Pydantic `Settings` with env-var binding**: every config knob is a `Field(default=..., description=...)` on `Settings` in `core/config.py`.
-   - How to follow: add `ssrf_protection_enabled` and `ssrf_extra_allowed_hosts` as `Field`s.
-4. **Health checks degrade, never 500**: both health paths catch exceptions and return an `unhealthy` status string rather than raising.
-   - How to follow: a blocked URL maps to `status: "unhealthy"` with an SSRF detail, not an HTTP 500.
+   - How a future implementer should follow this: Create public functions in `registry/utils/ssrf.py` (no underscore prefix), then have `skill_service.py` import from there.
+
+2. **Settings via pydantic_settings**: All configuration lives in `registry/core/config.py` as fields on the `Settings` class with env-var defaults. New settings follow this pattern.
+   - Files: `registry/core/config.py`
+   - How a future implementer should follow this: Add the new field to the `Settings` class with a `Field(...)` descriptor, document in `.env.example`.
+
+3. **httpx as primary HTTP client**: All async outbound calls use `httpx.AsyncClient`. Sync calls use `httpx.get()` (agent_validator) or `httpx.Client` (federation). SSRF check must happen before either.
+   - Files: all call sites listed above
+   - How a future implementer should follow this: Call `is_safe_url()` before constructing the httpx client or calling `httpx.get()`.
+
+4. **Structured logging with module logger**: Each module creates `logger = logging.getLogger(__name__)` and logs at appropriate levels.
+   - Files: all modules
+   - How a future implementer should follow this: Use `logger.warning()` for blocked URLs, `logger.debug()` for trusted-domain bypasses.
+
+5. **Metrics via OTel counter**: The codebase uses OpenTelemetry for metrics emission (see `registry/metrics/client.py`).
+   - Files: `registry/metrics/client.py`
+   - How a future implementer should follow this: Create a counter instrument in the ssrf module for `ssrf_blocked_total`.
 
 ### Integration Points
 
 | Component | Integration Type | Details |
 |-----------|------------------|---------|
-| `agent_routes.check_agent_health` | Uses | Call `is_safe_url()` before each GET and before the HEAD fallback |
-| `health.service._check_server_endpoint_transport_aware` | Uses | Validate `proxy_pass_url` and resolved `endpoint` before each request |
-| `health.service` tool-fetch background task | Uses | Validate `proxy_pass_url` before `get_mcp_connection_result()` |
-| `skill_service._is_safe_url` | Replaced-by re-export | Re-export from `registry/utils/ssrf.py`; no behavior change |
-| `core.config.Settings` | Extends | Two new fields |
+| `registry/core/config.py` | Extends | Add `ssrf_additional_trusted_domains` field |
+| `registry/services/skill_service.py` | Depends on | Replace private functions with imports from `registry/utils/ssrf.py` |
+| `registry/core/mcp_client.py` | Uses | Call `is_safe_url()` before transport detection and tool fetch |
+| `registry/health/service.py` | Uses | Call `is_safe_url()` before health check HTTP calls |
+| `registry/utils/agent_validator.py` | Uses | Call `is_safe_url()` before agent reachability probe |
+| `registry/services/skill_scanner.py` | Uses | Call `is_safe_url()` before content download |
+| `auth_server/server.py` | Uses | Call `is_safe_url()` before proxying |
+| Registration API routes | Uses | Validate URL fields at submission time |
 
 ### Constraints and Limitations Discovered
-- **TOCTOU / DNS rebinding**: `is_safe_url()` resolves the hostname, then `httpx` resolves it again at request time; a rebinding attacker could return a public IP to the guard and a private IP to httpx. The existing SKILL.md guard has the same limitation. This design documents it and recommends a follow-up (resolve-and-pin or an httpx transport that re-checks the connected IP) as out of scope but noted.
-- **Trusted-domain allowlist bypasses the IP check** (by design, for GHES). Reusing the same allowlist means an allowlisted host on a private IP is reachable - acceptable and intended, but the agent/server paths get a *separate* allowlist (`ssrf_extra_allowed_hosts`) so health-check trust is not silently coupled to GitHub auth trust.
-- **`follow_redirects=True`** on the server health path: must re-validate the final URL, exactly as SKILL.md does.
-- **Health timeout is very low** (`health_check_timeout_seconds: int = 2`). `getaddrinfo` is synchronous; calling it inside an async handler adds a small blocking DNS lookup. Acceptable (SKILL.md already does this), but noted under Scaling.
+- **MCP SDK wraps httpx internally**: `mcp.client.sse.sse_client` and `streamablehttp_client` open connections without an interception hook. The SSRF check must happen before entering these context managers, not inside them.
+- **Trusted domains skip DNS resolution**: The existing `_is_safe_url()` returns `True` immediately for trusted domains without resolving IPs. This is by design (GHES instances on private networks), and the new module preserves this behavior.
+- **Health checks run in background loops**: The check happens asynchronously every 5 minutes. A blocking DNS lookup in `is_safe_url()` is acceptable because the existing code already does `socket.getaddrinfo` synchronously and the health check runs in a dedicated async task.
+- **`169.254.169.254` is already link-local**: The `ipaddress` module's `is_link_local` catches it, but the code also has an explicit string check as defense-in-depth.
 
 ## Architecture
 
 ### System Context Diagram
+
 ```
-            register (user-supplied url / proxy_pass_url)
- Client  ───────────────────────────────────────────────►  Registry (FastAPI)
-                                                              stores AgentCard.url
-                                                              stores proxy_pass_url
-                                                                     │
- Client  ── POST /agents/{path}/health ─────────────────────────────┤
- Client  ── (background) server health / tool fetch ────────────────┤
-                                                                     ▼
-                                                          ┌──────────────────────┐
-                                                          │ is_safe_url(url)      │  ◄── NEW shared guard
-                                                          │  scheme http/https?   │
-                                                          │  host in allowlist?   │
-                                                          │  resolve -> private?  │
-                                                          └──────────┬───────────┘
-                                                            block    │  allow
-                                                          (unhealthy)│
-                                                                     ▼
-                                                          httpx GET/HEAD/POST ─────►  Agent / MCP server
-                                                                                      (now only public hosts
-                                                                                       or allowlisted hosts)
++------------------+       +-------------------+       +------------------+
+|   User / Client  | ----> | Registry API      | ----> | MongoDB          |
++------------------+       | (FastAPI)         |       +------------------+
+                           +-------------------+
+                                   |
+                    +--------------+--------------+
+                    |              |              |
+               +--------+   +--------+   +--------+
+               | Health |   |  MCP   |   | Skill  |
+               | Svc    |   | Client |   | Svc    |
+               +--------+   +--------+   +--------+
+                    |              |              |
+                    v              v              v
+           +------------------------------------------------+
+           |         registry/utils/ssrf.py                  |
+           |   is_safe_url() -- gate before ANY outbound     |
+           +------------------------------------------------+
+                    |              |              |
+                    v              v              v
+           +------------------+  +------------------+
+           | External MCP     |  | GitHub/GitLab    |
+           | Servers (user)   |  | (trusted)        |
+           +------------------+  +------------------+
 ```
 
-### Sequence Diagram (agent health check)
+### Sequence Diagram (Registration-Time Validation)
+
 ```
-caller -> agent_routes.check_agent_health(path)
-  check_agent_health -> agent_service.get_agent_info(path)  => agent_card
-  check_agent_health -> _build_agent_health_urls(base_url)  => [card_url, base_url]
-  loop url in health_urls:
-      check_agent_health -> is_safe_url(url)
-          alt unsafe:
-              log WARNING "SSRF blocked {host}"
-              continue (skip fetch; detail = "blocked by SSRF policy")
-          else safe:
-              check_agent_health -> httpx.get(url)
-  opt all GET failed and base_url safe:
-      check_agent_health -> is_safe_url(base_url)
-      check_agent_health -> httpx.head(base_url)
-  check_agent_health -> agent_service.update_agent(health_status)
-  check_agent_health --> caller {status, detail, ...}
+Client              API Route              ssrf.py            MongoDB
+  |                    |                      |                  |
+  |  POST /servers     |                      |                  |
+  | {proxy_pass_url}   |                      |                  |
+  |------------------->|                      |                  |
+  |                    |  is_safe_url(url)    |                  |
+  |                    |--------------------->|                  |
+  |                    |                      |-- resolve DNS    |
+  |                    |                      |-- check IPs      |
+  |                    |    True/False        |                  |
+  |                    |<--------------------|                  |
+  |                    |                      |                  |
+  |           [if False: 422 error]           |                  |
+  |<-------------------| (blocked)            |                  |
+  |                    |                      |                  |
+  |           [if True: persist]              |                  |
+  |                    |------------------------------------------->|
+  |                    |                      |                  |
+  |  201 Created       |                      |                  |
+  |<-------------------|                      |                  |
+```
+
+### Sequence Diagram (Runtime Validation -- Health Check)
+
+```
+HealthService         ssrf.py           httpx          External Server
+     |                   |                |                  |
+     | is_safe_url(url)  |                |                  |
+     |------------------>|                |                  |
+     |                   |-- resolve DNS  |                  |
+     |   True            |                |                  |
+     |<------------------|                |                  |
+     |                                    |                  |
+     |  GET /health                       |                  |
+     |----------------------------------->|                  |
+     |                                    |----------------->|
+     |                                    |   200 OK        |
+     |                                    |<-----------------|
+     |   response                         |                  |
+     |<-----------------------------------|                  |
 ```
 
 ### Component Diagram
+
 ```
-registry/utils/ssrf.py            (NEW)
-  ├─ is_private_ip(ip_str) -> bool
-  ├─ is_safe_url(url, *, extra_allowed_hosts=None) -> bool
-  └─ _allowed_hosts() -> frozenset           (lru_cache)
-
-registry/services/skill_service.py
-  └─ from ..utils.ssrf import is_safe_url    (re-export shim: _is_safe_url = is_safe_url)
-
-registry/api/agent_routes.py
-  └─ from ..utils.ssrf import is_safe_url    (guard GET + HEAD)
-
-registry/health/service.py
-  └─ from ..utils.ssrf import is_safe_url    (guard proxy_pass_url + endpoint)
-
-registry/core/config.py
-  └─ Settings.ssrf_protection_enabled, Settings.ssrf_extra_allowed_hosts
+registry/utils/ssrf.py
++-----------------------------------------------+
+|                                               |
+|  is_safe_url(url: str) -> bool                |
+|    |-- _validate_scheme(parsed)               |
+|    |-- _check_trusted_domains(hostname)       |
+|    |-- _resolve_and_check_ips(hostname, port) |
+|                                               |
+|  is_private_ip(ip_str: str) -> bool           |
+|                                               |
+|  get_trusted_domains() -> frozenset[str]      |
+|    (cached, merges defaults + config)         |
+|                                               |
+|  _DEFAULT_TRUSTED_DOMAINS: frozenset          |
+|                                               |
+|  _ssrf_blocked_counter (OTel)                 |
++-----------------------------------------------+
 ```
 
 ## Data Models
 
 ### New Models
-No new request/response Pydantic models. The agent health response keeps its existing shape; a blocked URL is surfaced through the existing `detail` string field:
 
-```python
-# Existing response shape from check_agent_health (unchanged keys)
-{
-    "agent_path": str,
-    "health_check_url": str,
-    "status": "healthy" | "unhealthy",
-    "status_code": int | None,
-    "detail": str | None,          # e.g. "Blocked by SSRF policy: host resolves to private IP"
-    "response_time_ms": int | None,
-    "last_checked_iso": str,
-}
-```
+No new Pydantic models are required. The SSRF module operates on plain strings and returns booleans.
 
 ### Model Changes
-None. `AgentCard.url` and `proxy_pass_url` keep their current types. (Optional hardening at registration time is listed under Alternatives, not adopted here to keep scope tight and avoid rejecting legitimate private-network registrations.)
+
+The `Settings` class in `registry/core/config.py` gains one field:
+
+```python
+ssrf_additional_trusted_domains: str = Field(
+    default="",
+    description=(
+        "Comma-separated list of additional hostnames to trust for SSRF "
+        "validation (e.g., 'internal-git.corp.example.com,registry.internal'). "
+        "These skip the private-IP resolution check. Merged with built-in "
+        "defaults (github.com, gitlab.com, etc.) and github_extra_hosts."
+    ),
+)
+```
 
 ## API / CLI Design
 
-### Modified Endpoint: `POST /agents/{path}/health`
-**Description:** Unchanged contract. New behavior: when the agent-card URL or fallback URL fails SSRF validation, the endpoint does not issue the request; it records `status: "unhealthy"` with an SSRF `detail`.
+### New Endpoints / Commands
 
-**Invocation:**
-```bash
-curl -sS -X POST "$REGISTRY_URL/api/agents/my-agent/health" \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
-```
+No new endpoints. Existing registration endpoints gain validation logic.
 
-**Expected Response (safe URL, reachable):**
+### Changed Error Responses
+
+**Existing:** `POST /servers/register` (and similar for agents/skills) returns 400 for generic validation errors.
+
+**New behavior:** Returns HTTP 422 with a structured body when a URL field fails SSRF validation:
+
 ```json
-{ "agent_path": "my-agent", "status": "healthy", "status_code": 200, "detail": null }
+{
+  "detail": "URL validation failed: proxy_pass_url resolves to a private IP address",
+  "field": "proxy_pass_url",
+  "url": "http://10.0.0.5:8080/mcp",
+  "reason": "private_ip"
+}
 ```
 
-**Expected Response (URL resolves to private IP):**
-```json
-{ "agent_path": "my-agent", "status": "unhealthy", "status_code": null,
-  "detail": "Blocked by SSRF policy: 127.0.0.1" }
-```
-
-**Error Cases (unchanged):**
-- 404: agent not found.
-- 403: caller lacks access.
-- 400: agent disabled.
-
-### Server health check / tool fetch
-Internal (background task and service method). No HTTP contract change. A blocked `proxy_pass_url` yields `is_healthy=False` with detail `unhealthy: blocked by SSRF policy`.
+Possible `reason` values: `invalid_scheme`, `no_hostname`, `dns_resolution_failed`, `private_ip`, `metadata_endpoint`.
 
 ## Configuration Parameters
 
@@ -207,54 +244,59 @@ Internal (background task and service method). No HTTP contract change. A blocke
 
 | Variable Name | Type | Default | Required | Description |
 |---------------|------|---------|----------|-------------|
-| `SSRF_PROTECTION_ENABLED` | bool | `true` | No | Master switch for outbound URL validation on health/agent-card paths. When false, behavior reverts to pre-change (no validation) - intended only for trusted closed networks. |
-| `SSRF_EXTRA_ALLOWED_HOSTS` | str | `""` | No | Comma-separated hostnames that bypass the private-IP check for health/agent-card fetches (e.g. internal agent hosts). Mirrors `github_extra_hosts` for SKILL.md. |
+| `SSRF_ADDITIONAL_TRUSTED_DOMAINS` | str (comma-separated) | `""` | No | Additional hostnames that bypass private-IP checks (for corporate GHES, internal registries) |
 
 ### Settings / Config Class Updates
+
 ```python
-# registry/core/config.py, inside class Settings (near github_extra_hosts ~line 292)
-ssrf_protection_enabled: bool = Field(
-    default=True,
-    description=(
-        "Validate outbound URLs (agent-card fetch, server/agent health checks) "
-        "against the SSRF policy. Disable only on fully trusted closed networks."
-    ),
-)
-ssrf_extra_allowed_hosts: str = Field(
+ssrf_additional_trusted_domains: str = Field(
     default="",
     description=(
-        "Comma-separated hostnames allowed to bypass the SSRF private-IP check "
-        "for health and agent-card fetches (e.g. internal agent hosts)."
+        "Comma-separated list of additional hostnames to trust for SSRF "
+        "validation (e.g., 'internal-git.corp.example.com,registry.internal'). "
+        "These skip the private-IP resolution check. Merged with built-in "
+        "defaults (github.com, gitlab.com, etc.) and github_extra_hosts."
     ),
 )
 ```
 
 ### Deployment Surface Checklist
-Every surface where the two new variables may be set (all optional, safe defaults):
-- [ ] `.env.example` (document both, default true / empty)
-- [ ] `docker-compose.yml` / `docker-compose.*.yml` registry service `environment:`
-- [ ] Helm `values.yaml` and the registry Deployment env block (if a chart exists)
-- [ ] Terraform/ECS task definition environment for the registry service
-- [ ] `docs/unified-parameter-reference.md` (parameter table)
+
+| Surface | File | Action |
+|---------|------|--------|
+| `.env.example` | `.env.example` | Add commented entry |
+| Docker Compose | `docker-compose.yml` | No change (picked up via `.env`) |
+| Helm values | `charts/registry/values.yaml` | Add under `env:` section |
+| Helm reserved names | `charts/registry/templates/_helpers.tpl` | Add to reserved list |
+| Terraform variables | `terraform/aws-ecs/variables.tf` | Add variable definition |
+| Terraform task def | `terraform/aws-ecs/main.tf` | Wire into container env |
+| docs | `docs/unified-parameter-reference.md` | Document the parameter |
 
 ## New Dependencies
-This change uses only existing dependencies (`httpx`, and the `ipaddress` / `socket` / `urllib.parse` standard-library modules already imported by `skill_service.py`). No new packages.
+
+This change uses only existing dependencies. No new packages are required.
+
+- `socket` (stdlib) -- DNS resolution
+- `ipaddress` (stdlib) -- IP classification
+- `urllib.parse` (stdlib) -- URL parsing
+- `functools.lru_cache` (stdlib) -- trusted-domain caching
+- `logging` (stdlib) -- structured logs
+- `opentelemetry.metrics` (already in deps) -- counter metric
 
 ## Implementation Details
 
 ### Step-by-Step Plan (for a future implementer)
 
-#### Step 1: Create the shared SSRF utility
+#### Step 1: Create `registry/utils/ssrf.py`
+
 **File:** `registry/utils/ssrf.py` (new file)
 
-Move the existing logic out of `skill_service.py` verbatim, parameterizing the allowlist so different call sites can pass their own extra hosts. Keep the function names public (no leading underscore) since this is now a shared module.
-
 ```python
-"""Shared SSRF (Server-Side Request Forgery) URL validation.
+"""Shared SSRF protection utilities.
 
-Single source of truth for outbound-URL safety checks. Used by SKILL.md
-fetches, agent-card fetches, and server/agent health checks. Logic is
-preserved verbatim from the original skill_service implementation.
+Validates outbound URLs against private-IP, metadata-endpoint, and
+scheme restrictions. All services that make HTTP requests to
+user-supplied URLs must call is_safe_url() before connecting.
 """
 
 import ipaddress
@@ -263,72 +305,116 @@ import socket
 from functools import lru_cache
 from urllib.parse import urlparse
 
-from ..core.config import settings
+from opentelemetry import metrics
+
+from registry.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Built-in trusted domains that skip the IP check (used by SKILL.md fetches).
+meter = metrics.get_meter(__name__)
+_ssrf_blocked_counter = meter.create_counter(
+    name="ssrf_blocked_total",
+    description="Number of outbound URLs blocked by SSRF validation",
+    unit="1",
+)
+
 _DEFAULT_TRUSTED_DOMAINS: frozenset[str] = frozenset(
-    {"github.com", "gitlab.com", "raw.githubusercontent.com", "bitbucket.org"}
+    {
+        "github.com",
+        "gitlab.com",
+        "raw.githubusercontent.com",
+        "bitbucket.org",
+    }
 )
 
 
-def _split_hosts(raw: str | None) -> frozenset[str]:
-    """Parse a comma-separated host list into a lowercase frozenset."""
-    if not raw:
-        return frozenset()
-    return frozenset(h.strip().lower() for h in raw.split(",") if h.strip())
-
-
 @lru_cache(maxsize=1)
-def skill_trusted_domains() -> frozenset[str]:
-    """SKILL.md allowlist: built-in defaults plus configured GHES hosts."""
-    return _DEFAULT_TRUSTED_DOMAINS | _split_hosts(settings.github_extra_hosts)
+def get_trusted_domains() -> frozenset[str]:
+    """Return the merged set of trusted domains.
+
+    Combines built-in defaults, github_extra_hosts, and
+    ssrf_additional_trusted_domains. Cached because settings are
+    immutable per-process.
+    """
+    extra_github = settings.github_extra_hosts or ""
+    extra_ssrf = settings.ssrf_additional_trusted_domains or ""
+    combined_raw = f"{extra_github},{extra_ssrf}"
+    extra = frozenset(h.strip().lower() for h in combined_raw.split(",") if h.strip())
+    return _DEFAULT_TRUSTED_DOMAINS | extra
 
 
-@lru_cache(maxsize=1)
-def health_allowed_hosts() -> frozenset[str]:
-    """Health/agent-card allowlist: hosts that bypass the private-IP check."""
-    return _split_hosts(settings.ssrf_extra_allowed_hosts)
+def is_private_ip(
+    ip_str: str,
+) -> bool:
+    """Check if an IP address is private, loopback, link-local, or reserved.
 
+    Args:
+        ip_str: IP address string to check.
 
-def is_private_ip(ip_str: str) -> bool:
-    """True if the IP is private/loopback/link-local/reserved or metadata."""
+    Returns:
+        True if the IP is in a non-routable range, False otherwise.
+    """
     try:
         ip = ipaddress.ip_address(ip_str)
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+        if ip.is_private:
             return True
-        if ip_str == "169.254.169.254":  # cloud metadata endpoint
+        if ip.is_loopback:
+            return True
+        if ip.is_link_local:
+            return True
+        if ip.is_reserved:
+            return True
+        if ip_str == "169.254.169.254":
             return True
         return False
     except ValueError:
-        return True  # unparseable -> treat as unsafe
+        return True
 
 
-def is_safe_url(url: str, *, allowed_hosts: frozenset[str] | None = None) -> bool:
-    """Return True if the URL is safe to fetch.
+def is_safe_url(
+    url: str,
+    call_site: str = "unknown",
+) -> bool:
+    """Check if a URL is safe to fetch (SSRF protection).
 
-    Enforces http/https, then either matches an allowlisted host (skips IP
-    check) or resolves the hostname and rejects any private/metadata IP.
+    Validates that a URL:
+    1. Uses http or https scheme
+    2. Has a resolvable hostname
+    3. Does not resolve to a private/loopback/link-local IP address
+    4. Does not target cloud metadata endpoints
+
+    Trusted domains (built-in + configured) skip the IP resolution check.
 
     Args:
         url: URL to validate.
-        allowed_hosts: hostnames that bypass the private-IP check. Defaults
-            to the SKILL.md trusted domains for backward compatibility.
+        call_site: Label for metrics/logging identifying the caller.
+
+    Returns:
+        True if the URL is safe to fetch, False otherwise.
     """
-    allow = skill_trusted_domains() if allowed_hosts is None else allowed_hosts
     try:
         parsed = urlparse(url)
+
         if parsed.scheme not in ("http", "https"):
-            logger.warning(f"SSRF protection: blocked scheme '{parsed.scheme}'")
+            logger.warning(
+                "SSRF protection: Blocked URL with scheme '%s' at %s",
+                parsed.scheme,
+                call_site,
+            )
+            _ssrf_blocked_counter.add(1, {"call_site": call_site, "reason": "invalid_scheme"})
             return False
+
         hostname = parsed.hostname
         if not hostname:
-            logger.warning("SSRF protection: URL has no hostname")
+            logger.warning("SSRF protection: URL has no hostname at %s", call_site)
+            _ssrf_blocked_counter.add(1, {"call_site": call_site, "reason": "no_hostname"})
             return False
-        if hostname.lower() in allow:
-            logger.debug(f"SSRF protection: trusted host '{hostname.lower()}'")
+
+        hostname_lower = hostname.lower()
+        if hostname_lower in get_trusted_domains():
+            logger.debug("SSRF protection: Trusted domain '%s'", hostname_lower)
             return True
+
         try:
             addr_info = socket.getaddrinfo(
                 hostname,
@@ -336,123 +422,380 @@ def is_safe_url(url: str, *, allowed_hosts: frozenset[str] | None = None) -> boo
                 proto=socket.IPPROTO_TCP,
             )
         except socket.gaierror as e:
-            logger.warning(f"SSRF protection: cannot resolve '{hostname}': {e}")
+            logger.warning(
+                "SSRF protection: Failed to resolve hostname '%s' at %s: %s",
+                hostname,
+                call_site,
+                e,
+            )
+            _ssrf_blocked_counter.add(
+                1, {"call_site": call_site, "reason": "dns_resolution_failed"}
+            )
             return False
-        for *_unused, sockaddr in addr_info:
-            ip = sockaddr[0]
-            if is_private_ip(ip):
+
+        for _family, _socktype, _proto, _canonname, sockaddr in addr_info:
+            ip_address = sockaddr[0]
+            if is_private_ip(ip_address):
                 logger.warning(
-                    f"SSRF protection: blocked '{hostname}' -> private IP '{ip}'"
+                    "SSRF protection: Blocked URL resolving to private IP '%s' "
+                    "for hostname '%s' at %s",
+                    ip_address,
+                    hostname,
+                    call_site,
+                )
+                _ssrf_blocked_counter.add(
+                    1, {"call_site": call_site, "reason": "private_ip"}
                 )
                 return False
+
         return True
-    except Exception as e:  # defensive: never let validation crash the caller
-        logger.warning(f"SSRF protection: error validating URL: {e}")
+
+    except Exception as e:
+        logger.warning("SSRF protection: Error validating URL at %s: %s", call_site, e)
+        _ssrf_blocked_counter.add(1, {"call_site": call_site, "reason": "validation_error"})
         return False
 ```
 
-Note for implementer: keep `is_safe_url`'s default allowlist equal to the SKILL.md trusted domains so the re-export in Step 2 is a pure refactor.
+#### Step 2: Add configuration field to `registry/core/config.py`
 
-#### Step 2: Re-point `skill_service.py` at the shared module (no behavior change)
-**File:** `registry/services/skill_service.py` (lines ~60-192)
-
-Delete the local `_DEFAULT_TRUSTED_DOMAINS`, `_trusted_domains`, `_is_private_ip`, and `_is_safe_url` definitions and import the shared functions, aliasing to the old private names so the rest of the file (lines 595, 616, 681, 707, 866, 896, 1042, 1071) is untouched.
+**File:** `registry/core/config.py`
+**Lines:** Insert after the `github_extra_hosts` field (search for `github_extra_hosts` in the Settings class and add the new field immediately after it).
 
 ```python
-from ..utils.ssrf import is_safe_url as _is_safe_url  # noqa: F401  (re-export shim)
-# (is_private_ip / trusted-domains now live in registry.utils.ssrf)
+ssrf_additional_trusted_domains: str = Field(
+    default="",
+    description=(
+        "Comma-separated list of additional hostnames to trust for SSRF "
+        "validation (e.g., 'internal-git.corp.example.com,registry.internal'). "
+        "These skip the private-IP resolution check. Merged with built-in "
+        "defaults (github.com, gitlab.com, etc.) and github_extra_hosts."
+    ),
+)
 ```
 
-#### Step 3: Guard the agent health check
-**File:** `registry/api/agent_routes.py` (lines 920-983)
+#### Step 3: Refactor `registry/services/skill_service.py`
 
-Add a helper that wraps `is_safe_url()` with the feature flag and health allowlist, then call it before every GET and the fallback HEAD.
+**File:** `registry/services/skill_service.py`
+**Lines:** 70-192 (replace the private functions)
+
+Remove:
+- `_DEFAULT_TRUSTED_DOMAINS` (lines 71-78)
+- `_trusted_domains()` (lines 81-91)
+- `_is_private_ip()` (lines 94-125)
+- `_is_safe_url()` (lines 128-192)
+
+Replace with import at the top of the file:
+```python
+from registry.utils.ssrf import is_safe_url
+```
+
+Update all internal call sites from `_is_safe_url(url)` to `is_safe_url(url, call_site="skill_service")`. There are four such calls in the file:
+- `_validate_skill_url()` (~line 605)
+- `_parse_skill_md_content()` (~line 687)
+- `_check_skill_health()` (~line 884)
+- `_fetch_authenticated_content()` (~line 1062)
+
+#### Step 4: Add SSRF check to `registry/core/mcp_client.py`
+
+**File:** `registry/core/mcp_client.py`
+**Lines:** Add import at top, guard at entry of `detect_server_transport()` (~line 210) and `get_tools_from_server_with_transport()` (~line 253).
 
 ```python
-from ..utils.ssrf import is_safe_url, health_allowed_hosts
-
-def _outbound_url_allowed(url: str) -> bool:
-    """Apply the SSRF policy to a health-check URL (honors the feature flag)."""
-    if not settings.ssrf_protection_enabled:
-        return True
-    return is_safe_url(url, allowed_hosts=health_allowed_hosts())
+from registry.utils.ssrf import is_safe_url
 ```
 
-In the `for url in health_urls:` loop, before `httpx.AsyncClient(...).get(url)`:
-
+In `detect_server_transport()`:
 ```python
-for url in health_urls:
-    health_check_url = url
-    if not _outbound_url_allowed(url):
-        detail = "Blocked by SSRF policy"
-        logger.warning(f"Agent health check for {path} blocked by SSRF policy: {url}")
-        continue
-    start_time = datetime.now(UTC)
-    ...
+async def detect_server_transport(base_url: str) -> str:
+    if not is_safe_url(base_url, call_site="mcp_client.detect_transport"):
+        logger.warning("SSRF: Blocked transport detection for %s", base_url)
+        return "blocked"
+    # ... existing logic unchanged ...
 ```
 
-Before the fallback HEAD (line ~962):
-
+In `get_tools_from_server_with_transport()`:
 ```python
-if status_label == "unhealthy" and _outbound_url_allowed(base_url):
-    logger.info(f"Agent {path} GET checks failed, falling back to HEAD ping on {base_url}")
-    ...
+async def get_tools_from_server_with_transport(
+    base_url: str, transport: str = "auto"
+) -> list[dict] | None:
+    if not is_safe_url(base_url, call_site="mcp_client.get_tools"):
+        logger.warning("SSRF: Blocked tool fetch for %s", base_url)
+        return None
+    # ... existing logic unchanged ...
 ```
 
-(If `base_url` is blocked, skip the HEAD entirely; `detail` already reflects the SSRF block.)
+#### Step 5: Add SSRF check to `registry/health/service.py`
 
-#### Step 4: Guard the server health check and tool-fetch task
 **File:** `registry/health/service.py`
-
-At the top of `_check_server_endpoint_transport_aware()` (after the empty-URL guard, line ~682):
-
-```python
-from ..utils.ssrf import is_safe_url, health_allowed_hosts
-
-if settings.ssrf_protection_enabled and not is_safe_url(
-    proxy_pass_url, allowed_hosts=health_allowed_hosts()
-):
-    logger.warning(f"Health check blocked by SSRF policy: {proxy_pass_url}")
-    return False, "unhealthy: blocked by SSRF policy"
-```
-
-Also validate the **resolved** transport endpoint (the `get_endpoint_url_from_server_info(...)` result at lines ~777 and ~860) before its request, since `mcp_endpoint`/`sse_endpoint` can be user-supplied overrides distinct from `proxy_pass_url`:
+**Lines:** ~429 (inside `_check_single_service()`, after extracting `proxy_pass_url` and before the transport-aware check)
 
 ```python
-endpoint = get_endpoint_url_from_server_info(server_info, transport_type="streamable-http")
-if settings.ssrf_protection_enabled and not is_safe_url(endpoint, allowed_hosts=health_allowed_hosts()):
-    logger.warning(f"Health check endpoint blocked by SSRF policy: {endpoint}")
-    return False, "unhealthy: blocked by SSRF policy"
+from registry.utils.ssrf import is_safe_url
 ```
 
-In the tool-fetch background task (around line ~1072), validate `proxy_pass_url` before `mcp_client_service.get_mcp_connection_result(...)` and skip the fetch (leave tools unchanged) if blocked.
+Insert after the `proxy_pass_url = server_info.get("proxy_pass_url")` line:
+```python
+if proxy_pass_url and not is_safe_url(proxy_pass_url, call_site="health_service"):
+    logger.warning("SSRF: Skipping health check for blocked URL: %s", proxy_pass_url)
+    new_status = HealthStatus.UNHEALTHY
+    self.server_health_status[service_path] = new_status
+    return previous_status != new_status
+```
 
-#### Step 5: Add settings
-**File:** `registry/core/config.py` (near line 292, beside `github_extra_hosts`)
+#### Step 6: Add SSRF check to `registry/utils/agent_validator.py`
 
-Add the two `Field`s from [Settings / Config Class Updates](#settings--config-class-updates).
+**File:** `registry/utils/agent_validator.py`
+**Lines:** ~211 (at the top of `_check_agent_reachability()`)
+
+```python
+from registry.utils.ssrf import is_safe_url
+```
+
+Insert at the start of the function body:
+```python
+def _check_agent_reachability(url: str) -> tuple[bool, str | None]:
+    if not is_safe_url(url, call_site="agent_validator"):
+        return (False, "URL blocked by SSRF protection")
+    # ... existing try/except logic unchanged ...
+```
+
+#### Step 7: Add SSRF check to `registry/services/skill_scanner.py`
+
+**File:** `registry/services/skill_scanner.py`
+**Lines:** ~253 (at the top of `_download_skill_content()`)
+
+```python
+from registry.utils.ssrf import is_safe_url
+```
+
+Insert at the start of the method body:
+```python
+def _download_skill_content(self, skill_md_url: str, headers: dict | None = None) -> str:
+    if not is_safe_url(skill_md_url, call_site="skill_scanner"):
+        raise ValueError(f"URL blocked by SSRF protection: {skill_md_url}")
+    # ... existing logic unchanged ...
+```
+
+#### Step 8: Add SSRF check to `auth_server/server.py` (MCP proxy)
+
+**File:** `auth_server/server.py`
+**Lines:** ~4024 (in `mcp_proxy()`, after extracting the upstream URL from the `X-Upstream-Url` header)
+
+```python
+from registry.utils.ssrf import is_safe_url
+```
+
+Insert after extracting `upstream_url`:
+```python
+if not is_safe_url(upstream_url, call_site="auth_server.mcp_proxy"):
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": "Upstream URL blocked by SSRF protection",
+            "field": "X-Upstream-Url",
+            "url": upstream_url,
+            "reason": "private_ip",
+        },
+    )
+```
+
+#### Step 9: Add registration-time validation
+
+**File:** `registry/api/server_routes.py`
+
+In the server registration handler, after parsing the request body and extracting `proxy_pass_url`:
+
+```python
+from registry.utils.ssrf import is_safe_url
+
+# After extracting proxy_pass_url from the request:
+if proxy_pass_url and not is_safe_url(proxy_pass_url, call_site="server_registration"):
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "detail": "URL validation failed: proxy_pass_url resolves to a private IP address",
+            "field": "proxy_pass_url",
+            "url": proxy_pass_url,
+            "reason": "private_ip",
+        },
+    )
+```
+
+Apply the same pattern to:
+- `registry/api/agent_routes.py` -- validate agent URL field
+- `registry/api/skill_routes.py` -- validate `skill_md_url` field
+
+#### Step 10: Migrate existing tests
+
+**File:** `tests/unit/utils/test_ssrf.py` (new file)
+
+Move and expand tests from `tests/unit/services/test_skill_service_ssrf_allowlist.py`:
+
+```python
+import socket
+from unittest.mock import patch
+
+import pytest
+
+from registry.utils.ssrf import get_trusted_domains, is_private_ip, is_safe_url
+
+
+class TestIsPrivateIp:
+    @pytest.mark.parametrize(
+        "ip,expected",
+        [
+            ("127.0.0.1", True),
+            ("10.0.0.1", True),
+            ("172.16.0.1", True),
+            ("192.168.1.1", True),
+            ("169.254.169.254", True),
+            ("::1", True),
+            ("fe80::1", True),
+            ("fd00::1", True),
+            ("8.8.8.8", False),
+            ("1.1.1.1", False),
+            ("93.184.216.34", False),
+            ("2606:4700::1", False),
+            ("invalid", True),
+            ("", True),
+        ],
+    )
+    def test_ip_classification(self, ip: str, expected: bool) -> None:
+        assert is_private_ip(ip) == expected
+
+
+class TestIsSafeUrl:
+    def test_blocks_non_http_schemes(self) -> None:
+        assert is_safe_url("ftp://example.com/file") is False
+        assert is_safe_url("file:///etc/passwd") is False
+        assert is_safe_url("gopher://evil.com") is False
+        assert is_safe_url("javascript:alert(1)") is False
+
+    def test_blocks_empty_and_malformed(self) -> None:
+        assert is_safe_url("") is False
+        assert is_safe_url("http://") is False
+        assert is_safe_url("not-a-url") is False
+
+    def test_allows_trusted_domains(self) -> None:
+        assert is_safe_url("https://github.com/org/repo") is True
+        assert is_safe_url("https://raw.githubusercontent.com/file") is True
+        assert is_safe_url("https://gitlab.com/group/project") is True
+        assert is_safe_url("https://bitbucket.org/team/repo") is True
+
+    def test_trusted_domains_case_insensitive(self) -> None:
+        assert is_safe_url("https://GitHub.COM/org/repo") is True
+        assert is_safe_url("https://GITLAB.com/group/project") is True
+
+    @patch("registry.utils.ssrf.socket.getaddrinfo")
+    def test_blocks_private_ip_resolution(self, mock_dns) -> None:
+        mock_dns.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 80))
+        ]
+        assert is_safe_url("http://evil.com/path") is False
+
+    @patch("registry.utils.ssrf.socket.getaddrinfo")
+    def test_blocks_loopback_resolution(self, mock_dns) -> None:
+        mock_dns.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))
+        ]
+        assert is_safe_url("http://localhost-alias.com/") is False
+
+    @patch("registry.utils.ssrf.socket.getaddrinfo")
+    def test_allows_public_ip(self, mock_dns) -> None:
+        mock_dns.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+        ]
+        assert is_safe_url("https://example.com/") is True
+
+    @patch("registry.utils.ssrf.socket.getaddrinfo")
+    def test_blocks_metadata_endpoint(self, mock_dns) -> None:
+        mock_dns.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 80))
+        ]
+        assert is_safe_url("http://metadata.internal/latest") is False
+
+    @patch("registry.utils.ssrf.socket.getaddrinfo")
+    def test_blocks_dns_failure(self, mock_dns) -> None:
+        mock_dns.side_effect = socket.gaierror("Name or service not known")
+        assert is_safe_url("http://nonexistent.invalid/") is False
+
+    @patch("registry.utils.ssrf.socket.getaddrinfo")
+    def test_blocks_if_any_resolved_ip_is_private(self, mock_dns) -> None:
+        mock_dns.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 80)),
+        ]
+        assert is_safe_url("http://dual-homed.com/") is False
+
+    @patch("registry.utils.ssrf.socket.getaddrinfo")
+    def test_allows_multiple_public_ips(self, mock_dns) -> None:
+        mock_dns.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.35", 443)),
+        ]
+        assert is_safe_url("https://cdn.example.com/") is True
+
+
+class TestGetTrustedDomains:
+    def test_includes_defaults(self) -> None:
+        get_trusted_domains.cache_clear()
+        domains = get_trusted_domains()
+        assert "github.com" in domains
+        assert "gitlab.com" in domains
+        assert "raw.githubusercontent.com" in domains
+        assert "bitbucket.org" in domains
+```
 
 ### Error Handling
-- Validation never raises into the caller; `is_safe_url()` catches all exceptions and returns `False` (fail-closed).
-- A blocked URL is a normal, expected outcome on health paths: surface it as `unhealthy` with an SSRF `detail`, not an HTTP 5xx.
-- DNS resolution failure is treated as unsafe (`False`), consistent with SKILL.md.
+
+| Call Site | On SSRF Block | User-Facing Error |
+|-----------|---------------|-------------------|
+| Registration endpoints | Raise `HTTPException(422)` | JSON body with field, URL, reason |
+| `mcp_client.py` | Return `None` / `"blocked"` | Server marked unhealthy on next health check |
+| `health/service.py` | Mark `UNHEALTHY` | Server shows unhealthy in dashboard |
+| `agent_validator.py` | Return `(False, message)` | Validation warning in registration response |
+| `skill_scanner.py` | Raise `ValueError` | Scanner reports failure in scan result |
+| `auth_server` proxy | Return 422 JSON | Client sees clear error |
 
 ### Logging
-- WARNING on every block, including the hostname/IP and the asset path/url, for audit trails.
-- DEBUG when an allowlisted host bypasses the IP check.
-- No change to existing INFO health-status logging.
+
+| Level | When | Example Message |
+|-------|------|-----------------|
+| WARNING | URL blocked | `SSRF protection: Blocked URL resolving to private IP '10.0.0.5' for hostname 'evil.com' at health_service` |
+| WARNING | DNS failure | `SSRF protection: Failed to resolve hostname 'nonexistent.invalid' at mcp_client: [Errno -2] Name or service not known` |
+| DEBUG | Trusted domain allowed | `SSRF protection: Trusted domain 'github.com'` |
 
 ## Observability
 
-### Tracing / Metrics / Logging Points
-- **Log event** `SSRF protection: blocked ...` (WARNING) is the audit signal; operators can alert on its rate.
-- **Suggested metric (optional, low effort):** increment a counter `registry_ssrf_blocked_total{surface="agent_health|server_health|tool_fetch"}` if the project already exposes Prometheus/OTel counters. The repo uses OpenTelemetry (`registry/core/telemetry.py`); a span attribute `ssrf.blocked=true` on the health span is a lightweight option.
-- **Health status persistence** already records `health_status`/`last_health_check`; a blocked check correctly persists `unhealthy`, which is visible in the UI.
+### Metrics
+
+| Metric Name | Type | Labels | Description |
+|-------------|------|--------|-------------|
+| `ssrf_blocked_total` | Counter | `call_site`, `reason` | Incremented each time a URL is blocked |
+
+Label values for `reason`: `invalid_scheme`, `no_hostname`, `dns_resolution_failed`, `private_ip`, `validation_error`.
+
+Label values for `call_site`: `skill_service`, `mcp_client.detect_transport`, `mcp_client.get_tools`, `health_service`, `agent_validator`, `skill_scanner`, `auth_server.mcp_proxy`, `server_registration`, `agent_registration`, `skill_registration`.
+
+### Alerting Recommendation
+
+```yaml
+# Prometheus alert rule (for documentation, not implemented by this change)
+- alert: SSRFBlockRateHigh
+  expr: rate(ssrf_blocked_total[5m]) > 5
+  for: 2m
+  labels:
+    severity: warning
+  annotations:
+    summary: "High rate of SSRF-blocked requests"
+```
 
 ## Scaling Considerations
-- `socket.getaddrinfo` is a synchronous call inside async handlers. The same pattern is already used by SKILL.md fetches. With the default 2s health timeout and per-asset checks, DNS overhead is negligible relative to the HTTP request it gates.
-- The allowlist sets are `lru_cache`d, so parsing happens once per process. `settings` is immutable per process, matching the existing `_trusted_domains()` cache assumption. (Implementer note: any test that mutates `settings.ssrf_extra_allowed_hosts` must call `.cache_clear()` on the cached functions, mirroring how SKILL.md tests handle `github_extra_hosts`.)
-- No new persistent state, no new network round-trips beyond the DNS lookup that gates an existing request.
+
+- **DNS resolution overhead**: `socket.getaddrinfo()` is synchronous but completes in <10ms for cached entries. The OS resolver cache means repeated checks for the same hostname are fast. For the health check loop (runs every 5 minutes per server), this is negligible.
+- **LRU cache on trusted domains**: The `get_trusted_domains()` function is cached with `maxsize=1`. Since settings are immutable per-process, this never evicts.
+- **No additional network calls**: The SSRF check uses DNS only, not HTTP pre-flights. The actual outbound request still happens exactly once.
+- **Registration-time validation**: Adds one DNS lookup per registration request. At current registration volumes (low single-digit per minute), this is not a bottleneck.
 
 ## File Changes
 
@@ -460,74 +803,119 @@ Add the two `Field`s from [Settings / Config Class Updates](#settings--config-cl
 
 | File Path | Description |
 |-----------|-------------|
-| `registry/utils/ssrf.py` | Shared SSRF validation (`is_safe_url`, `is_private_ip`, allowlist helpers) |
-| `tests/unit/utils/test_ssrf.py` | Unit tests for the shared guard |
+| `registry/utils/ssrf.py` | Shared SSRF validation module (public API) |
+| `tests/unit/utils/test_ssrf.py` | Unit tests for SSRF module |
+| `tests/integration/test_ssrf_registration.py` | Integration test for registration-time rejection |
 
 ### Modified Files
 
 | File Path | Lines | Change Description |
 |-----------|-------|--------------------|
-| `registry/services/skill_service.py` | ~60-192 | Remove local SSRF code; import shared `is_safe_url` (alias `_is_safe_url`) |
-| `registry/api/agent_routes.py` | ~920-983 | Add `_outbound_url_allowed`; guard GET loop and HEAD fallback |
-| `registry/health/service.py` | ~682, ~777, ~860, ~1072 | Validate `proxy_pass_url` and resolved endpoint before requests; guard tool fetch |
-| `registry/core/config.py` | ~292 | Add `ssrf_protection_enabled`, `ssrf_extra_allowed_hosts` |
-| `.env.example` | n/a | Document the two new variables |
-| `docs/unified-parameter-reference.md` | n/a | Add the two new parameters |
+| `registry/core/config.py` | +6 | Add `ssrf_additional_trusted_domains` setting |
+| `registry/services/skill_service.py` | -120, +5 | Remove private SSRF functions, import from shared module |
+| `registry/core/mcp_client.py` | +12 | Add `is_safe_url()` checks at two entry points |
+| `registry/health/service.py` | +8 | Add `is_safe_url()` check before health check HTTP call |
+| `registry/utils/agent_validator.py` | +5 | Add `is_safe_url()` check at function entry |
+| `registry/services/skill_scanner.py` | +5 | Add `is_safe_url()` check before download |
+| `auth_server/server.py` | +12 | Add `is_safe_url()` check in MCP proxy |
+| `registry/api/server_routes.py` | +12 | Registration-time URL validation |
+| `registry/api/agent_routes.py` | +12 | Registration-time URL validation |
+| `registry/api/skill_routes.py` | +12 | Registration-time URL validation |
+| `.env.example` | +3 | Document new env var |
+| `charts/registry/values.yaml` | +2 | Add Helm value |
+| `charts/registry/templates/_helpers.tpl` | +1 | Add to reserved env names |
+| `terraform/aws-ecs/variables.tf` | +8 | Add Terraform variable |
+| `terraform/aws-ecs/main.tf` | +4 | Wire env var into container |
+| `tests/unit/services/test_skill_service_ssrf_allowlist.py` | ~20 modified | Update imports to test shared module |
 
 ### Estimated Lines of Code
 
 | Category | Lines |
 |----------|-------|
-| New code (`ssrf.py` + guards + settings) | ~140 |
-| New tests | ~160 |
-| Modified code (refactor + call sites) | ~60 |
-| Docs | ~20 |
-| **Total** | **~380** |
+| New code (ssrf.py) | ~140 |
+| New tests | ~180 |
+| Modified code (call sites + config) | ~90 |
+| Config/deployment wiring | ~30 |
+| Removed code (skill_service.py privates) | ~-120 |
+| **Net new** | **~320** |
 
 ## Testing Strategy
-See `./testing.md`. In brief: unit tests for `is_safe_url` (private/loopback/link-local/reserved/metadata IPs, non-http scheme, no-hostname, DNS-resolves-to-private via monkeypatched `getaddrinfo`, allowlist bypass, feature-flag off), a regression run of the existing SKILL.md SSRF tests (must pass unchanged), and functional curl tests against `POST /agents/{path}/health` for an agent registered with a private-IP URL (expect `unhealthy` + SSRF detail) versus a public URL.
+
+See `testing.md` for the comprehensive testing plan including functional, backwards-compat, deployment, and E2E tests.
 
 ## Alternatives Considered
 
-### Alternative 1: Validate at registration time (reject private URLs on register/update)
-**Description:** Run `is_safe_url()` in the `AgentCard.url` / `proxy_pass_url` validators so bad URLs never get stored.
-**Pros:** Fails fast; no stored landmines.
-**Cons:** Rejects legitimate private-network deployments at registration even when the operator intends them; DNS at registration may differ from check time; does not protect already-stored assets. **Why rejected:** Too aggressive for a registry explicitly designed to front private MCP servers; the request-time guard plus allowlist is the right trust boundary. Could be added later as an opt-in.
+### Alternative 1: Middleware-Based SSRF Proxy
 
-### Alternative 2: Network-layer egress controls only (firewall / NAT)
-**Description:** Block private ranges at the container/VPC level instead of in code.
-**Pros:** Defense in depth; language-agnostic.
-**Cons:** Not portable across deployments (local docker-compose, ECS, EKS, bare metal); does not block loopback within the same host/container; invisible to the app for auditing. **Why rejected:** Belongs as complementary defense, not a substitute. Out of scope.
+**Description:** Create a centralized outbound HTTP proxy (e.g., a custom `httpx.Transport`) that validates every request automatically, rather than checking at each call site.
 
-### Alternative 3: Per-call bespoke validation inline (no shared module)
-**Description:** Copy the check into each call site.
-**Pros:** No refactor of `skill_service.py`.
-**Cons:** Three divergent copies; drift risk; violates DRY. **Why rejected:** A single shared utility is safer and is the explicit acceptance criterion.
+**Pros:**
+- Single enforcement point -- impossible to forget a call site
+- Catches URLs constructed dynamically after registration
+
+**Cons:**
+- The MCP SDK (`mcp.client.sse.sse_client`, `streamablehttp_client`) creates its own httpx clients internally; there is no hook to inject a custom transport
+- Would require forking/patching the MCP SDK
+- Admin-configured URLs (webhooks, gates) would need an exemption mechanism
+
+**Why Rejected:** The MCP SDK limitation makes this infeasible without upstream changes. The call-site approach, combined with registration-time validation, provides equivalent coverage for user-originated URLs.
+
+### Alternative 2: Network-Layer Enforcement Only
+
+**Description:** Rely solely on AWS security groups and VPC configuration to block outbound access to private ranges and metadata endpoints.
+
+**Pros:**
+- Zero application code changes
+- Works regardless of application bugs
+
+**Cons:**
+- Does not protect against DNS rebinding (hostname resolves to public IP at SG evaluation time, then rebinds to private at connection time)
+- Provides no observability (no logs, no metrics)
+- Cannot provide user-facing error messages at registration time
+- Platform-specific (not portable to non-AWS deployments)
+
+**Why Rejected:** Defense-in-depth requires application-layer validation. Network controls are complementary but insufficient alone.
+
+### Alternative 3: Validate Only at Registration Time
+
+**Description:** Check URLs once when they are submitted and trust the stored value thereafter.
+
+**Pros:**
+- Simpler implementation (fewer call sites)
+- No runtime overhead for health checks or tool fetches
+
+**Cons:**
+- Vulnerable to DNS rebinding: an attacker registers `evil.com` pointing to `8.8.8.8`, then changes the DNS record to `169.254.169.254` after registration
+- Does not protect against URLs already in the database from before this feature shipped
+
+**Why Rejected:** Runtime checks provide defense against DNS rebinding. The combined approach (registration-time + runtime) is the industry standard.
 
 ### Comparison Matrix
 
-| Criteria | Chosen (shared guard at request time) | Alt 1 (register-time) | Alt 2 (network) | Alt 3 (inline copies) |
-|----------|----------------------------------------|------------------------|------------------|------------------------|
-| Protects stored assets | Yes | No | Yes | Yes |
-| Allows legit private hosts | Yes (allowlist) | Hard | Hard | Yes |
-| Single source of truth | Yes | Partial | n/a | No |
-| Deployment portability | Yes | Yes | No | Yes |
-| Implementation cost | Low | Low | Medium | Low (but high maintenance) |
+| Criteria | Chosen (Call-site + Registration) | Alt 1 (Proxy Transport) | Alt 2 (Network-only) | Alt 3 (Registration-only) |
+|----------|-----------------------------------|------------------------|----------------------|--------------------------|
+| Completeness | High | Highest | Medium | Medium |
+| Feasibility | High | Low (MCP SDK) | High | High |
+| Observability | High | High | None | Partial |
+| DNS Rebinding | Protected | Protected | Vulnerable | Vulnerable |
+| Complexity | Medium | High | None | Low |
 
 ## Rollout Plan
-- **Phase 1 - Implementation** (out of scope for this skill): create `ssrf.py`, refactor `skill_service.py`, add guards and settings.
-- **Phase 2 - Testing**: unit + functional tests; confirm SKILL.md regression suite passes.
-- **Phase 3 - Deployment**: ship with `ssrf_protection_enabled=true` by default. Communicate to operators with private agents to populate `ssrf_extra_allowed_hosts`. Monitor WARNING-level SSRF-block logs for the first deployment window; a spike of legitimate blocks indicates an allowlist gap rather than an attack.
-- **Rollback**: set `SSRF_PROTECTION_ENABLED=false` to revert to prior behavior without a code change.
+
+- **Phase 1: Implementation** -- Create `registry/utils/ssrf.py`, wire into all call sites, add tests.
+- **Phase 2: Testing** -- Run full test suite (`uv run pytest tests/ -n 8`); verify no regressions. Manual testing with private-IP URLs.
+- **Phase 3: Deployment** -- Deploy with default configuration. `SSRF_ADDITIONAL_TRUSTED_DOMAINS` allows operators to allowlist internal hosts if false positives arise. No separate feature flag required since the protection is always-on and backwards-compatible for valid public URLs.
+- **Phase 4: Monitoring** -- Watch `ssrf_blocked_total` metric for false positives in the first week. Operators can add domains to the allowlist without code changes.
 
 ## Open Questions
-- Should `ssrf_protection_enabled=false` also disable SKILL.md SSRF validation, or only the new health/agent-card surfaces? **Recommendation:** only the new surfaces; SKILL.md validation should remain always-on (it predates this flag). The shared `is_safe_url` stays unconditional; the flag is applied only at the new call sites.
-- Should the agent/server allowlist default to the SKILL.md trusted domains too? **Recommendation:** no - keep them independent so GitHub trust does not implicitly grant health-check trust.
-- Do we want a metric/counter now, or is the WARNING log sufficient for v1? **Recommendation:** log-only for v1; add a counter if alerting need arises.
+
+1. **Should we add connect-time IP pinning?** The current approach resolves DNS before connecting but does not pin the resolved IP for the actual connection. A TOCTOU gap exists where DNS could rebind between the check and the connect. This is a known limitation shared with most SSRF libraries; connect-time pinning would require a custom httpx transport (feasible for our own clients, not for MCP SDK clients). Recommend tracking as a follow-up.
+
+2. **Should previously-registered private-IP URLs be flagged?** A migration script could scan all stored `proxy_pass_url` values and flag those that fail the SSRF check. This is out of scope for the initial implementation but may be valuable for operators.
 
 ## References
-- Existing SKILL.md SSRF guard: `registry/services/skill_service.py:94-192`
-- `SkillContentSSRFError`: `registry/exceptions.py:194`
-- Trusted-host allowlist precedent: `settings.github_extra_hosts` (`registry/core/config.py:292`)
-- OWASP SSRF Prevention Cheat Sheet
-- A2A agent card discovery (`/.well-known/agent-card.json`)
+
+- OWASP SSRF Prevention Cheat Sheet: https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html
+- AWS IMDS protection: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html
+- Existing implementation in `registry/services/skill_service.py:70-192`
+- Existing tests in `tests/unit/services/test_skill_service_ssrf_allowlist.py`

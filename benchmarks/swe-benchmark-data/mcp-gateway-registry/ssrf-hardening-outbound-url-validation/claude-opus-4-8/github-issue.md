@@ -1,66 +1,59 @@
-# GitHub Issue: SSRF Hardening - Validate Outbound URLs on Agent Card Fetch and Health Checks
+# GitHub Issue: SSRF Hardening -- Outbound URL Validation
 
 ## Title
-Validate outbound URLs before agent-card fetch and server/agent health checks (SSRF hardening)
+Harden outbound HTTP calls against SSRF by promoting `_is_safe_url()` to a shared utility and applying it at all user-originated URL call sites
 
 ## Labels
 - security
 - enhancement
-- registry
-- health-check
+- backend
 
 ## Description
 
 ### Problem Statement
-The registry stores user-supplied URLs at registration time (`AgentCard.url` for A2A agents, `proxy_pass_url` for MCP servers) and later issues outbound HTTP requests to those URLs during health checks and agent-card fetches. These outbound requests perform **no Server-Side Request Forgery (SSRF) validation**, so an authenticated caller who registers an asset can steer the registry into requesting arbitrary internal endpoints.
-
-Two concrete paths are unprotected today:
-
-1. **Agent card fetch / agent health check** - `POST /agents/{path}/health` in `registry/api/agent_routes.py` (lines 883-1013). It reads `agent_card.url` (supplied at registration), builds `https://{netloc}/.well-known/agent-card.json` via `_build_agent_health_urls()` (lines 186-205), then issues `client.get(url)` and a fallback `client.head(base_url)` with no scheme, hostname, or private-IP checks.
-
-2. **Server health check / tool discovery** - `HealthMonitoringService._check_server_endpoint_transport_aware()` in `registry/health/service.py` (lines 674-957) and the tool-fetch background task. These call `client.get/post(proxy_pass_url ...)` with `follow_redirects=True` and **inject stored credentials** (Bearer tokens, API keys) into the request headers.
-
-### Current State
-- A complete, well-tested SSRF guard already exists for SKILL.md fetches: `_is_safe_url()` and `_is_private_ip()` in `registry/services/skill_service.py` (lines 94-192). It enforces http/https, resolves the hostname with `socket.getaddrinfo`, blocks private/loopback/link-local/reserved IPs and the cloud metadata address `169.254.169.254`, and honors a trusted-domain allowlist (`github.com`, `gitlab.com`, etc., extensible via `settings.github_extra_hosts`).
-- This guard is **not reused** by the agent health check or the server health check. The two surfaces that fetch user-supplied URLs have zero SSRF protection.
-
-### Impact
-- An attacker with registration rights can probe internal-only services, cloud metadata endpoints (`169.254.169.254`), and loopback admin ports.
-- Because server health checks inject stored credentials, a malicious `proxy_pass_url` can also exfiltrate those credentials to an attacker-controlled host, and `follow_redirects=True` lets an allowlisted host redirect into an internal target.
+The registry fetches user-supplied URLs (proxy_pass_url, agent URLs, SKILL.md URLs) from multiple services, but SSRF protection (`_is_safe_url()` with private-IP and cloud-metadata blocking) exists only inside `skill_service.py`. All other outbound call sites -- the MCP client, health check service, agent validator, skill scanner, and auth-server proxy -- connect to user-originated URLs with no SSRF guard. An attacker who registers a server with `proxy_pass_url=http://169.254.169.254/latest/meta-data/` can exfiltrate cloud credentials or probe internal networks.
 
 ### Proposed Solution
-Promote the existing SKILL.md SSRF logic into a shared, reusable utility and apply it on every outbound request derived from a user-supplied URL:
-
-1. Extract `_is_safe_url()` / `_is_private_ip()` into a new shared module `registry/utils/ssrf.py` (single source of truth), keeping `skill_service.py` behavior identical by re-exporting.
-2. Call the guard before the GET/HEAD in the agent health check, and before the GET/POST in the server health check and tool-fetch task. On failure, return an `unhealthy` status with an SSRF detail (do not raise a 500).
-3. Re-validate the final URL after any redirect (mirror the SKILL.md redirect re-check).
-4. Add a feature flag (`ssrf_protection_enabled`, default `true`) and an additional host allowlist (`ssrf_extra_allowed_hosts`) so operators running registries on private networks can opt specific hosts back in.
-5. Log every blocked request at WARNING with the destination host for auditing.
+1. Extract `_is_safe_url()`, `_is_private_ip()`, and the trusted-domain allowlist into a new shared utility module (`registry/utils/ssrf.py`).
+2. Add a new configuration parameter `SSRF_ADDITIONAL_TRUSTED_DOMAINS` (comma-separated) so operators can allowlist internal corporate hosts without coupling to the GitHub-specific `github_extra_hosts` setting.
+3. Apply the shared `is_safe_url()` check at every call site where the URL originates from user input:
+   - `registry/core/mcp_client.py` (transport detection + tool fetching)
+   - `registry/health/service.py` (background + immediate health checks)
+   - `registry/utils/agent_validator.py` (agent reachability probe)
+   - `registry/services/skill_scanner.py` (skill content download)
+   - `auth_server/server.py` (MCP proxy via `X-Upstream-Url`)
+4. Validate at registration time: when a server, agent, or skill URL is first submitted, reject it early if it fails the SSRF check. This protects all downstream consumers in a single enforcement point.
+5. Add structured logging and a counter metric (`ssrf_blocked_total`) for blocked requests.
 
 ### User Stories
-- As a security engineer, I want the registry to validate every outbound URL it derives from user input, so a registered asset cannot turn the registry into an SSRF proxy.
-- As an operator running agents on a private network, I want to allowlist specific internal hosts, so legitimate private endpoints still pass health checks.
-- As a security auditor, I want blocked outbound requests logged with the target host, so I can detect SSRF attempts.
+- As a platform operator, I want all outbound requests to user-supplied URLs validated against private-IP and metadata-endpoint rules so that SSRF attacks cannot exfiltrate cloud credentials.
+- As a downstream team consuming the registry API, I want a clear 422 error when I accidentally register a server with a private URL so that I can fix the configuration immediately.
+- As an SRE, I want a metric (`ssrf_blocked_total`) counting blocked SSRF attempts so that I can alert on anomalous activity.
 
 ### Acceptance Criteria
-- [ ] A shared SSRF guard exists in `registry/utils/ssrf.py` and `skill_service.py` reuses it with no behavior change.
-- [ ] `POST /agents/{path}/health` validates the agent-card URL and the fallback HEAD URL before fetching; blocked URLs yield `status: "unhealthy"` with an SSRF detail.
-- [ ] Server health checks and the tool-fetch task validate `proxy_pass_url` (and the resolved transport endpoint) before requesting.
-- [ ] Private, loopback, link-local, reserved IPs and `169.254.169.254` are blocked; only http/https schemes are allowed.
-- [ ] Redirect targets are re-validated.
-- [ ] `ssrf_protection_enabled` (default true) and `ssrf_extra_allowed_hosts` are honored.
-- [ ] Blocked requests are logged at WARNING.
-- [ ] Unit tests cover private IP, metadata IP, non-http scheme, DNS-resolves-to-private, allowlist bypass, and redirect-to-private.
-- [ ] Existing SKILL.md SSRF tests still pass unchanged.
+- [ ] A new module `registry/utils/ssrf.py` exposes `is_safe_url(url: str) -> bool` and `is_private_ip(ip_str: str) -> bool` as public functions.
+- [ ] `is_safe_url()` blocks: non-http(s) schemes, unresolvable hostnames, IPs in private/loopback/link-local/reserved ranges, and the cloud metadata endpoint `169.254.169.254`.
+- [ ] `is_safe_url()` allows trusted domains (built-in defaults + `SSRF_ADDITIONAL_TRUSTED_DOMAINS` env var) without IP resolution.
+- [ ] All HIGH-risk call sites listed above call `is_safe_url()` before making the outbound request. Blocked URLs raise/return an appropriate error (HTTP 422 at API boundaries, `False`/`None` at service boundaries).
+- [ ] Registration endpoints (`POST /servers`, `POST /agents`, `POST /skills`) validate URL fields at submission time and reject with 422 + structured error body on failure.
+- [ ] The existing `skill_service.py` is refactored to import from `registry/utils/ssrf.py` instead of using private functions -- no behavior change.
+- [ ] Unit tests cover: private IPs (IPv4 + IPv6), cloud metadata IP, non-http schemes, unresolvable hostnames, trusted-domain bypass, valid public URLs.
+- [ ] Integration test confirms end-to-end rejection at registration time.
+- [ ] A Prometheus counter `ssrf_blocked_total` (labels: `call_site`, `reason`) is incremented on every block.
+- [ ] `SSRF_ADDITIONAL_TRUSTED_DOMAINS` is documented in `.env.example`, Helm values, Terraform variables, and Docker Compose extra_env examples.
+- [ ] All existing tests pass (`uv run pytest tests/ -n 8`); no regressions.
+- [ ] Backwards compatible: previously-registered servers with public URLs continue to work without re-registration.
 
 ### Out of Scope
-- Federation client SSRF hardening (tracked separately; config-driven endpoints).
-- Webhook / registration-gate callback hardening (config-driven, not request-driven).
-- Changing the health-check transport logic or the agent-card schema.
-- Network-layer egress controls (firewall, NAT policy).
+- Egress-layer network controls (security groups, VPC endpoints) -- those are complementary but separate.
+- Scanning or re-validating URLs that were registered before this change ships (migration/backfill).
+- Rate limiting or throttling of outbound requests (separate concern).
+- DNS rebinding protection beyond the initial resolution check (would require connect-time pinning, tracked separately).
+- Blocking admin-configured URLs (`registration_webhook_url`, `registration_gate_url`, etc.) -- those are operator-trusted.
 
 ### Dependencies
-- None. Reuses existing `_is_safe_url()` logic and the `ipaddress` / `socket` / `urllib.parse` standard library modules already in use.
+- No new external libraries required. The implementation uses only `socket`, `ipaddress`, and `urllib.parse` from the standard library.
+- Depends on the existing `registry/core/config.py` Settings class for the new env var.
 
 ### Related Issues
-- SKILL.md SSRF protection (existing `_is_safe_url` in `skill_service.py`), `github_extra_hosts` allowlist setting.
+- Existing SSRF allowlist tests at `tests/unit/services/test_skill_service_ssrf_allowlist.py` should be migrated to test the shared module.
