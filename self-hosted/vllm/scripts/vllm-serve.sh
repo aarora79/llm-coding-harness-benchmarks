@@ -29,8 +29,8 @@ set -euo pipefail
 #                      Two forms:
 #                        - a bare number  → YaRN factor, e.g. ROPE_SCALING=4
 #                          (serves 4x the native 32768 = 131072 tokens / 128K)
-#                        - a full JSON object passed through to --rope-scaling
-#                          verbatim, e.g. '{"rope_type":"yarn","factor":4.0,...}'
+#                        - a full JSON object nested under `rope_scaling` in
+#                          --hf-overrides, e.g. '{"rope_type":"yarn","factor":4.0,...}'
 #                      Leave unset (default) to serve at the native window. Set
 #                      MAX_MODEL_LEN to the extended length alongside it.
 #                      (default: unset — no rope scaling)
@@ -246,9 +246,9 @@ ARGS=(
 )
 
 # Extend the context past the model's native window with YaRN rope scaling.
-# Qwen3 models ship configured for a 32K native window; reaching 128K requires
-# --rope-scaling, and vLLM will REJECT --max-model-len beyond native without it.
-# ROPE_SCALING accepts either a bare YaRN factor (e.g. 4) or a full JSON object.
+# vLLM 0.25 removed the old --rope-scaling CLI flag, so patch the Hugging Face
+# model config through --hf-overrides instead. ROPE_SCALING accepts either a
+# bare YaRN factor (e.g. 4) or a full JSON object.
 if [[ -n "$ROPE_SCALING" ]]; then
   if [[ "$ROPE_SCALING" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
     # Bare number → YaRN factor. Derive the native window from MAX_MODEL_LEN / factor
@@ -261,7 +261,8 @@ if [[ -n "$ROPE_SCALING" ]]; then
     ROPE_JSON="$ROPE_SCALING"
     info "Rope scaling: $ROPE_JSON"
   fi
-  ARGS+=( --rope-scaling "$ROPE_JSON" )
+  export VLLM_ALLOW_LONG_MAX_MODEL_LEN="${VLLM_ALLOW_LONG_MAX_MODEL_LEN:-1}"
+  ARGS+=( --hf-overrides "{\"rope_scaling\":$ROPE_JSON}" )
 fi
 
 # Cap the number of concurrent sequences. Mostly you leave this unset (vLLM defaults

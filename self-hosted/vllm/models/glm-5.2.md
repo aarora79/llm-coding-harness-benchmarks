@@ -36,6 +36,8 @@ EXTRA_ARGS="--trust-remote-code" \
 Or the raw vLLM command (what actually runs on the instance):
 
 ```bash
+cd self-hosted/vllm
+mkdir -p logs
 export CUDA_HOME=/usr/local/cuda
 export PATH=/usr/local/cuda/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
@@ -50,7 +52,8 @@ vllm serve zai-org/GLM-5.2-FP8 \
   --enable-auto-tool-choice --tool-call-parser glm47 \
   --reasoning-parser glm47 \
   --enable-prefix-caching \
-  --trust-remote-code
+  --trust-remote-code \
+  2>&1 | tee logs/vllm-serve.log
 ```
 
 ## Instance and access

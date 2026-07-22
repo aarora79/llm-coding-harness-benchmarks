@@ -35,6 +35,8 @@ EXTRA_ARGS="--trust-remote-code" \
 Or the raw vLLM command (what actually runs on the instance):
 
 ```bash
+cd self-hosted/vllm
+mkdir -p logs
 export CUDA_HOME=/usr/local/cuda
 export PATH=/usr/local/cuda/bin:$HOME/vllm-env/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
@@ -50,7 +52,8 @@ vllm serve moonshotai/Kimi-K2.7-Code \
   --enable-auto-tool-choice --tool-call-parser kimi_k2 \
   --reasoning-parser kimi_k2 \
   --enable-prefix-caching \
-  --trust-remote-code
+  --trust-remote-code \
+  2>&1 | tee logs/vllm-serve.log
 ```
 
 ## Instance and access

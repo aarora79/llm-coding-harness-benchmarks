@@ -23,7 +23,7 @@ MODEL=Qwen/Qwen3-Coder-Next SERVED_NAME=qwen3-coder-next \
   MAX_MODEL_LEN=16384 MAX_NUM_SEQS=128 ./vllm-serve.sh
 ```
 
-Fully spelled out (recommended for a reproducible benchmark run):
+Wrapper with every model-specific parameter spelled out:
 
 ```bash
 MODEL="Qwen/Qwen3-Coder-Next" \
@@ -37,7 +37,30 @@ TOOL_PARSER="qwen3_coder" \
   ./vllm-serve.sh
 ```
 
-Note: `--enable-prefix-caching` is automatically added by `vllm-serve.sh`.
+Exact vLLM command, including the same log destination as the wrapper:
+
+```bash
+cd self-hosted/vllm
+mkdir -p logs
+export VLLM_USE_FLASHINFER_SAMPLER=0
+export CUDA_HOME=/opt/pytorch/cuda
+export HF_HOME=/opt/dlami/nvme/hf-cache
+export HF_HUB_CACHE="$HF_HOME/hub"
+export VLLM_NO_USAGE_STATS=1
+export DO_NOT_TRACK=1
+
+~/vllm-env/bin/vllm serve Qwen/Qwen3-Coder-Next \
+  --tensor-parallel-size 4 \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --served-model-name qwen3-coder-next \
+  --max-model-len 16384 \
+  --max-num-seqs 128 \
+  --gpu-memory-utilization 0.90 \
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder \
+  --enable-prefix-caching \
+  2>&1 | tee logs/vllm-serve.log
+```
 
 ## The tight-fit warning — read this first
 
