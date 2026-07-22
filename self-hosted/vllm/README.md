@@ -214,6 +214,44 @@ TOOL_PARSER=none ./vllm-serve.sh
 
 Confirms the server is up, names the served model, sends a prompt, and prints prompt/completion token counts. (This is a single-request smoke test — for sustained batched tokens/sec, use the throughput harness.)
 
+### Three ways to smoke-test once vLLM is up
+
+Once `vllm-serve.sh` reports the server is listening on `127.0.0.1:8000`, here are three quick ways to confirm inference works end to end. All three target the `served-model-name` you launched with — the examples use `qwen3.6-35b`; swap in your own (the default is `qwen3-coder-30b`).
+
+**1. A raw `curl`** against the OpenAI-compatible endpoint — no dependencies, proves the HTTP path:
+
+```bash
+curl -s http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3.6-35b",
+    "messages": [{"role": "user", "content": "What is the square root of 2? Answer in one line."}],
+    "max_tokens": 64
+  }' | python3 -m json.tool
+```
+
+**2. The `hello_inference.py` client** — the "does inference work from Python" smoke test (run `uv sync` first, see [below](#client-test-programs-pyprojecttoml--uv)):
+
+```bash
+uv run clients/hello_inference.py \
+  --model qwen3.6-35b \
+  --prompt "What is the square root of 2? Answer in one line."
+```
+
+**3. Claude Code against the local endpoint** — points the CLI at vLLM's Anthropic-compatible `/v1/messages` route. The inline `--settings` override is required: if your user-level `~/.claude/settings.json` sets `CLAUDE_CODE_USE_BEDROCK=1`, it overrides the environment variables and the request is routed to Amazon Bedrock (which rejects the local model name) instead of to vLLM.
+
+```bash
+ANTHROPIC_BASE_URL="http://127.0.0.1:8000" \
+ANTHROPIC_API_KEY="local" \
+claude -p "What is the square root of 2? Answer in one line." \
+  --model qwen3.6-35b \
+  --output-format json \
+  --max-turns 1 \
+  --settings '{"env":{"CLAUDE_CODE_USE_BEDROCK":"0","ANTHROPIC_BASE_URL":"http://127.0.0.1:8000","ANTHROPIC_API_KEY":"local"}}'
+```
+
+If the response comes back with `"api_error_status": 400` and `The provided model identifier is invalid.`, the request reached Amazon Bedrock rather than vLLM — the `--settings` override above is what forces it local.
+
 ### Run inference yourself
 
 The server speaks the OpenAI API, so any OpenAI-compatible client works. Pass the `served-model-name` (default `qwen3-coder-30b`) as the model. A raw `curl`:
