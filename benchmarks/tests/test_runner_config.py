@@ -45,6 +45,13 @@ class LoadRunnerConfigTest(unittest.TestCase):
         self.assertEqual(config.permission_mode, "acceptEdits")
         self.assertEqual(config.max_turns, 60)
         self.assertEqual(config.tasks, [])
+        self.assertEqual(config.concurrency, 1)
+
+    def test_concurrency_override_and_floor(self) -> None:
+        config = load_runner_config(_write(_MINIMAL), {"concurrency": 4})
+        self.assertEqual(config.concurrency, 4)
+        with self.assertRaises(RunnerConfigError):
+            load_runner_config(_write(_MINIMAL), {"concurrency": 0})
 
     def test_cli_overrides_win(self) -> None:
         config = load_runner_config(

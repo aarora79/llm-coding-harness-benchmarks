@@ -26,6 +26,11 @@
 #   clone_dir         str   Parent directory for per-task temporary repo clones.
 #                           Each task clones into a fresh mkdtemp subdirectory.
 #   tasks             list  Task ids to run. Omit or leave empty to run them all.
+#   concurrency       int   How many tasks to run at once. 1 (default) runs them
+#                           serially. Values above 1 overlap runs on the endpoint,
+#                           which turns the per-run vllm_prometheus metrics into a
+#                           server-wide aggregate (see the README); the per-run API
+#                           metrics stay correct.
 #   permission_mode   str   claude -p permission mode: default | acceptEdits |
 #                           plan. bypassPermissions is intentionally NOT allowed.
 #   allowed_tools     list  Tools claude -p may use without prompting. Kept
@@ -50,6 +55,12 @@ clone_dir: /tmp
 #   - remove-faiss
 #   - ssrf-hardening-outbound-url-validation
 tasks: []
+
+# Run tasks serially (1) by default. Raise to run several at once, e.g. 3. Note
+# that concurrency > 1 makes the vllm_prometheus block a server-wide aggregate
+# over the overlapping window; per-run API metrics (tokens, latency, turns) are
+# unaffected. Use 1 when you need per-run vLLM cache metrics.
+concurrency: 1
 
 permission_mode: acceptEdits
 allowed_tools:

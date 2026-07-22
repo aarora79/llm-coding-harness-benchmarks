@@ -83,6 +83,13 @@ class RunnerConfig(BaseModel):
         default_factory=list,
         description="Task ids to run. Empty means every task in the dataset.",
     )
+    concurrency: int = Field(
+        default=1,
+        ge=1,
+        description="How many tasks to run at once. 1 (default) runs serially. "
+        "Values above 1 overlap runs on the endpoint, which invalidates the "
+        "single-tenant vllm_prometheus window-delta metrics for those runs.",
+    )
 
     # How claude -p is invoked.
     permission_mode: str = Field(default=DEFAULT_PERMISSION_MODE)
@@ -186,6 +193,7 @@ def _summarize(config: RunnerConfig) -> None:
     logger.info("  output_dir: %s", config.output_dir)
     logger.info("  clone_dir: %s", config.clone_dir)
     logger.info("  tasks: %s", config.tasks or "(all)")
+    logger.info("  concurrency: %s", config.concurrency)
     logger.info("  permission_mode: %s", config.permission_mode)
     logger.info("  max_turns: %s", config.max_turns)
     logger.info("  allowed_tools: %s", ", ".join(config.allowed_tools))

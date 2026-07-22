@@ -144,6 +144,7 @@ cp config/runner.example.yaml config/runner.yaml
 | `output_dir` | str | `swe-benchmark-data` | Directory (under `benchmarks/`) where the `/swe` skill writes artifacts. |
 | `clone_dir` | str | `/tmp` | Parent directory for per-task temporary repo clones. |
 | `tasks` | list | `[]` | Task ids to run; empty runs every task in the dataset. |
+| `concurrency` | int | `1` | How many tasks to run at once. `1` runs serially; higher values overlap runs and make the `vllm_prometheus` block a server-wide aggregate (see [Running tasks concurrently](#running-tasks-concurrently)). |
 | `permission_mode` | str | `acceptEdits` | `claude -p` permission mode. `bypassPermissions` is intentionally rejected. |
 | `allowed_tools` | list | read + write set | Tools `claude -p` may use without prompting. |
 | `max_turns` | int | `60` | Cap on the agent loop (`claude --max-turns`). |
@@ -164,7 +165,7 @@ uv run scripts/runner_config.py config/runner.example.yaml
 
 1. Clones the task's repo at its pinned ref into a temporary directory under `clone_dir`.
 2. Invokes `claude -p "/swe repo: ... problem: ... model: ... answers: ..."` non-interactively, letting the `/swe` skill produce the four artifacts under `swe-benchmark-data/{repo-name}/{task-id}/{model-name}/`.
-3. Parses the run's JSON result (`--output-format json`) for the six benchmark metrics -- input, output, cache-read, and cache-creation tokens; latency; and `num_turns` -- and writes them to `metrics.json` beside the artifacts.
+3. Parses the run's JSON result (`--output-format json`) for the benchmark metrics -- token usage, latency, and `num_turns` -- and writes them to `metrics.json` beside the artifacts. The top-level metrics report only what the model API returned; vLLM's full Prometheus `/metrics` surface (scraped before and after the run) is kept in a separate nested block (see [The metrics file](#the-metrics-file)).
 4. Removes the temporary clone.
 
 It runs `claude -p` with `--permission-mode acceptEdits` and a narrow `--allowedTools` allowlist; it never uses `bypassPermissions` or `--dangerously-skip-permissions`.
@@ -203,11 +204,30 @@ uv run scripts/run-swe-headless.py --config config/runner.yaml \
 uv run scripts/run-swe-headless.py --config config/runner.yaml \
     --dataset dataset/mcp-gateway-registry.yaml --count 1
 
+# Run three tasks at a time (per-run API metrics stay correct; the
+# vllm_prometheus block becomes a server-wide aggregate -- see below)
+uv run scripts/run-swe-headless.py --config config/runner.yaml \
+    --dataset dataset/mcp-gateway-registry.yaml --concurrency 3
+
 # Print the prompt and command for each task without running anything
 uv run scripts/run-swe-headless.py --config config/runner.yaml --dry-run
+
+# Watch a live trace of what the agent is doing while it runs
+uv run scripts/run-swe-headless.py --config config/runner.yaml \
+    --dataset dataset/mcp-gateway-registry.yaml --count 1 --stream
 ```
 
 `--count N` keeps only the first `N` tasks in dataset order (after any `--tasks` filter); `--count 0`, the default, runs them all.
+
+By default the harness runs `claude -p` with `--output-format json`, which buffers the whole run and prints nothing until the task finishes -- so a long task looks like it is hanging when it is really just working. Pass `--stream` to run with `--output-format stream-json` instead: the harness reads the agent's events as they arrive and logs a short trace line per event (assistant text, each tool call, and so on). The captured metrics and `metrics.json` are identical either way; `--stream` only changes what you see during the run.
+
+### Running tasks concurrently
+
+The harness runs tasks serially by default (`concurrency: 1`). Set `concurrency` in the config (or `--concurrency N` on the CLI) to run several tasks at once through a thread pool of that width. Each task clones into its own temporary directory, writes to a distinct artifact directory, and runs `claude -p` as an independent subprocess, so the work parallelizes cleanly and wall-clock time drops roughly linearly with the pool width (bounded by the endpoint's own throughput). `--stream` is disabled under concurrency because interleaved event traces from several tasks are unreadable.
+
+There is one important consequence for the metrics. The per-run fields sourced from the model API -- `input_tokens`, `output_tokens`, `latency_seconds`, `num_turns`, `generation_tokens_per_sec`, and everything in `metrics_that_matter` that comes from `claude_api` -- stay **exactly correct** regardless of concurrency, because Claude Code attributes them to the individual request. What changes is the `vllm_prometheus` block. Those numbers are window deltas of **server-wide** counters, so when runs overlap the window is shared: ratios like `prefix_cache_hit_rate` become the real *aggregate* hit rate across all the concurrent runs (a genuine GPU-level KPI, just not isolated to one task), and absolute counts like the token deltas are *summed* across the overlapping runs, so each of the N files carries a near-identical, inflated figure. To make this unmissable, under concurrency > 1 the harness sets `"single_tenant": false` on the block and prepends an `AGGREGATE (concurrency > 1): ...` warning to its `note`. The sampled `gauges_sampled.kv_cache_usage_perc` peak, by contrast, becomes *more* meaningful under load -- concurrency is exactly when the KV cache is actually stressed.
+
+The rule of thumb: use concurrency to get through a large dataset faster and to compare models on the per-run API metrics; drop back to `concurrency: 1` whenever you need trustworthy per-run vLLM cache numbers.
 
 [scripts/run-swe-benchmark.sh](scripts/run-swe-benchmark.sh) is a thin convenience wrapper that forwards its arguments to the harness, injecting `--config config/runner.yaml` when you do not pass your own `--config`:
 
@@ -238,17 +258,90 @@ Alongside the four artifacts, each run writes a `metrics.json` capturing what th
   "artifacts_produced": 4,
   "artifacts_expected": 4,
   "generation_tokens_per_sec": 124.0,
+  "metrics_that_matter": {
+    "note": "Headline metrics resolved to the best available source for each; see 'sources'. Values drawn from vllm_prometheus carry its single-tenant, server-wide caveat.",
+    "input_tokens": 364184,
+    "output_tokens": 9388,
+    "cache_read_tokens": 251287,
+    "cache_write_tokens": 112897,
+    "latency_seconds": 75.7,
+    "num_turns": 17,
+    "generation_tokens_per_sec": 124.0,
+    "prefix_cache_hit_rate": 0.5302,
+    "sources": {
+      "input_tokens": "claude_api.usage.input_tokens",
+      "cache_read_tokens": "vllm_prometheus.counters.vllm:prompt_tokens_cached_total",
+      "prefix_cache_hit_rate": "vllm_prometheus.derived.prefix_cache_hit_rate"
+    }
+  },
   "input_tokens": 364184,
   "output_tokens": 9388,
-  "cache_read_tokens": 0,
-  "cache_creation_tokens": 0,
   "latency_seconds": 75.7,
   "num_turns": 17,
   "total_cost_usd": 2.058595,
   "is_error": false,
-  "session_id": "78df4f2a-6598-4add-a253-287354c207bd"
+  "session_id": "78df4f2a-6598-4add-a253-287354c207bd",
+  "vllm_prometheus": {
+    "available": true,
+    "source": "vllm_prometheus_window",
+    "note": "Window delta of server-wide vLLM metrics; accurate only if this run was the sole traffic on the endpoint during its execution. Gauges are an instantaneous post-run reading and typically read idle between tasks.",
+    "derived": {
+      "prefix_cache_hit_rate": 0.5302,
+      "prompt_tokens_cached_rate": 0.69
+    },
+    "counters": {
+      "vllm:generation_tokens_total": 9388,
+      "vllm:prefix_cache_queries_total": 372184,
+      "vllm:prefix_cache_hits_total": 197340,
+      "vllm:prompt_tokens_total": 364184,
+      "vllm:prompt_tokens_cached_total": 251287,
+      "vllm:num_preemptions_total": 0,
+      "vllm:request_success_total": 17
+    },
+    "histograms": {
+      "vllm:e2e_request_latency_seconds": { "count": 17, "sum": 74.8, "mean": 4.4 },
+      "vllm:time_to_first_token_seconds": { "count": 17, "sum": 1.9, "mean": 0.114 }
+    },
+    "gauges": {
+      "vllm:kv_cache_usage_perc": 0.0,
+      "vllm:num_requests_running": 0
+    },
+    "gauges_sampled": {
+      "available": true,
+      "source": "vllm_prometheus_poll",
+      "note": "Peak/mean of gauges sampled every 1.0s while the run was in flight. Peak still reflects total server load under the single-tenant assumption, not this run in isolation.",
+      "interval_seconds": 1.0,
+      "gauges": {
+        "vllm:kv_cache_usage_perc": { "peak": 0.047, "mean": 0.031, "samples": 74 },
+        "vllm:num_requests_running": { "peak": 1.0, "mean": 0.9, "samples": 74 },
+        "vllm:num_requests_waiting": { "peak": 0.0, "mean": 0.0, "samples": 74 }
+      }
+    }
+  }
 }
 ```
+
+(The `counters`, `histograms`, `gauges`, and the `metrics_that_matter.sources` map above are abbreviated -- the harness records **every** `vllm:` family and a source for every headline metric, not just these.)
+
+**Start with `metrics_that_matter`.** This is a curated headline block that answers "how did this run perform?" without the reader having to know which source owns each number. For every metric it picks the best available source and records that choice in a parallel `sources` map: token counts and turns come from the model API when it reports them, cache-token counts fall back to vLLM's server-side counters when the API is silent (as vLLM's Anthropic route is), and `prefix_cache_hit_rate` is the rate the harness derives from vLLM's counters. `generation_tokens_per_sec` is `output_tokens / latency_seconds`. KV-cache utilization is **intentionally excluded** from this block: on a serial, single-tenant benchmark it barely varies (it tracks one request's working set as a fraction of the pool, not anything the benchmark controls), so it cannot discriminate between runs; the sampled peak/mean still lives in `vllm_prometheus.gauges_sampled` as capacity telemetry, and it becomes a headline concern only under concurrent load. Every value sourced from `vllm_prometheus` inherits that block's single-tenant caveat (below).
+
+The remaining top-level fields report **only what the model API returned** for the run. That is deliberate: `cache_read_tokens` and `cache_creation_tokens` are omitted entirely rather than reported as `0`, because vLLM's Anthropic-compatible `/v1/messages` usage does not emit per-request cache-token fields. A `0` there would read as "no caching happened," which is misleading -- prefix caching is in fact active on the server. Reporting only the fields the API actually returns keeps the top-level record honest.
+
+Everything vLLM exposes is instead reported in the nested `vllm_prometheus` block, scraped from the server's Prometheus `/metrics` endpoint. This block **deliberately duplicates** some top-level numbers (e.g. token counts) -- because it is namespaced under `vllm_prometheus` and every key keeps its full `vllm:` metric name, there is never any ambiguity about where a number came from: the top level is the model API's per-request accounting, this block is vLLM's server-side view. Rather than curate a subset, the harness scrapes the entire `vllm:` surface, so nothing is omitted and new vLLM metrics appear automatically. When the endpoint exposes no `vllm:` metrics (e.g. a non-vLLM backend), `available` is `false` and the groups are empty.
+
+The block is organized by Prometheus metric type, plus a small derived summary:
+
+| Group | Reported value | Notes |
+| --- | --- | --- |
+| `derived` | `prefix_cache_hit_rate`, `prompt_tokens_cached_rate` | The headline cache rates the harness computes, since vLLM does not publish them. In vLLM v1 a prefix-cache hit **is** a KV-cache hit -- there is no separate KV-hit counter. |
+| `counters` | **window delta** of each counter | The change over the run: generation/prompt tokens, prefix-cache queries/hits, preemptions, request successes, and so on. Each keyed by its full `vllm:` name. |
+| `histograms` | per-family `count`, `sum`, and derived `mean` | All window deltas, so `mean` is the mean over *this run's* requests (e.g. mean TTFT, mean end-to-end latency). Raw `_bucket` lines are omitted. |
+| `gauges` | an **instantaneous** post-run reading | Gauges are point-in-time (e.g. `kv_cache_usage_perc`, `num_requests_running`); between serial tasks they typically read idle (`0`), because the KV cache drains the moment a request finishes. See `gauges_sampled` for the in-flight peak. |
+| `gauges_sampled` | `peak`, `mean`, and `samples` per gauge | The harness polls the gauge endpoint in a background thread every `interval_seconds` **while the run is in flight**, so `peak` reflects what actually happened during the run -- matching what the vLLM server log prints -- rather than the idle post-run reading. `available` is `false` if no gauge was sampled (endpoint unreachable). |
+
+A metric present in neither snapshot is reported as `null` (distinct from `0`, which means it happened zero times during the run). Prometheus `_created` timestamp series are dropped as noise.
+
+> **Single-tenant assumption -- read this before trusting these numbers.** The vLLM Prometheus metrics are **server-wide and cumulative**; they carry no per-request or per-session label. The `vllm_prometheus` block is a window delta of those metrics, so every counter and histogram equals *this run's* activity **only if the run was the sole traffic on the endpoint while it executed**. If any other request hit the same vLLM server during the run -- another benchmark task, a concurrent client, a health probe -- its tokens, latencies, and hits are folded into these numbers and the block over-counts. Gauges are worse still: they reflect whatever the server is doing at the instant of the scrape, not the run. Run benchmarks against a dedicated, otherwise-idle endpoint when these numbers matter. The `note` field in every block restates this caveat inline.
 
 Because the file records the task, model, and endpoint next to the token, latency, throughput, and turn-count numbers, the same task can be run against many models and the resulting `metrics.json` files compared side by side -- so you can see how each model differs in cost, speed, and how many turns it took to produce the artifacts. On a failed run the file also carries an `error` string and `api_error_status`, so a failure is diagnosable without re-running the task.
 
