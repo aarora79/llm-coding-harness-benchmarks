@@ -121,6 +121,29 @@ class BuildDashboardTest(unittest.TestCase):
         self.assertEqual(build_dashboard._format_mtok(347_990.0), "0.348")
         self.assertEqual(build_dashboard._format_mtok(2_500_000.0), "2.500")
 
+    def test_model_slug_lowercases_and_hyphenates(self) -> None:
+        self.assertEqual(build_dashboard._model_slug("qwen3.6-35b"), "qwen3-6-35b")
+        self.assertEqual(
+            build_dashboard._model_slug("meta-llama/Llama-3-8B-Instruct"),
+            "meta-llama-llama-3-8b-instruct",
+        )
+        self.assertEqual(build_dashboard._model_slug("!!!"), "")
+
+    def test_stamp_model_inserts_slug_before_suffix(self) -> None:
+        stamped = build_dashboard._stamp_model(
+            Path("out/dashboard.html"), "qwen3.6-35b"
+        )
+        self.assertEqual(stamped, Path("out/dashboard-qwen3-6-35b.html"))
+
+    def test_stamp_model_is_idempotent_and_safe(self) -> None:
+        base = Path("out/dashboard.html")
+        # Already stamped -> unchanged (no double suffix).
+        stamped = build_dashboard._stamp_model(base, "qwen3.6-35b")
+        self.assertEqual(build_dashboard._stamp_model(stamped, "qwen3.6-35b"), stamped)
+        # Unknown or empty model -> unchanged.
+        self.assertEqual(build_dashboard._stamp_model(base, None), base)
+        self.assertEqual(build_dashboard._stamp_model(base, "!!!"), base)
+
     def test_missing_db_raises(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(FileNotFoundError, "Metrics database not found"):
@@ -131,8 +154,10 @@ class BuildDashboardTest(unittest.TestCase):
             database = Path(temp_dir) / "metrics.duckdb"
             _make_db(database)
             out = Path(temp_dir) / "dash.html"
-            build_dashboard.build_dashboard(database, out)
-            html = out.read_text(encoding="utf-8")
+            written = build_dashboard.build_dashboard(database, out)
+            # The served model is stamped into the filename.
+            self.assertEqual(written.name, "dash-test-model.html")
+            html = written.read_text(encoding="utf-8")
         # Self-contained: no external script/style/CDN references.
         self.assertNotIn("<script src=", html)
         self.assertNotIn("http://", html.split('type="application/json"')[0])
@@ -147,6 +172,18 @@ class BuildDashboardTest(unittest.TestCase):
             {"throughput", "concurrency", "kv_cache", "latency", "finish_reasons"},
             set(payload),
         )
+
+    def test_line_charts_support_zoom(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "metrics.duckdb"
+            _make_db(database)
+            out = Path(temp_dir) / "dash.html"
+            html = build_dashboard.build_dashboard(database, out).read_text(encoding="utf-8")
+        # Drag-to-zoom wiring: a reset control, a selection band, and the
+        # mousedown handler that starts a drag are all present in the template.
+        self.assertIn("chart-reset", html)
+        self.assertIn("zoom-band", html)
+        self.assertIn('"mousedown"', html)
 
 
 if __name__ == "__main__":

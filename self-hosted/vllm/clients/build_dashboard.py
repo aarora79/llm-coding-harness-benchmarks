@@ -10,6 +10,11 @@ collector captures: token throughput, scheduler/concurrency state, KV-cache
 utilization, request latency (TTFT, TPOT, queue, end-to-end), and request
 outcomes by finish reason.
 
+The served model name (read from the metric labels) is embedded in the output
+filename automatically, so dashboards from different models never overwrite one
+another: ``--output benchmark-output/dashboard.html`` against a ``qwen3.6-35b``
+run writes ``benchmark-output/dashboard-qwen3-6-35b.html``.
+
 Usage:
     uv run python -m clients.build_dashboard
     uv run python -m clients.build_dashboard --db benchmark-output/vllm-metrics.duckdb \
@@ -21,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -316,6 +322,45 @@ def _fetch_model_name(con: duckdb.DuckDBPyConnection) -> str | None:
     return row[0] if row else None
 
 
+def _model_slug(model: str) -> str:
+    """Turn a served model name into a filesystem-safe filename fragment.
+
+    Model ids often carry a org prefix and mixed case (e.g.
+    ``meta-llama/Llama-3-8B-Instruct``); this lowercases, replaces any run of
+    non-alphanumeric characters with a single hyphen, and trims stray hyphens so
+    the result is safe to embed in a filename.
+
+    Args:
+        model: The served model name from the metric labels.
+
+    Returns:
+        A slug such as ``meta-llama-llama-3-8b-instruct``; empty if the input
+        has no alphanumeric characters.
+    """
+    return re.sub(r"[^a-z0-9]+", "-", model.lower()).strip("-")
+
+
+def _stamp_model(output_path: Path, model: str | None) -> Path:
+    """Insert the model slug before the output file's suffix.
+
+    ``dashboard.html`` with model ``qwen3.6-35b`` becomes
+    ``dashboard-qwen3-6-35b.html`` (the slug lowercases and hyphenates). Returns
+    the path unchanged when the model is unknown or slugifies to nothing, or when
+    the slug is already present in the stem (so re-running is idempotent).
+
+    Args:
+        output_path: The requested output path.
+        model: The served model name, or None if the DB recorded none.
+
+    Returns:
+        The output path with the model slug embedded in the filename.
+    """
+    slug = _model_slug(model) if model else ""
+    if not slug or slug in output_path.stem:
+        return output_path
+    return output_path.with_name(f"{output_path.stem}-{slug}{output_path.suffix}")
+
+
 def _build_payload(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     """Collect every dashboard data structure into one JSON-serialisable dict."""
     sessions = _fetch_sessions(con)
@@ -389,6 +434,9 @@ def build_dashboard(db_path: Path, output_path: Path) -> Path:
         payload["summary"]["scrapes"],
         4,
     )
+    # Embed the served model in the filename so dashboards from different models
+    # never overwrite one another.
+    output_path = _stamp_model(output_path, payload["summary"]["model"])
     html = _render_html(payload)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
@@ -517,6 +565,16 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   .legend i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
   .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 20px; }
   svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .chart { position: relative; }
+  .chart-reset {
+    position: absolute; top: 0; right: 0; z-index: 2;
+    background: var(--surface-1); color: var(--text-secondary);
+    border: 1px solid var(--border); border-radius: 8px; padding: 3px 9px;
+    font: inherit; font-size: 11px; cursor: pointer;
+  }
+  .chart-reset:hover { color: var(--text-primary); border-color: var(--accent); }
+  .zoom-hit { cursor: crosshair; }
+  .zoom-band { fill: var(--accent); fill-opacity: 0.14; stroke: var(--accent); stroke-opacity: 0.4; stroke-width: 1; }
   text.axis { fill: var(--axis); }
   .gridline { stroke: var(--grid); stroke-width: 1; }
   .baseline { stroke: var(--baseline); stroke-width: 1; }
@@ -565,7 +623,7 @@ function fmtTime(iso) {
   return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 function el(tag, attrs, children) {
-  const ns = ["svg","g","path","line","rect","circle","text","polyline"].includes(tag);
+  const ns = ["svg","g","path","line","rect","circle","text","polyline","clipPath","defs"].includes(tag);
   const node = ns ? document.createElementNS("http://www.w3.org/2000/svg", tag)
                   : document.createElement(tag);
   for (const k in (attrs || {})) {
@@ -576,9 +634,19 @@ function el(tag, attrs, children) {
   return node;
 }
 
-// A multi-series line chart with gridlines, axes, crosshair + tooltip.
-// Identity comes from the panel legend (multi-series) or title (single series),
-// so no direct end-labels are drawn -- they collide when series share an endpoint.
+// A monotonically increasing id so each chart's clip-path has a unique target.
+let _clipSeq = 0;
+
+// A multi-series line chart with gridlines, axes, crosshair + tooltip, and
+// drag-to-zoom on the time (x) axis. Identity comes from the panel legend
+// (multi-series) or title (single series), so no direct end-labels are drawn --
+// they collide when series share an endpoint.
+//
+// Zoom: click-drag horizontally to select a time window; the x-domain narrows to
+// it and the y-axis rescales to the points now visible (so a spike no longer
+// flattens the baseline). Double-click or the "Reset zoom" button restores the
+// full range. Each chart owns its own zoom state via this closure, so small
+// multiples zoom independently.
 function lineChart(series, opts) {
   opts = opts || {};
   // Small multiples render in a narrow column; a compact viewBox keeps the
@@ -592,74 +660,151 @@ function lineChart(series, opts) {
   if (!pts.length) return el("div", { class: "empty", text: "No samples in this range." });
 
   const times = pts.map(p => new Date(p.t).getTime());
-  const xMin = Math.min(...times), xMax = Math.max(...times);
-  let yMax = Math.max(...pts.map(p => p.value), opts.minMax || 0);
-  if (yMax <= 0) yMax = 1;
-  yMax *= 1.08;
-  const xScale = t => m.l + (xMax === xMin ? pw / 2 : (t - xMin) / (xMax - xMin) * pw);
-  const yScale = v => m.t + ph - (v / yMax) * ph;
+  const fullMin = Math.min(...times), fullMax = Math.max(...times);
+  const clipId = "clip" + (_clipSeq++);
+  // Which categorical hue each series draws. colorOffset lets a series keep its
+  // identity color when a multi-series measure is split into single-series small
+  // multiples (e.g. throughput -> Generation on series-1, Prompt on series-2).
+  const colorOf = si => SERIES[(si + (opts.colorOffset || 0)) % SERIES.length];
 
+  // Zoom domain over the x (time) axis; null means the full extent.
+  let zoom = null;
+  // A pixel drag narrower than this is treated as a click, not a zoom selection.
+  const DRAG_PX = 6;
+
+  const container = el("div", { class: "chart" });
+  const reset = el("button", { class: "chart-reset hidden", type: "button", text: "Reset zoom" });
+  container.appendChild(reset);
   const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img" });
-  // Y gridlines + ticks (fewer on compact charts to avoid crowding)
-  const ticks = compact ? 3 : 4;
-  for (let i = 0; i <= ticks; i++) {
-    const v = yMax * i / ticks, y = yScale(v);
-    svg.appendChild(el("line", { class: i === 0 ? "baseline" : "gridline", x1: m.l, y1: y, x2: m.l + pw, y2: y }));
-    svg.appendChild(el("text", { class: "axis", "font-size": af, x: m.l - 8, y: y + af / 3, "text-anchor": "end", text: fmt(v) + (opts.yUnit || "") }));
-  }
-  // X ticks: first/mid/last on wide charts, first/last only when compact
-  const xTicks = compact ? [xMin, xMax] : [xMin, (xMin + xMax) / 2, xMax];
-  xTicks.forEach((t, i) => {
-    const x = xScale(t);
-    const anchor = i === 0 ? "start" : i === xTicks.length - 1 ? "end" : "middle";
-    svg.appendChild(el("text", { class: "axis", "font-size": af, x, y: H - m.b / 2.6, "text-anchor": anchor, text: fmtTime(new Date(t).toISOString()) }));
-  });
+  container.appendChild(svg);
 
-  // Lines (+ optional area fill for a single series)
-  series.forEach((s, si) => {
-    if (!s.points.length) return;
-    const color = SERIES[si % SERIES.length];
-    const d = s.points.map((p, i) => `${i ? "L" : "M"}${xScale(new Date(p.t).getTime())},${yScale(p.value)}`).join(" ");
-    if (opts.fill && series.length === 1) {
-      const area = d + `L${xScale(new Date(s.points[s.points.length-1].t).getTime())},${yScale(0)} L${xScale(new Date(s.points[0].t).getTime())},${yScale(0)} Z`;
-      svg.appendChild(el("path", { d: area, fill: color, "fill-opacity": 0.12, stroke: "none" }));
+  reset.addEventListener("click", () => { zoom = null; draw(); });
+
+  function draw() {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    const xMin = zoom ? zoom.lo : fullMin, xMax = zoom ? zoom.hi : fullMax;
+    reset.classList.toggle("hidden", !zoom);
+
+    // Points inside the current window drive the y-scale, so zooming past a spike
+    // rescales to the detail underneath rather than keeping the spike's headroom.
+    const visible = pts.filter(p => { const t = new Date(p.t).getTime(); return t >= xMin && t <= xMax; });
+    let yMax = Math.max(...(visible.length ? visible : pts).map(p => p.value), opts.minMax || 0);
+    if (yMax <= 0) yMax = 1;
+    yMax *= 1.08;
+    const xScale = t => m.l + (xMax === xMin ? pw / 2 : (t - xMin) / (xMax - xMin) * pw);
+    const yScale = v => m.t + ph - (v / yMax) * ph;
+
+    // Clip the data marks to the plot rect so lines zoomed out of range don't spill.
+    const defs = el("defs", {});
+    const clip = el("clipPath", { id: clipId });
+    clip.appendChild(el("rect", { x: m.l, y: m.t, width: pw, height: ph }));
+    defs.appendChild(clip); svg.appendChild(defs);
+
+    // Y gridlines + ticks (fewer on compact charts to avoid crowding)
+    const ticks = compact ? 3 : 4;
+    for (let i = 0; i <= ticks; i++) {
+      const v = yMax * i / ticks, y = yScale(v);
+      svg.appendChild(el("line", { class: i === 0 ? "baseline" : "gridline", x1: m.l, y1: y, x2: m.l + pw, y2: y }));
+      svg.appendChild(el("text", { class: "axis", "font-size": af, x: m.l - 8, y: y + af / 3, "text-anchor": "end", text: fmt(v) + (opts.yUnit || "") }));
     }
-    svg.appendChild(el("path", { d, fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
-  });
-
-  // Crosshair + hover
-  const crosshair = el("line", { class: "gridline", y1: m.t, y2: m.t + ph, opacity: 0 });
-  svg.appendChild(crosshair);
-  const dots = series.map((s, si) => {
-    const c = el("circle", { r: 4, fill: SERIES[si % SERIES.length], stroke: "var(--surface-1)", "stroke-width": 2, opacity: 0 });
-    svg.appendChild(c); return c;
-  });
-  const hit = el("rect", { x: m.l, y: m.t, width: pw, height: ph, fill: "transparent" });
-  svg.appendChild(hit);
-  hit.addEventListener("mousemove", ev => {
-    const box = svg.getBoundingClientRect();
-    const px = (ev.clientX - box.left) / box.width * W;
-    const t = xMin + (px - m.l) / pw * (xMax - xMin);
-    crosshair.setAttribute("x1", xScale(t)); crosshair.setAttribute("x2", xScale(t)); crosshair.setAttribute("opacity", 1);
-    let rows = "", refT = null;
-    series.forEach((s, si) => {
-      if (!s.points.length) { dots[si].setAttribute("opacity", 0); return; }
-      let best = s.points[0], bd = Infinity;
-      s.points.forEach(p => { const dd = Math.abs(new Date(p.t).getTime() - t); if (dd < bd) { bd = dd; best = p; } });
-      dots[si].setAttribute("cx", xScale(new Date(best.t).getTime()));
-      dots[si].setAttribute("cy", yScale(best.value)); dots[si].setAttribute("opacity", 1);
-      refT = best.t;
-      rows += `<div class="tt-row"><i style="background:${SERIES[si % SERIES.length]}"></i>${s.name}: <b>${fmt(best.value)}${opts.yUnit || ""}</b></div>`;
+    // X ticks: first/mid/last on wide charts, first/last only when compact
+    const xTicks = compact ? [xMin, xMax] : [xMin, (xMin + xMax) / 2, xMax];
+    xTicks.forEach((t, i) => {
+      const x = xScale(t);
+      const anchor = i === 0 ? "start" : i === xTicks.length - 1 ? "end" : "middle";
+      svg.appendChild(el("text", { class: "axis", "font-size": af, x, y: H - m.b / 2.6, "text-anchor": anchor, text: fmtTime(new Date(t).toISOString()) }));
     });
-    tooltip.innerHTML = `<div class="tt-t">${refT ? fmtTime(refT) : ""}</div>${rows}`;
-    tooltip.style.opacity = 1;
-    tooltip.style.left = Math.min(ev.clientX + 14, window.innerWidth - 220) + "px";
-    tooltip.style.top = (ev.clientY + 14) + "px";
-  });
-  hit.addEventListener("mouseleave", () => {
-    crosshair.setAttribute("opacity", 0); dots.forEach(d => d.setAttribute("opacity", 0)); tooltip.style.opacity = 0;
-  });
-  return svg;
+
+    // Lines (+ optional area fill for a single series), clipped to the plot rect
+    const marks = el("g", { "clip-path": `url(#${clipId})` });
+    series.forEach((s, si) => {
+      if (!s.points.length) return;
+      const color = colorOf(si);
+      const d = s.points.map((p, i) => `${i ? "L" : "M"}${xScale(new Date(p.t).getTime())},${yScale(p.value)}`).join(" ");
+      if (opts.fill && series.length === 1) {
+        const area = d + `L${xScale(new Date(s.points[s.points.length-1].t).getTime())},${yScale(0)} L${xScale(new Date(s.points[0].t).getTime())},${yScale(0)} Z`;
+        marks.appendChild(el("path", { d: area, fill: color, "fill-opacity": 0.12, stroke: "none" }));
+      }
+      marks.appendChild(el("path", { d, fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+    });
+    svg.appendChild(marks);
+
+    // Crosshair + hover dots, and the drag-selection band (hidden until dragging)
+    const band = el("rect", { class: "zoom-band", y: m.t, height: ph, width: 0, opacity: 0 });
+    svg.appendChild(band);
+    const crosshair = el("line", { class: "gridline", y1: m.t, y2: m.t + ph, opacity: 0 });
+    svg.appendChild(crosshair);
+    const dots = series.map((s, si) => {
+      const c = el("circle", { r: 4, fill: colorOf(si), stroke: "var(--surface-1)", "stroke-width": 2, opacity: 0 });
+      svg.appendChild(c); return c;
+    });
+    const hit = el("rect", { class: "zoom-hit", x: m.l, y: m.t, width: pw, height: ph, fill: "transparent" });
+    svg.appendChild(hit);
+
+    // Map a client mouse x to a viewBox px clamped to the plot, and to a time.
+    const clientToPx = ev => {
+      const box = svg.getBoundingClientRect();
+      return Math.max(m.l, Math.min(m.l + pw, (ev.clientX - box.left) / box.width * W));
+    };
+    const pxToTime = px => xMin + (px - m.l) / pw * (xMax - xMin);
+
+    let dragStart = null;  // viewBox px where a drag began
+    const hideHover = () => {
+      crosshair.setAttribute("opacity", 0); dots.forEach(d => d.setAttribute("opacity", 0)); tooltip.style.opacity = 0;
+    };
+
+    hit.addEventListener("mousedown", ev => {
+      dragStart = clientToPx(ev);
+      band.setAttribute("x", dragStart); band.setAttribute("width", 0); band.setAttribute("opacity", 1);
+      hideHover();
+      ev.preventDefault();
+    });
+    hit.addEventListener("mousemove", ev => {
+      const px = clientToPx(ev);
+      if (dragStart !== null) {
+        // Drawing a zoom selection: draw the band, suppress the hover readout.
+        band.setAttribute("x", Math.min(dragStart, px));
+        band.setAttribute("width", Math.abs(px - dragStart));
+        return;
+      }
+      const t = pxToTime(px);
+      crosshair.setAttribute("x1", xScale(t)); crosshair.setAttribute("x2", xScale(t)); crosshair.setAttribute("opacity", 1);
+      let rows = "", refT = null;
+      series.forEach((s, si) => {
+        if (!s.points.length) { dots[si].setAttribute("opacity", 0); return; }
+        let best = s.points[0], bd = Infinity;
+        s.points.forEach(p => { const dd = Math.abs(new Date(p.t).getTime() - t); if (dd < bd) { bd = dd; best = p; } });
+        dots[si].setAttribute("cx", xScale(new Date(best.t).getTime()));
+        dots[si].setAttribute("cy", yScale(best.value)); dots[si].setAttribute("opacity", 1);
+        refT = best.t;
+        rows += `<div class="tt-row"><i style="background:${colorOf(si)}"></i>${s.name}: <b>${fmt(best.value)}${opts.yUnit || ""}</b></div>`;
+      });
+      tooltip.innerHTML = `<div class="tt-t">${refT ? fmtTime(refT) : ""}</div>${rows}`;
+      tooltip.style.opacity = 1;
+      tooltip.style.left = Math.min(ev.clientX + 14, window.innerWidth - 220) + "px";
+      tooltip.style.top = (ev.clientY + 14) + "px";
+    });
+    const finishDrag = ev => {
+      if (dragStart === null) return;
+      const px = clientToPx(ev);
+      const lo = Math.min(dragStart, px), hi = Math.max(dragStart, px);
+      dragStart = null;
+      band.setAttribute("opacity", 0);
+      if (hi - lo < DRAG_PX) return;  // treated as a click, not a zoom
+      const tLo = pxToTime(lo), tHi = pxToTime(hi);
+      zoom = { lo: tLo, hi: tHi };
+      draw();
+    };
+    hit.addEventListener("mouseup", finishDrag);
+    hit.addEventListener("mouseleave", ev => {
+      if (dragStart !== null) finishDrag(ev);
+      hideHover();
+    });
+    hit.addEventListener("dblclick", () => { zoom = null; draw(); });
+  }
+
+  draw();
+  return container;
 }
 
 // Horizontal bar chart (categorical), one bar per finish reason.
@@ -753,10 +898,19 @@ function render() {
   const makeChartOrTable = (series, opts) =>
     tableMode ? dataTable(series) : lineChart(series, opts);
 
-  // Throughput (y-axis unit "/s" on ticks; subtitle names the measure)
+  // Throughput: prompt and generation rates differ by ~100x, so a shared axis
+  // hides the smaller series. Split into small multiples (each an honest single
+  // axis) rather than a dual-axis chart. Each keeps its original identity color.
+  const throughputGrid = el("div", { class: "grid-2" });
+  DATA.throughput.forEach((s, si) => {
+    const body = tableMode ? dataTable([s]) : lineChart([s], { yUnit: "", colorOffset: si });
+    const sub = s.points.length ? "Per-interval rate (tokens/s)" : "No samples in range";
+    throughputGrid.appendChild(panel(s.name, sub, [body], null));
+  });
   root.appendChild(panel(
-    "Token throughput", "Per-interval rate from cumulative token counters (tokens/s)",
-    [makeChartOrTable(DATA.throughput, { yUnit: "" })], DATA.throughput));
+    "Token throughput",
+    "Per-interval rate from cumulative token counters, split into small multiples (independent scales)",
+    [throughputGrid], null));
 
   // Concurrency
   root.appendChild(panel(
