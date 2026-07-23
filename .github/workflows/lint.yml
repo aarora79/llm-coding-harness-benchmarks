@@ -36,4 +36,7 @@ jobs:
       - name: Run Bandit security scan
         run: |
           pip install bandit
-          bandit -r . -f txt
+          # Scan source only (skip .venv and tests: asserts and /tmp paths are
+          # expected in test code). Genuine source findings that are false
+          # positives carry inline `# nosec <id>` justifications.
+          bandit -r benchmarks/scripts self-hosted/vllm/clients self-hosted/vllm/scripts -f txt

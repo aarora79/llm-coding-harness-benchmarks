@@ -505,7 +505,7 @@ def write_server_metrics_csv(
                 else None
             )
             sample = after or before
-            assert sample is not None
+            assert sample is not None  # nosec B101 - at least one snapshot is always present here
             writer.writerow(
                 {
                     "run_id": run_id,

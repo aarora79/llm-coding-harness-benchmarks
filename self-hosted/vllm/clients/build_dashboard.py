@@ -57,8 +57,8 @@ _GAUGE_METRICS = {
 
 # Histogram base names rendered as per-interval mean latency (delta sum / delta count).
 _LATENCY_METRICS = {
-    "vllm:time_to_first_token_seconds": "Time to first token",
-    "vllm:inter_token_latency_seconds": "Inter-token latency (TPOT)",
+    "vllm:time_to_first_token_seconds": "Time to first token",  # nosec B105 - chart label, not a secret
+    "vllm:inter_token_latency_seconds": "Inter-token latency (TPOT)",  # nosec B105 - chart label, not a secret
     "vllm:request_queue_time_seconds": "Queue time",
     "vllm:e2e_request_latency_seconds": "End-to-end latency",
 }
@@ -114,7 +114,9 @@ def _fetch_sessions(con: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
     ]
 
 
-def _fetch_gauge_series(con: duckdb.DuckDBPyConnection, metric: str) -> list[dict[str, Any]]:
+def _fetch_gauge_series(
+    con: duckdb.DuckDBPyConnection, metric: str
+) -> list[dict[str, Any]]:
     """Return an ``[{t, value}]`` time series for a single gauge metric."""
     rows = con.execute(
         """
@@ -128,7 +130,9 @@ def _fetch_gauge_series(con: duckdb.DuckDBPyConnection, metric: str) -> list[dic
     return [{"t": r[0].isoformat(), "value": r[1]} for r in rows]
 
 
-def _fetch_rate_series(con: duckdb.DuckDBPyConnection, metric: str) -> list[dict[str, Any]]:
+def _fetch_rate_series(
+    con: duckdb.DuckDBPyConnection, metric: str
+) -> list[dict[str, Any]]:
     """Return a per-interval rate series for a cumulative counter.
 
     Uses the delta between consecutive scrapes divided by the elapsed seconds.
@@ -160,7 +164,9 @@ def _fetch_rate_series(con: duckdb.DuckDBPyConnection, metric: str) -> list[dict
     return [{"t": r[0].isoformat(), "value": r[1] or 0.0} for r in rows]
 
 
-def _fetch_latency_series(con: duckdb.DuckDBPyConnection, base: str) -> list[dict[str, Any]]:
+def _fetch_latency_series(
+    con: duckdb.DuckDBPyConnection, base: str
+) -> list[dict[str, Any]]:
     """Return per-interval mean latency (seconds) for a histogram metric.
 
     Mean over the interval is ``delta(sum) / delta(count)`` between scrapes,
@@ -290,8 +296,16 @@ def _build_kpis(con: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
             "unit": "Mtok",
             "detail": f"{_format_mtok(gen)} generation · {_format_mtok(prompt)} prompt Mtok",
         },
-        {"label": "Prompt throughput", "value": f"{prompt_throughput:,.1f}", "unit": "tokens/s"},
-        {"label": "Generation throughput", "value": f"{gen_throughput:,.1f}", "unit": "tokens/s"},
+        {
+            "label": "Prompt throughput",
+            "value": f"{prompt_throughput:,.1f}",
+            "unit": "tokens/s",
+        },
+        {
+            "label": "Generation throughput",
+            "value": f"{gen_throughput:,.1f}",
+            "unit": "tokens/s",
+        },
         {"label": "Requests", "value": f"{requests:,.0f}", "unit": "completed"},
         {
             "label": "Mean TTFT",

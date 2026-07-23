@@ -41,7 +41,9 @@ def _make_db(path: Path) -> None:
     # Two scrapes 5s apart; a cumulative counter and a histogram sum/count pair.
     for i in range(2):
         samples = [
-            _sample("vllm:generation_tokens_total", 1000.0 + i * 500.0),  # +500/5s -> 100/s
+            _sample(
+                "vllm:generation_tokens_total", 1000.0 + i * 500.0
+            ),  # +500/5s -> 100/s
             _sample("vllm:num_requests_running", float(i)),
             _sample("vllm:time_to_first_token_seconds_sum", 0.2 + i * 0.4),
             _sample("vllm:time_to_first_token_seconds_count", float(i * 2)),
@@ -73,7 +75,9 @@ class BuildDashboardTest(unittest.TestCase):
             _make_db(database)
             con = build_dashboard._connect(database)
             try:
-                series = build_dashboard._fetch_rate_series(con, "vllm:generation_tokens_total")
+                series = build_dashboard._fetch_rate_series(
+                    con, "vllm:generation_tokens_total"
+                )
             finally:
                 con.close()
         # 500 tokens over 5 seconds = 100 tokens/s, one delta point.
@@ -146,7 +150,9 @@ class BuildDashboardTest(unittest.TestCase):
 
     def test_missing_db_raises(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            with self.assertRaisesRegex(FileNotFoundError, "Metrics database not found"):
+            with self.assertRaisesRegex(
+                FileNotFoundError, "Metrics database not found"
+            ):
                 build_dashboard._connect(Path(temp_dir) / "nope.duckdb")
 
     def test_build_writes_self_contained_html(self) -> None:
@@ -178,7 +184,9 @@ class BuildDashboardTest(unittest.TestCase):
             database = Path(temp_dir) / "metrics.duckdb"
             _make_db(database)
             out = Path(temp_dir) / "dash.html"
-            html = build_dashboard.build_dashboard(database, out).read_text(encoding="utf-8")
+            html = build_dashboard.build_dashboard(database, out).read_text(
+                encoding="utf-8"
+            )
         # Drag-to-zoom wiring: a reset control, a selection band, and the
         # mousedown handler that starts a drag are all present in the template.
         self.assertIn("chart-reset", html)

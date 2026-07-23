@@ -215,7 +215,7 @@ def store_scrape(
                 len(samples),
             ],
         ).fetchone()
-        assert scrape_id is not None
+        assert scrape_id is not None  # nosec B101 - INSERT ... RETURNING always yields a row
         scrape_id_value = int(scrape_id[0])
         if samples:
             connection.execute(
@@ -283,7 +283,9 @@ def collect(args: argparse.Namespace, stop_event: threading.Event) -> None:
                 now = time.monotonic()
                 if deadline is not None and now >= deadline:
                     break
-                wake_at = min(next_scrape, deadline) if deadline is not None else next_scrape
+                wake_at = (
+                    min(next_scrape, deadline) if deadline is not None else next_scrape
+                )
                 if now < wake_at and stop_event.wait(wake_at - now):
                     break
                 if deadline is not None and time.monotonic() >= deadline:

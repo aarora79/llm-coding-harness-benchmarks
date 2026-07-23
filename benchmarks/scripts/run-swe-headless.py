@@ -644,7 +644,10 @@ def _vllm_metrics(
             "available": False,
             "source": "vllm_prometheus_window",
             "note": unavailable_note,
-            "derived": {"prefix_cache_hit_rate": None, "prompt_tokens_cached_rate": None},
+            "derived": {
+                "prefix_cache_hit_rate": None,
+                "prompt_tokens_cached_rate": None,
+            },
             "counters": {},
             "histograms": {},
             "gauges": {},
@@ -666,7 +669,9 @@ def _vllm_metrics(
             histograms[family] = {
                 "count": _num(dcount),
                 "sum": _num(dsum),
-                "mean": round(dsum / dcount, 6) if dcount and dsum is not None else None,
+                "mean": round(dsum / dcount, 6)
+                if dcount and dsum is not None
+                else None,
             }
         elif mtype == "gauge":
             gauges[family] = _num(after_s.get(family))
@@ -1185,7 +1190,9 @@ def _run_task(
         # the run is the sole traffic on the endpoint (see _snapshot_vllm_metrics).
         # Keep the reads adjacent to the call to minimize the window in which
         # other traffic could be misattributed.
-        vllm_before = _snapshot_vllm_metrics(metrics_endpoint) if metrics_endpoint else None
+        vllm_before = (
+            _snapshot_vllm_metrics(metrics_endpoint) if metrics_endpoint else None
+        )
         # Gauges (KV-cache usage, running/waiting requests) drain to idle the
         # moment a request finishes, so a before/after snapshot always reads them
         # at ~0. Sample them in a background thread WHILE claude -p runs to capture
@@ -1201,7 +1208,9 @@ def _run_task(
             else:
                 result = _run_claude(cmd, env, config.timeout_seconds)
         run_ended_at = _utc_now_iso()
-        vllm_after = _snapshot_vllm_metrics(metrics_endpoint) if metrics_endpoint else None
+        vllm_after = (
+            _snapshot_vllm_metrics(metrics_endpoint) if metrics_endpoint else None
+        )
         metrics = _metrics_from_result(result, result.get("_elapsed_seconds", 0))
         metrics["run_started_at"] = run_started_at
         metrics["run_ended_at"] = run_ended_at
@@ -1270,7 +1279,9 @@ def _select_tasks(dataset: Dataset, task_ids: list[str], count: int = 0) -> list
         DatasetError: If a requested id is not in the dataset or count is negative.
     """
     if count < 0:
-        raise DatasetError(f"--count must be 0 (all) or a positive integer, got {count}")
+        raise DatasetError(
+            f"--count must be 0 (all) or a positive integer, got {count}"
+        )
     if not task_ids:
         selected = dataset.tasks
     else:
@@ -1369,7 +1380,13 @@ def _run(
     if concurrency == 1:
         summaries = [
             _run_task_safe(
-                config, dataset, task, stream, False, position=i, total=total,
+                config,
+                dataset,
+                task,
+                stream,
+                False,
+                position=i,
+                total=total,
                 verbose=verbose,
             )
             for i, task in enumerate(tasks, start=1)
@@ -1381,7 +1398,12 @@ def _run(
     logger.info("=" * 60)
     logger.info("Done: %s/%s tasks produced all artifacts.", passed, len(summaries))
     for s in summaries:
-        logger.info("  %s %s (%s artifacts)", "OK " if s["ok"] else "FAIL", s["task"], s["artifacts"])
+        logger.info(
+            "  %s %s (%s artifacts)",
+            "OK " if s["ok"] else "FAIL",
+            s["task"],
+            s["artifacts"],
+        )
 
 
 def _run_concurrent(
@@ -1456,9 +1478,7 @@ def _parse_args() -> argparse.Namespace:
         default=0,
         help="Run only the first N selected tasks (default: 0 = all)",
     )
-    parser.add_argument(
-        "--max-turns", type=int, help="Override: cap on the agent loop"
-    )
+    parser.add_argument("--max-turns", type=int, help="Override: cap on the agent loop")
     parser.add_argument(
         "--concurrency",
         type=int,

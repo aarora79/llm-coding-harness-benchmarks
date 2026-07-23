@@ -9,7 +9,7 @@ Serve open-weight coding models (Qwen3-Coder-30B, Qwen3-32B, and larger) on a si
 **This vLLM path is the *throughput* path** — many concurrent requests, tensor parallelism, the batched tokens/sec the cost model needs.
 
 > **TL;DR — don't copy-paste, run the skill.** The install is heavy (driver-level checks, apt packages, a multi-GB vLLM wheel, a ~57 GB model download, and two environment fixes that are specific to the Deep Learning AMI). Rather than paste the steps below by hand, run the repo skill and it drives the whole thing:
-> 
+>
 > ```
 > /vllm-setup
 > ```
