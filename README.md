@@ -203,7 +203,7 @@ claude-code-multi-model/
 ├── .claude/                   ← Claude Code skills shipped with the repo
 │   └── skills/
 │       ├── swe/               /swe — drive a model through a SWE task on any repo
-│       ├── summarize/         /summarize — post-run report for a /swe attempt
+│       ├── security-check/    /security-check — Cipher security review + fix before any commit
 │       └── vllm-setup/        /vllm-setup — stand up the EC2 vLLM server (Path 3)
 ├── benchmarks/                ← The benchmark harness and results
 │   ├── README.md              Harness landing page

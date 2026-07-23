@@ -262,6 +262,15 @@ uv run ruff check --fix . && uv run ruff format . && uv run bandit -r src/ && uv
 
 Ruff config targets Python 3.10+ (100-char lines) and auto-modernizes type hints (PEP 604/585) and imports.
 
+### Mandatory Security Gate (`security-check` skill)
+
+Run the `security-check` skill (the Cipher security-engineer persona) as a required gate:
+
+- **Before every commit and before opening or updating a PR.**
+- **Whenever a new enhancement, feature, or refactor is added** — both before writing security-sensitive code (to know the rules) and after implementing it (to catch regressions).
+
+The skill reviews the pending diff against a catalog of real-world security anti-patterns (SSRF, broken access control, weak/default secrets, token trust boundaries, missing CSRF, injection, secret/PII log leakage, dependency CVEs, LLM agent execution safety, timing oracles, proxy body integrity), reports findings in the Cipher format, and **fixes any problems it finds**. Do not commit while the verdict is NEEDS REVISION; resolve every blocker first. This gate is in addition to the Bandit scan above, not a replacement for it. See [.claude/skills/security-check/SKILL.md](.claude/skills/security-check/SKILL.md).
+
 ## Dependency Management
 
 - Always specify `requires-python` in `pyproject.toml`.
