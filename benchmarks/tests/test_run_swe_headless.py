@@ -159,6 +159,18 @@ class BuildClaudeCmdTest(unittest.TestCase):
         cmd = harness._build_claude_cmd(_config(), "prompt")
         self.assertIn("--settings", cmd)
 
+    def test_add_dir_when_clone_path_given(self) -> None:
+        from pathlib import Path
+
+        clone = Path("/tmp/swe-abc/mcp-gateway-registry")
+        cmd = harness._build_claude_cmd(_config(), "prompt", clone_path=clone)
+        self.assertIn("--add-dir", cmd)
+        self.assertEqual(cmd[cmd.index("--add-dir") + 1], str(clone))
+
+    def test_no_add_dir_without_clone_path(self) -> None:
+        cmd = harness._build_claude_cmd(_config(), "prompt")
+        self.assertNotIn("--add-dir", cmd)
+
 
 class BuildSettingsArgTest(unittest.TestCase):
     def test_inline_json_pins_routing_when_no_file(self) -> None:
@@ -244,6 +256,60 @@ class FormatStreamEventTest(unittest.TestCase):
     def test_empty_content_returns_none(self) -> None:
         event = {"type": "assistant", "message": {"content": []}}
         self.assertIsNone(harness._format_stream_event(event))
+
+    def test_tool_result_string_content_is_printed(self) -> None:
+        event = {
+            "type": "user",
+            "message": {
+                "content": [{"type": "tool_result", "content": "3 matches found"}]
+            },
+        }
+        line = harness._format_stream_event(event)
+        self.assertEqual(line, "[tool_result] 3 matches found")
+
+    def test_tool_result_block_list_content_is_printed(self) -> None:
+        event = {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "content": [{"type": "text", "text": "line one\nline two"}],
+                    }
+                ]
+            },
+        }
+        line = harness._format_stream_event(event)
+        self.assertIn("line one", line or "")
+        self.assertIn("line two", line or "")
+
+    def test_tool_result_is_truncated(self) -> None:
+        big = "x" * (harness.TOOL_RESULT_PREVIEW_CHARS + 50)
+        event = {
+            "type": "user",
+            "message": {"content": [{"type": "tool_result", "content": big}]},
+        }
+        line = harness._format_stream_event(event) or ""
+        self.assertIn("+50 chars", line)
+        self.assertLess(len(line), len(big))
+
+    def test_tool_result_error_marker(self) -> None:
+        event = {
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "content": "boom", "is_error": True}
+                ]
+            },
+        }
+        self.assertEqual(harness._format_stream_event(event), "[tool_result:error] boom")
+
+    def test_empty_tool_result_still_shows_marker(self) -> None:
+        event = {
+            "type": "user",
+            "message": {"content": [{"type": "tool_result", "content": ""}]},
+        }
+        self.assertEqual(harness._format_stream_event(event), "[tool_result]")
 
 
 _PROM_SAMPLE = """\

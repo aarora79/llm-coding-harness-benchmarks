@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,15 @@ DEFAULT_MAX_TURNS = 60
 DEFAULT_MAX_OUTPUT_TOKENS = 16000
 DEFAULT_TIMEOUT_SECONDS = 1800
 
+# Where claude -p sends requests. "endpoint" routes through an OpenAI/Anthropic-
+# compatible base URL (a local vLLM server, a gateway, the Anthropic API);
+# "bedrock" flips claude into native Amazon Bedrock mode (CLAUDE_CODE_USE_BEDROCK=1)
+# and names a Bedrock model id, so no base URL or api_key is used.
+PROVIDER_ENDPOINT = "endpoint"
+PROVIDER_BEDROCK = "bedrock"
+VALID_PROVIDERS = {PROVIDER_ENDPOINT, PROVIDER_BEDROCK}
+DEFAULT_PROVIDER = PROVIDER_ENDPOINT
+
 
 class RunnerConfigError(Exception):
     """Raised when the runner config is missing, unparseable, or invalid."""
@@ -61,17 +71,35 @@ class RunnerConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # Routing: where claude -p sends requests and which model it names.
-    endpoint: str = Field(
+    # Routing: how claude -p reaches the model.
+    #   "endpoint" (default): route through an OpenAI/Anthropic-compatible base
+    #       URL (a local vLLM server, a gateway, or the Anthropic API).
+    #   "bedrock": drive models directly on Amazon Bedrock via the native
+    #       CLAUDE_CODE_USE_BEDROCK path; no base URL or api_key is used.
+    provider: str = Field(
+        default=DEFAULT_PROVIDER,
+        description="How claude -p reaches the model: 'endpoint' (base URL) or "
+        "'bedrock' (native Amazon Bedrock).",
+    )
+    endpoint: str | None = Field(
+        default=None,
         description="Base URL of the OpenAI/Anthropic-compatible endpoint "
-        "(e.g. http://127.0.0.1:8000)."
+        "(e.g. http://127.0.0.1:8000). Required for provider=endpoint; ignored "
+        "for provider=bedrock.",
     )
     model: str | None = Field(
         default=None,
-        description="Model name/id to pass to claude --model. Left unset in the "
-        "committed config so one file serves every model; supply it with --model.",
+        description="Model name/id to pass to claude --model. For provider=bedrock "
+        "this is a Bedrock model id or inference profile (e.g. "
+        "us.anthropic.claude-opus-4-8). Left unset in the committed config so one "
+        "file serves every model; supply it with --model.",
     )
     api_key: str = Field(default="local", description="API key sent to the endpoint.")
+    aws_region: str | None = Field(
+        default=None,
+        description="AWS region for provider=bedrock (e.g. us-east-1). Falls back "
+        "to AWS_REGION/AWS_DEFAULT_REGION from the environment when unset.",
+    )
 
     # What to run and where outputs go.
     dataset: str | None = Field(
@@ -110,16 +138,39 @@ class RunnerConfig(BaseModel):
         description="Optional claude --settings JSON file (e.g. the vLLM config).",
     )
 
+    @property
+    def is_bedrock(self) -> bool:
+        """True when claude -p should route natively to Amazon Bedrock."""
+        return self.provider == PROVIDER_BEDROCK
+
+    def resolved_region(self) -> str | None:
+        """Return the AWS region for Bedrock, falling back to the environment.
+
+        Returns:
+            The configured ``aws_region``, else ``AWS_REGION`` /
+            ``AWS_DEFAULT_REGION`` from the environment, else None.
+        """
+        return (
+            self.aws_region
+            or os.environ.get("AWS_REGION")
+            or os.environ.get("AWS_DEFAULT_REGION")
+        )
+
     def validate_semantics(self) -> None:
         """Check fields the type system cannot.
 
         Raises:
             RunnerConfigError: If a value is present but invalid.
         """
+        if self.provider not in VALID_PROVIDERS:
+            raise RunnerConfigError(
+                f"provider '{self.provider}' not in {sorted(VALID_PROVIDERS)}."
+            )
         if not self.model:
             raise RunnerConfigError(
                 "model is required. Set it in the config file or pass --model "
-                "(e.g. --model qwen3-coder-30b)."
+                "(e.g. --model qwen3-coder-30b, or a Bedrock model id such as "
+                "us.anthropic.claude-opus-4-8 for provider=bedrock)."
             )
         if not self.dataset:
             raise RunnerConfigError(
@@ -131,6 +182,26 @@ class RunnerConfig(BaseModel):
                 f"permission_mode '{self.permission_mode}' not in "
                 f"{sorted(VALID_PERMISSION_MODES)}. bypassPermissions and "
                 "dangerously-skip-permissions are intentionally not allowed."
+            )
+        self._validate_routing()
+
+    def _validate_routing(self) -> None:
+        """Validate provider-specific routing fields.
+
+        Raises:
+            RunnerConfigError: If routing fields are missing or malformed.
+        """
+        if self.is_bedrock:
+            if not self.resolved_region():
+                raise RunnerConfigError(
+                    "provider=bedrock requires an AWS region. Set aws_region in "
+                    "the config, pass --aws-region, or export AWS_REGION."
+                )
+            return
+        if not self.endpoint:
+            raise RunnerConfigError(
+                "endpoint is required for provider=endpoint. Set it in the config "
+                "file or pass --endpoint (e.g. http://127.0.0.1:8000)."
             )
         if not self.endpoint.startswith(("http://", "https://")):
             raise RunnerConfigError(
@@ -205,7 +276,11 @@ def load_runner_config(
 def _summarize(config: RunnerConfig) -> None:
     """Log a short human-readable summary of the runner config."""
     logger.info("Runner config:")
-    logger.info("  endpoint: %s", config.endpoint)
+    logger.info("  provider: %s", config.provider)
+    if config.is_bedrock:
+        logger.info("  aws_region: %s", config.resolved_region())
+    else:
+        logger.info("  endpoint: %s", config.endpoint)
     logger.info("  model: %s", config.model)
     logger.info("  dataset: %s", config.dataset)
     logger.info("  output_dir: %s", config.output_dir)
@@ -225,15 +300,28 @@ def _parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("config", help="Path to the runner config YAML file")
+    parser.add_argument(
+        "--provider", help="Override: routing provider (endpoint | bedrock)"
+    )
+    parser.add_argument("--endpoint", help="Override: API endpoint base URL")
     parser.add_argument("--model", help="Override: model name (as with the harness)")
     parser.add_argument("--dataset", help="Override: dataset YAML path")
+    parser.add_argument(
+        "--aws-region", help="Override: AWS region for provider=bedrock"
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     """Validate the given runner config file and print a summary."""
     args = _parse_args()
-    overrides = {"model": args.model, "dataset": args.dataset}
+    overrides = {
+        "provider": args.provider,
+        "endpoint": args.endpoint,
+        "model": args.model,
+        "dataset": args.dataset,
+        "aws_region": args.aws_region,
+    }
     try:
         config = load_runner_config(args.config, overrides)
     except RunnerConfigError as exc:

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(_SCRIPTS_DIR))
@@ -107,6 +109,58 @@ class LoadRunnerConfigTest(unittest.TestCase):
             {"endpoint": "http://localhost:9000", "model": "m", "dataset": "d.yaml"},
         )
         self.assertEqual(config.endpoint, "http://localhost:9000")
+
+    def test_default_provider_is_endpoint(self) -> None:
+        config = load_runner_config(_write(_MINIMAL))
+        self.assertEqual(config.provider, "endpoint")
+        self.assertFalse(config.is_bedrock)
+
+
+_BEDROCK = """\
+provider: bedrock
+model: us.anthropic.claude-opus-4-8
+dataset: dataset/example.yaml
+aws_region: us-east-1
+"""
+
+
+class BedrockProviderTest(unittest.TestCase):
+    def test_bedrock_config_loads_without_endpoint(self) -> None:
+        config = load_runner_config(_write(_BEDROCK))
+        self.assertTrue(config.is_bedrock)
+        self.assertIsNone(config.endpoint)
+        self.assertEqual(config.resolved_region(), "us-east-1")
+
+    def test_bedrock_region_falls_back_to_env(self) -> None:
+        text = "provider: bedrock\nmodel: m\ndataset: d.yaml\n"
+        with mock.patch.dict(os.environ, {"AWS_REGION": "eu-west-1"}, clear=False):
+            config = load_runner_config(_write(text))
+            self.assertEqual(config.resolved_region(), "eu-west-1")
+
+    def test_bedrock_without_region_fails(self) -> None:
+        text = "provider: bedrock\nmodel: m\ndataset: d.yaml\n"
+        env = {k: v for k, v in os.environ.items() if k not in ("AWS_REGION", "AWS_DEFAULT_REGION")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(RunnerConfigError, "requires an AWS region"):
+                load_runner_config(_write(text))
+
+    def test_unknown_provider_rejected(self) -> None:
+        text = "provider: azure\nmodel: m\ndataset: d.yaml\n"
+        with self.assertRaisesRegex(RunnerConfigError, "provider"):
+            load_runner_config(_write(text))
+
+    def test_endpoint_provider_still_requires_endpoint(self) -> None:
+        text = "model: m\ndataset: d.yaml\n"
+        with self.assertRaisesRegex(RunnerConfigError, "endpoint is required"):
+            load_runner_config(_write(text))
+
+    def test_cli_can_switch_to_bedrock(self) -> None:
+        config = load_runner_config(
+            _write(_MINIMAL),
+            {"provider": "bedrock", "aws_region": "us-west-2"},
+        )
+        self.assertTrue(config.is_bedrock)
+        self.assertEqual(config.resolved_region(), "us-west-2")
 
 
 if __name__ == "__main__":

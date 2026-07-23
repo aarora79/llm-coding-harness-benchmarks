@@ -183,6 +183,11 @@ def _build_prompt(task: Task, clone_path: Path, ref: str, model: str) -> str:
 def _build_env(config: RunnerConfig) -> dict[str, str]:
     """Build the environment for the claude subprocess from the runner config.
 
+    For provider=endpoint, routing pins ANTHROPIC_BASE_URL/API_KEY and disables
+    Bedrock. For provider=bedrock, it flips CLAUDE_CODE_USE_BEDROCK=1 and sets
+    AWS_REGION so claude talks to Amazon Bedrock natively, using the ambient AWS
+    credentials; no base URL or api key is set.
+
     Args:
         config: The runner config.
 
@@ -190,12 +195,21 @@ def _build_env(config: RunnerConfig) -> dict[str, str]:
         A copy of the current environment with routing overrides applied.
     """
     env = os.environ.copy()
-    env["ANTHROPIC_BASE_URL"] = config.endpoint
-    env["ANTHROPIC_API_KEY"] = config.api_key
-    env["CLAUDE_CODE_USE_BEDROCK"] = "0"
     env["DISABLE_NON_ESSENTIAL_MODEL_CALLS"] = "1"
     env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(config.max_output_tokens)
     env["CLAUDE_CODE_SUBAGENT_MODEL"] = config.model
+    if config.is_bedrock:
+        env["CLAUDE_CODE_USE_BEDROCK"] = "1"
+        region = config.resolved_region()
+        if region:
+            env["AWS_REGION"] = region
+        # A stray ANTHROPIC_BASE_URL in the ambient env would otherwise redirect
+        # the Bedrock-mode client away from Bedrock, so clear it.
+        env.pop("ANTHROPIC_BASE_URL", None)
+    else:
+        env["ANTHROPIC_BASE_URL"] = config.endpoint
+        env["ANTHROPIC_API_KEY"] = config.api_key
+        env["CLAUDE_CODE_USE_BEDROCK"] = "0"
     return env
 
 
@@ -220,6 +234,20 @@ def _build_settings_arg(config: RunnerConfig) -> str:
     """
     if config.settings_file:
         return str(REPO_ROOT / config.settings_file)
+    if config.is_bedrock:
+        # Bedrock mode authenticates with ambient AWS credentials, so no token
+        # source is needed. Pin CLAUDE_CODE_USE_BEDROCK=1 (and the region) here
+        # too, so a global settings file cannot flip routing back off Bedrock.
+        env: dict[str, str] = {
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(config.max_output_tokens),
+            "CLAUDE_CODE_SUBAGENT_MODEL": config.model,
+        }
+        region = config.resolved_region()
+        if region:
+            env["AWS_REGION"] = region
+        return json.dumps({"env": env})
     settings = {
         # Claude Code requires a token source even against a local endpoint that
         # ignores the value; without it the run fails with "Not logged in".
@@ -236,7 +264,12 @@ def _build_settings_arg(config: RunnerConfig) -> str:
     return json.dumps(settings)
 
 
-def _build_claude_cmd(config: RunnerConfig, prompt: str, stream: bool = False) -> list[str]:
+def _build_claude_cmd(
+    config: RunnerConfig,
+    prompt: str,
+    stream: bool = False,
+    clone_path: Path | None = None,
+) -> list[str]:
     """Assemble the `claude -p` argument vector from the runner config.
 
     Args:
@@ -245,6 +278,11 @@ def _build_claude_cmd(config: RunnerConfig, prompt: str, stream: bool = False) -
         stream: If True, emit newline-delimited JSON events as the run
             progresses (``--output-format stream-json``, which requires
             ``--verbose``) instead of a single buffered JSON result.
+        clone_path: The task's cloned repo directory. When set, it is added as
+            an allowed working directory with ``--add-dir`` so Bash commands can
+            operate inside the clone. Read/Glob/Grep already reach absolute paths
+            regardless; without this, Bash (ls/cd/find/grep into the clone) is
+            blocked because it is sandboxed to the harness's own working dir.
 
     Returns:
         The command as a list of arguments (never a shell string).
@@ -267,6 +305,8 @@ def _build_claude_cmd(config: RunnerConfig, prompt: str, stream: bool = False) -
         "--settings",
         _build_settings_arg(config),
     ]
+    if clone_path is not None:
+        cmd += ["--add-dir", str(clone_path)]
     if stream:
         # stream-json in -p mode requires --verbose to emit per-event objects.
         cmd.append("--verbose")
@@ -434,20 +474,24 @@ class _GaugePoller:
     reflects total server load, not this run alone.
     """
 
-    def __init__(self, endpoint: str) -> None:
-        self._url = endpoint.rstrip("/") + "/metrics"
+    def __init__(self, endpoint: str | None) -> None:
+        # A None endpoint (e.g. provider=bedrock) disables polling: the thread
+        # never starts and summary() reports the gauges as unavailable.
+        self._url = endpoint.rstrip("/") + "/metrics" if endpoint else None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         # Per-metric list of sampled values (only successful scrapes recorded).
         self._samples: dict[str, list[float]] = {m: [] for m in SAMPLED_GAUGE_METRICS}
 
     def __enter__(self) -> _GaugePoller:
-        self._thread.start()
+        if self._url:
+            self._thread.start()
         return self
 
     def __exit__(self, *exc: object) -> None:
         self._stop.set()
-        self._thread.join(timeout=METRICS_SCRAPE_TIMEOUT_SECONDS)
+        if self._url:
+            self._thread.join(timeout=METRICS_SCRAPE_TIMEOUT_SECONDS)
 
     def _run(self) -> None:
         # Sample immediately, then every interval until stopped. wait() returns
@@ -712,6 +756,35 @@ def _run_claude(cmd: list[str], env: dict[str, str], timeout: int) -> dict[str, 
     return result
 
 
+TOOL_RESULT_PREVIEW_CHARS = 500
+
+
+def _tool_result_text(content: Any) -> str:
+    """Flatten a tool_result block's content into plain text.
+
+    The Anthropic message format allows a tool_result's ``content`` to be either
+    a plain string or a list of content blocks (each a ``{"type": "text",
+    "text": ...}`` mapping, though other block types may appear). This joins the
+    text it can find so the trace can show what a tool actually returned.
+
+    Args:
+        content: The ``content`` field of a tool_result block.
+
+    Returns:
+        The extracted text, stripped. Empty when no text could be found.
+    """
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        texts = [
+            block["text"]
+            for block in content
+            if isinstance(block, dict) and isinstance(block.get("text"), str)
+        ]
+        return "\n".join(texts).strip()
+    return ""
+
+
 def _format_stream_event(event: dict[str, Any]) -> str | None:
     """Render one stream-json event as a short human-readable trace line.
 
@@ -739,7 +812,12 @@ def _format_stream_event(event: dict[str, Any]) -> str | None:
         elif btype == "tool_use":
             parts.append(f"[tool] {block.get('name', '?')}")
         elif btype == "tool_result":
-            parts.append("[tool_result]")
+            text = _tool_result_text(block.get("content"))
+            preview = text[:TOOL_RESULT_PREVIEW_CHARS]
+            if len(text) > TOOL_RESULT_PREVIEW_CHARS:
+                preview += f"... (+{len(text) - TOOL_RESULT_PREVIEW_CHARS} chars)"
+            marker = "[tool_result:error]" if block.get("is_error") else "[tool_result]"
+            parts.append(f"{marker} {preview}" if preview else marker)
     return "\n".join(parts) if parts else None
 
 
@@ -835,6 +913,7 @@ def _summary_metrics(
     metrics: dict[str, Any],
     vllm_prometheus: dict[str, Any],
     generation_tokens_per_sec: float,
+    include_vllm: bool = True,
 ) -> dict[str, Any]:
     """Build the headline "metrics that matter" block for a run.
 
@@ -861,6 +940,10 @@ def _summary_metrics(
         generation_tokens_per_sec: Output-token throughput (output_tokens /
             latency_seconds), computed once by the caller so it matches the
             top-level field.
+        include_vllm: When False (e.g. provider=bedrock, which has no vLLM
+            server), the vLLM-derived cache fallbacks and the prefix-cache-hit
+            headline are omitted, so the summary reports only what the model API
+            returned.
 
     Returns:
         A flat summary dict of headline numbers plus a ``sources`` map naming the
@@ -871,19 +954,23 @@ def _summary_metrics(
     prompt_total = counters.get(PROMPT_TOKENS_METRIC)
     prompt_cached = counters.get(PROMPT_TOKENS_CACHED_METRIC)
 
-    # Cache-read: the API number if the backend reported it, else vLLM's cached
-    # prompt tokens. Cache-write has no direct vLLM counter; the freshly computed
-    # (uncached) prefill tokens are the closest equivalent.
+    # Cache-read: the API number if the backend reported it, else (only when a
+    # vLLM server backs the run) vLLM's cached prompt tokens. Cache-write has no
+    # direct vLLM counter; the freshly computed (uncached) prefill tokens are the
+    # closest equivalent.
     if "cache_read_tokens" in metrics:
         cache_read: int | None = metrics["cache_read_tokens"]
         cache_read_src = "claude_api.usage.cache_read_input_tokens"
-    else:
+    elif include_vllm:
         cache_read = prompt_cached
         cache_read_src = f"vllm_prometheus.counters.{PROMPT_TOKENS_CACHED_METRIC}"
+    else:
+        cache_read = None
+        cache_read_src = "claude_api.usage.cache_read_input_tokens (not reported)"
     if "cache_creation_tokens" in metrics:
         cache_write: int | None = metrics["cache_creation_tokens"]
         cache_write_src = "claude_api.usage.cache_creation_input_tokens"
-    elif prompt_total is not None and prompt_cached is not None:
+    elif include_vllm and prompt_total is not None and prompt_cached is not None:
         cache_write = prompt_total - prompt_cached
         cache_write_src = (
             f"vllm_prometheus derived: {PROMPT_TOKENS_METRIC} - "
@@ -893,12 +980,18 @@ def _summary_metrics(
         cache_write = None
         cache_write_src = "unavailable (backend reports no cache-write signal)"
 
-    return {
-        "note": (
-            "Headline metrics resolved to the best available source for each; "
-            "see 'sources'. Values drawn from vllm_prometheus carry its "
-            "single-tenant, server-wide caveat."
-        ),
+    note = (
+        "Headline metrics resolved to the best available source for each; see "
+        "'sources'. Values drawn from vllm_prometheus carry its single-tenant, "
+        "server-wide caveat."
+        if include_vllm
+        else (
+            "Headline metrics as reported by the model API (claude -p); there is "
+            "no vLLM server for this provider, so no server-side cache telemetry."
+        )
+    )
+    summary = {
+        "note": note,
         "input_tokens": metrics.get("input_tokens"),
         "output_tokens": metrics.get("output_tokens"),
         "cache_read_tokens": cache_read,
@@ -906,18 +999,25 @@ def _summary_metrics(
         "latency_seconds": metrics.get("latency_seconds"),
         "num_turns": metrics.get("num_turns"),
         "generation_tokens_per_sec": generation_tokens_per_sec,
-        "prefix_cache_hit_rate": derived.get("prefix_cache_hit_rate"),
-        "sources": {
-            "input_tokens": "claude_api.usage.input_tokens",
-            "output_tokens": "claude_api.usage.output_tokens",
-            "cache_read_tokens": cache_read_src,
-            "cache_write_tokens": cache_write_src,
-            "latency_seconds": "harness wall-clock (or claude_api.duration_ms)",
-            "num_turns": "claude_api.num_turns",
-            "generation_tokens_per_sec": "derived: output_tokens / latency_seconds",
-            "prefix_cache_hit_rate": "vllm_prometheus.derived.prefix_cache_hit_rate",
-        },
     }
+    sources = {
+        "input_tokens": "claude_api.usage.input_tokens",
+        "output_tokens": "claude_api.usage.output_tokens",
+        "cache_read_tokens": cache_read_src,
+        "cache_write_tokens": cache_write_src,
+        "latency_seconds": "harness wall-clock (or claude_api.duration_ms)",
+        "num_turns": "claude_api.num_turns",
+        "generation_tokens_per_sec": "derived: output_tokens / latency_seconds",
+    }
+    # The prefix-cache hit rate is a vLLM-only signal; omit it entirely rather
+    # than emit a permanently-null field for a provider that has no vLLM server.
+    if include_vllm:
+        summary["prefix_cache_hit_rate"] = derived.get("prefix_cache_hit_rate")
+        sources["prefix_cache_hit_rate"] = (
+            "vllm_prometheus.derived.prefix_cache_hit_rate"
+        )
+    summary["sources"] = sources
+    return summary
 
 
 def _save_metrics(
@@ -931,10 +1031,12 @@ def _save_metrics(
 
     The top-level fields report what the model API returned for the run
     (tokens, latency, turns, cost) plus the harness-observed UTC wall-clock
-    bounds (``run_started_at`` / ``run_ended_at``). Cache utilization measured
-    out-of-band from vLLM's Prometheus /metrics is kept in its own
-    ``vllm_prometheus`` block, so the two sources -- and their different
-    accuracy assumptions -- never mix.
+    bounds (``run_started_at`` / ``run_ended_at``). For provider=endpoint, cache
+    utilization measured out-of-band from vLLM's Prometheus /metrics is kept in
+    its own ``vllm_prometheus`` block, so the two sources -- and their different
+    accuracy assumptions -- never mix. For provider=bedrock there is no vLLM
+    server, so that block is omitted entirely and the run is limited to what
+    claude -p itself reports.
 
     Args:
         config: The runner config.
@@ -953,6 +1055,7 @@ def _save_metrics(
     generation_tokens_per_sec = (
         round(metrics["output_tokens"] / latency, 1) if latency > 0 else 0
     )
+    include_vllm = not config.is_bedrock
     record = {
         "task": task.id,
         "repo": task.repo,
@@ -960,16 +1063,21 @@ def _save_metrics(
         "complexity": task.complexity,
         "tags": task.tags,
         "model": config.model,
-        "endpoint": config.endpoint,
+        "provider": config.provider,
+        "endpoint": config.endpoint if not config.is_bedrock else None,
+        "aws_region": config.resolved_region() if config.is_bedrock else None,
         "artifacts_produced": len(produced),
         "artifacts_expected": len(ARTIFACT_FILENAMES),
         "generation_tokens_per_sec": generation_tokens_per_sec,
         "metrics_that_matter": _summary_metrics(
-            metrics, vllm_prometheus, generation_tokens_per_sec
+            metrics, vllm_prometheus, generation_tokens_per_sec, include_vllm
         ),
         **metrics,
-        "vllm_prometheus": vllm_prometheus,
     }
+    # vLLM Prometheus telemetry only exists for an HTTP endpoint; omit the block
+    # for Amazon Bedrock rather than write a permanently-unavailable stub.
+    if include_vllm:
+        record["vllm_prometheus"] = vllm_prometheus
     path = out_dir / "metrics.json"
     path.write_text(json.dumps(record, indent=2, default=str) + "\n", encoding="utf-8")
     return path
@@ -1010,15 +1118,19 @@ def _run_task(
     clone_parent = clone_path.parent
     try:
         prompt = _build_prompt(task, clone_path, ref, config.model)
-        cmd = _build_claude_cmd(config, prompt, stream=stream)
+        cmd = _build_claude_cmd(config, prompt, stream=stream, clone_path=clone_path)
         env = _build_env(config)
         logger.info("  %s Running claude -p (max_turns=%s)...", label, config.max_turns)
+        # vLLM Prometheus scraping only applies to an HTTP endpoint; Amazon
+        # Bedrock exposes no such surface, so skip it and leave the block marked
+        # unavailable. metrics_endpoint is None for provider=bedrock.
+        metrics_endpoint = config.endpoint if not config.is_bedrock else None
         # Snapshot vLLM's full server-wide metrics surface as tightly around the
         # claude -p call as possible. Each delta is this run's activity ONLY if
         # the run is the sole traffic on the endpoint (see _snapshot_vllm_metrics).
         # Keep the reads adjacent to the call to minimize the window in which
         # other traffic could be misattributed.
-        vllm_before = _snapshot_vllm_metrics(config.endpoint)
+        vllm_before = _snapshot_vllm_metrics(metrics_endpoint) if metrics_endpoint else None
         # Gauges (KV-cache usage, running/waiting requests) drain to idle the
         # moment a request finishes, so a before/after snapshot always reads them
         # at ~0. Sample them in a background thread WHILE claude -p runs to capture
@@ -1026,13 +1138,13 @@ def _run_task(
         # Wall-clock UTC bounds of the run, captured as tightly around the
         # claude -p call as the metric snapshots. ISO 8601 with a trailing Z.
         run_started_at = _utc_now_iso()
-        with _GaugePoller(config.endpoint) as poller:
+        with _GaugePoller(metrics_endpoint) as poller:
             if stream:
                 result = _run_claude_streaming(cmd, env, config.timeout_seconds)
             else:
                 result = _run_claude(cmd, env, config.timeout_seconds)
         run_ended_at = _utc_now_iso()
-        vllm_after = _snapshot_vllm_metrics(config.endpoint)
+        vllm_after = _snapshot_vllm_metrics(metrics_endpoint) if metrics_endpoint else None
         metrics = _metrics_from_result(result, result.get("_elapsed_seconds", 0))
         metrics["run_started_at"] = run_started_at
         metrics["run_ended_at"] = run_ended_at
@@ -1118,7 +1230,7 @@ def _dry_run(config: RunnerConfig, dataset: Dataset, tasks: list[Task]) -> None:
         ref = dataset.resolved_ref(task)
         placeholder = Path(config.clone_dir) / "<tmp>" / _repo_name(task.repo)
         prompt = _build_prompt(task, placeholder, ref, config.model)
-        cmd = _build_claude_cmd(config, prompt)
+        cmd = _build_claude_cmd(config, prompt, clone_path=placeholder)
         print(f"\n=== {task.id} [{task.complexity}] ref={ref} ===")
         print("PROMPT:")
         print(prompt)
@@ -1166,11 +1278,16 @@ def _run(
     per-run blocks are flagged unreliable and a warning is logged here.
     """
     concurrency = max(1, min(config.concurrency, len(tasks)))
+    target = (
+        f"Amazon Bedrock ({config.resolved_region()})"
+        if config.is_bedrock
+        else config.endpoint
+    )
     logger.info(
         "Running %s task(s) with model=%s against %s (concurrency=%s)",
         len(tasks),
         config.model,
-        config.endpoint,
+        target,
         concurrency,
     )
     if concurrency > 1:
@@ -1251,8 +1368,17 @@ def _parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--config", help="Path to the runner config YAML file")
+    parser.add_argument(
+        "--provider",
+        help="Override: routing provider ('endpoint' for a base URL, 'bedrock' "
+        "for native Amazon Bedrock)",
+    )
     parser.add_argument("--endpoint", help="Override: API endpoint base URL")
     parser.add_argument("--model", help="Override: model name")
+    parser.add_argument(
+        "--aws-region",
+        help="Override: AWS region for provider=bedrock (e.g. us-east-1)",
+    )
     parser.add_argument("--dataset", help="Override: dataset YAML path")
     parser.add_argument(
         "--tasks", help="Override: comma-separated task ids to run (default: all)"
@@ -1287,8 +1413,10 @@ def main() -> None:
     """Parse arguments, load config and dataset, and run the benchmark."""
     args = _parse_args()
     overrides: dict[str, Any] = {
+        "provider": args.provider,
         "endpoint": args.endpoint,
         "model": args.model,
+        "aws_region": args.aws_region,
         "dataset": args.dataset,
         "max_turns": args.max_turns,
         "concurrency": args.concurrency,

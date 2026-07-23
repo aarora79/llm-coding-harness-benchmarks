@@ -24,13 +24,29 @@
 # -----------------------------------------------------------------------------
 # Fields
 # -----------------------------------------------------------------------------
+#   provider          str   How claude -p reaches the model:
+#                             endpoint (default) - route through a base URL
+#                               (a local vLLM server, a gateway, or the
+#                               Anthropic API). Uses `endpoint` and `api_key`.
+#                             bedrock - drive models directly on Amazon Bedrock
+#                               (CLAUDE_CODE_USE_BEDROCK=1). Uses `aws_region`
+#                               and ambient AWS credentials; `endpoint`/`api_key`
+#                               are ignored, and the vLLM Prometheus block is
+#                               left unavailable (Bedrock exposes no /metrics).
 #   endpoint          str   Base URL of the OpenAI/Anthropic-compatible endpoint
 #                           the model is served on (e.g. a local vLLM server).
+#                           Required for provider=endpoint.
 #   model             str   Model name/id passed to `claude --model` and used as
-#                           the {model-name} artifact subfolder. Usually supplied
-#                           with --model rather than pinned here.
-#   api_key           str   API key sent to the endpoint. Local servers ignore
-#                           the value; keep a placeholder like "local".
+#                           the {model-name} artifact subfolder. For
+#                           provider=bedrock this is a Bedrock model id or
+#                           inference profile (e.g. us.anthropic.claude-opus-4-8).
+#                           Usually supplied with --model rather than pinned here.
+#   api_key           str   API key sent to the endpoint (provider=endpoint only).
+#                           Local servers ignore the value; keep a placeholder
+#                           like "local".
+#   aws_region        str   AWS region for provider=bedrock (e.g. us-east-1).
+#                           Falls back to AWS_REGION / AWS_DEFAULT_REGION when
+#                           unset.
 #   dataset           str   Path to the benchmark dataset YAML file. Usually
 #                           supplied with --dataset rather than pinned here.
 #   output_dir        str   Directory (relative to the repo root) where the /swe
@@ -54,13 +70,29 @@
 #                           config that pins ANTHROPIC_BASE_URL). Optional.
 # =============================================================================
 
+# Routing provider: "endpoint" (a base URL, the default) or "bedrock" (native
+# Amazon Bedrock). Usually left at the default and switched per run with
+# --provider bedrock when you want to benchmark a model straight off Bedrock.
+provider: endpoint
+
+# provider=endpoint routing. Ignored when provider=bedrock.
 endpoint: http://127.0.0.1:8000
 api_key: local
+
+# provider=bedrock routing. Uncomment (or pass --aws-region / export AWS_REGION)
+# when running against Amazon Bedrock. Requires ambient AWS credentials.
+# aws_region: us-east-1
 
 # model and dataset are supplied on the CLI (--model / --dataset) so this one
 # file serves every model and dataset. Uncomment to pin a default instead:
 # model: qwen3-coder-30b
 # dataset: dataset/mcp-gateway-registry.yaml
+#
+# For Amazon Bedrock, model is a Bedrock model id or inference profile, e.g.:
+#   uv run scripts/run-swe-headless.py --config config/runner.yaml \
+#       --provider bedrock --aws-region us-east-1  \
+#       --model us.anthropic.claude-opus-4-8 \
+#       --dataset dataset/mcp-gateway-registry.yaml
 
 output_dir: swe-benchmark-data
 clone_dir: /tmp

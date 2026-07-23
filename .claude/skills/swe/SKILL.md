@@ -57,6 +57,21 @@ The `repo:` path may be a checkout the caller already cloned (including a tempor
 
 ---
 
+## Performance: Parallelize with Subagents
+
+**A `/swe` run is slow when the whole thing executes as one long sequential stream of Read/Grep/Bash calls in the main loop.** Avoid that. Whenever you have independent work, dispatch it to concurrent subagents with the `Task` tool and let them run at the same time, then synthesize their results in the main loop.
+
+Rules of thumb:
+
+- **Fan out, then join.** Launch multiple subagents in a single message (multiple `Task` tool calls in one turn) so they run concurrently, rather than one after another. Wait for all of them, then combine.
+- **Use `subagent_type=Explore` for read-only investigation.** Each Explore subagent should own one facet of the codebase so their searches do not overlap.
+- **Keep design authorship in the main loop.** Subagents gather and report; the main loop decides and writes the artifacts. Do not have subagents write the four artifact files.
+- **Subagents run on the same benchmarked model** (the harness sets `CLAUDE_CODE_SUBAGENT_MODEL`), so parallelizing changes only wall-clock time, not what is being measured. Benchmark comparability is preserved.
+
+The two steps that benefit most are the codebase analysis (Steps 2 and 5) and the expert review (Step 7); each of those steps says exactly how to fan out. The artifact chain itself (issue -> LLD -> review -> testing) has genuine content dependencies and stays sequential.
+
+---
+
 ## Step 1: Gather Requirements
 
 **NEVER guess the repo URL, the tag, or the task description.** All of them must come from the user. Do not infer them from session context, the current working directory, recent files, or memory.
@@ -300,7 +315,14 @@ Create a comprehensive GitHub issue specification. This is the artifact that wou
 
 ### How to Analyze
 
-Use the Agent tool with `subagent_type=Explore` for thorough investigation. Read actual code, not just file names. Note TODOs and known issues.
+**Fan this out across parallel subagents instead of exploring the six areas one by one.** In a single message, launch several `Task` tool calls with `subagent_type=Explore`, each owning a distinct facet so their searches do not overlap - for example:
+
+- one subagent maps the models/data structures and configuration/constants (areas 1 and 5),
+- one maps the service/business-logic and storage/IO patterns (areas 2 and 4),
+- one maps the route/CLI/entrypoint patterns and how the feature under design is reached today (area 3),
+- one maps the existing tests, fixtures, and mocking conventions (area 6).
+
+Instruct each subagent to read actual code (not just file names), report the key files, patterns, and integration points it found, and note TODOs and known issues. Wait for all of them, then synthesize their reports in the main loop - the main loop owns the LLD. Adjust the split to the repo; the goal is concurrent, non-overlapping investigation rather than one long serial sweep.
 
 ### Document Your Findings
 
@@ -540,6 +562,8 @@ Create a review document with feedback from multiple expert personas:
 | SRE/DevOps Engineer | Circuit | Deployment, monitoring, scaling, infrastructure |
 | Security Engineer | Cipher | AuthN/AuthZ, validation, OWASP, data protection |
 | SMTS (Overall) | Sage | Architecture, code quality, maintainability |
+
+**Run the five personas concurrently, not one after another.** The reviews are independent, so in a single message launch five `Task` subagents - one per persona - each given the issue spec and the LLD and told to review strictly from its persona's perspective (the focus column above) and return its section in the structure below. Wait for all five, then assemble their sections into `review.md` and write the Review Summary table in the main loop. Keep each persona's review realistic and critical - identify actual issues, not just praise.
 
 For each reviewer, capture:
 - **Strengths** observed in the design

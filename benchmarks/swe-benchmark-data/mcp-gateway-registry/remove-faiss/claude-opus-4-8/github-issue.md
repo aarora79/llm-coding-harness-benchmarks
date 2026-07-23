@@ -1,94 +1,65 @@
-# GitHub Issue: Remove FAISS and consolidate on the maintained DocumentDB/MongoDB hybrid search
+# GitHub Issue: Remove FAISS from the codebase and documentation
 
 ## Title
-Remove FAISS from the codebase, dependencies, configuration, and docs; consolidate search on the DocumentDB/MongoDB backend
+Remove FAISS and rely solely on DocumentDB hybrid search
 
 ## Labels
 - refactor
+- infra
+- docs
 - tech-debt
-- dependencies
-- search
 
 ## Description
 
 ### Problem Statement
-The registry carries two parallel search implementations:
+FAISS (`faiss-cpu`) is an obsolete dependency in this repository. It is the search engine only for the legacy `file` storage backend, implemented in `registry/search/service.py` (the sole `import faiss` in the codebase) and wired in via `registry/repositories/file/search_repository.py` (`FaissSearchRepository`).
 
-1. **FAISS** (`faiss-cpu`), used only by the default `file` storage backend. It lives in
-   `registry/search/service.py` (the `FaissService` singleton, ~1200 lines) plus
-   `registry/repositories/file/search_repository.py`.
-2. **DocumentDB/MongoDB hybrid search** (`registry/repositories/documentdb/search_repository.py`),
-   the maintained path used by all MongoDB-compatible backends. It does vector + keyword search
-   with Reciprocal Rank Fusion, an HNSW vector index when the server supports it, and a pure-Python
-   cosine-similarity fallback (`_client_side_search`) for MongoDB Community Edition that uses
-   `registry/utils/vector.py:cosine_similarity` and the provider-agnostic embeddings client.
+The project has already moved on: `.env.example` ships `STORAGE_BACKEND=mongodb-ce`, the Terraform default is `documentdb`, `docker-compose.yml` bundles a `mongodb` service with an init job, and the design docs describe the file/FAISS backend as "Legacy" and "deprecated". All production search now runs through `DocumentDBSearchRepository`, a maintained hybrid-search implementation (HNSW vector search + keyword search fused with Reciprocal Rank Fusion) that persists embeddings in the database.
 
-FAISS is obsolete here for several reasons:
-
-- The write paths (`server_routes.py`, `agent_routes.py`, `agent_batch_item_processor.py`) import
-  `faiss_service` **directly** and dual-write to it alongside the repository abstraction
-  (`get_search_repository().index_*`). This bypasses the repository pattern the rest of the codebase
-  follows and couples HTTP handlers to a concrete engine.
-- `faiss-cpu` is a heavy native wheel that inflates the image and the dependency surface.
-- The MongoDB client-side fallback already proves we can do semantic search with nothing but NumPy
-  math and the embeddings client. Nothing FAISS does is unavailable in the maintained path.
+Keeping FAISS costs us:
+- A heavy native dependency chain (`faiss-cpu`, and the `torch` / `sentence-transformers` stack used to bake a local embeddings model) that complicates image builds and inflates image size (the registry image is ~4.6 GB).
+- A build-time model bake step (`docker/Dockerfile.registry-cpu` downloads `all-MiniLM-L6-v2`).
+- An entire parallel search code path plus its test doubles (`tests/fixtures/mocks/mock_faiss.py`, `sys.modules["faiss"]` injection in `tests/conftest.py`, `tests/unit/search/test_faiss_service.py`).
+- Documentation that describes FAISS as the current search mechanism, which is now misleading.
 
 ### Proposed Solution
-Make the MongoDB/DocumentDB backend the single search implementation and delete FAISS:
+Remove FAISS entirely and make DocumentDB hybrid search the single search path.
 
-1. Replace the `file`-backend search repository (`FaissSearchRepository`) with a lightweight
-   in-memory repository that reuses the existing embeddings client and `cosine_similarity` helper
-   (no `faiss` import, no `.faiss` index files). This preserves a working `STORAGE_BACKEND=file`
-   default so existing deployments do not break.
-2. Delete `registry/search/service.py` (the `FaissService` singleton) and rewrite the write paths
-   in `server_routes.py`, `agent_routes.py`, and `agent_batch_item_processor.py` to go through
-   `get_search_repository()` only (remove every `from ..search.service import faiss_service`).
-3. Remove `faiss-cpu` from `pyproject.toml` and regenerate `uv.lock`.
-4. Remove FAISS-specific config (`faiss_index_path`, `faiss_metadata_path`), the `FaissMetadata`
-   Pydantic model, and the `.faiss` file handling in `build_and_run.sh`, `cli/service_mgmt.sh`,
-   and `terraform/aws-ecs/scripts/service_mgmt.sh`.
-5. Update all docs and comments that reference FAISS to describe the unified search engine.
-6. Replace the FAISS test mock and the FAISS service test suite with tests against the new file
-   search repository; keep the existing MongoDB search tests unchanged.
+1. Delete the FAISS service (`registry/search/service.py`) and the FAISS-backed search repository (`registry/repositories/file/search_repository.py`).
+2. In `registry/repositories/factory.py`, stop importing `FaissSearchRepository`. Semantic search now requires a MongoDB-compatible backend; selecting the `file` backend must fail fast with an actionable error rather than silently returning no results.
+3. Change the code default `storage_backend` from `file` to `mongodb-ce` (aligning `registry/core/config.py` and the compose env fallback with the already-shipped `.env.example` and Terraform defaults) so a default `docker-compose up` continues to have working search.
+4. Remove the FAISS dependency from `pyproject.toml`, regenerate `uv.lock`, and drop the build-time embeddings-model bake and any FAISS-only Docker steps. Remove `torch` / `sentence-transformers` / `scikit-learn` only if nothing else uses them (see LLD).
+5. Simplify `registry/main.py` startup by deleting the FAISS-only in-memory re-index block (DocumentDB persists embeddings across restarts).
+6. Delete or repoint every FAISS test (delete FAISS-only tests and the `faiss` `sys.modules` mock; repoint `faiss_service` patches to the search repository).
+7. Rewrite documentation that describes FAISS as the current mechanism to describe DocumentDB hybrid search; strip incidental FAISS mentions from comments and image descriptions; leave historical release notes untouched.
+
+The shared, backend-neutral embeddings abstraction under `registry/embeddings/` is retained unchanged, because DocumentDB hybrid search depends on it.
 
 ### User Stories
-- As a registry operator, I want a smaller image and a smaller dependency surface so deployments
-  build faster and have fewer native-wheel compatibility issues.
-- As a maintainer, I want one search implementation behind the repository abstraction so search
-  behavior is consistent across storage backends and easier to reason about.
-- As an API consumer, I want `/api/search` and tag search to return the same response shape they do
-  today, regardless of storage backend, with no breaking change.
+- As an operator, I want to deploy the registry without FAISS native libraries or a build-time model download, so that images are smaller and builds are simpler and more reliable.
+- As a developer, I want a single search code path (DocumentDB hybrid search), so that the codebase is easier to understand, test, and maintain.
+- As an operator upgrading, I want a clear startup error if I am still on `STORAGE_BACKEND=file`, so that I know to switch to a MongoDB-compatible backend instead of silently losing search.
 
 ### Acceptance Criteria
-- [ ] `grep -ri faiss` over the repository returns no hits in production code, dependencies, config,
-      Terraform, Docker, CLI scripts, or docs (test fixtures that intentionally assert "no faiss" may
-      remain).
-- [ ] `faiss-cpu` is absent from `pyproject.toml` and `uv.lock`; `import faiss` appears nowhere.
-- [ ] `STORAGE_BACKEND=file` still serves `/api/search`, tag search, and `/api/tags` with the same
-      response schema as before.
-- [ ] `STORAGE_BACKEND` set to any MongoDB-compatible value is unchanged (no behavior diff).
-- [ ] Write paths (server register/update/delete/toggle, agent create/update/delete, agent batch)
-      index and remove entities through `get_search_repository()` only; no module imports
-      `registry.search.service`.
-- [ ] `registry/search/service.py` and the `.faiss` / `service_index_metadata.json` artifacts and
-      their config paths are removed.
-- [ ] `uv run pytest tests/` passes with no regressions; the FAISS service test suite is replaced
-      by tests for the new file search repository.
-- [ ] No `.faiss` or `service_index*.json` files are created at runtime by any backend.
+- [ ] `grep -rn "import faiss"` and `grep -rn "faiss_service\|search.service import"` return no matches under `registry/` (the second gate catches the ~22 direct call sites that a bare `import faiss` grep would miss); `grep -ri "faiss"` returns no matches in `pyproject.toml`, `uv.lock`, `docker/`, and `terraform/` (excluding historical release notes, the persisted metric column name if that migration is deferred, and the telemetry collector schema which keeps accepting `faiss` during rollout).
+- [ ] `registry/search/service.py` and `registry/repositories/file/search_repository.py` are deleted; all direct `faiss_service.*` call sites in `server_routes.py`, `agent_routes.py`, and `agent_batch_item_processor.py` are migrated onto `SearchRepositoryBase`.
+- [ ] `faiss-cpu` is removed from `pyproject.toml` and `uv.lock`; `uv sync` succeeds and `uv run python -c "import faiss"` fails with `ModuleNotFoundError`.
+- [ ] The default `docker-compose up` (which ships `mongodb`, once the six env lines are flipped to `mongodb-ce`) starts the registry with working semantic search via DocumentDB hybrid search.
+- [ ] `POST /api/search/semantic` and `GET /api/search/tags` keep identical request/response schemas (and `search_mode: "hybrid"`) on a MongoDB-compatible backend. Result ranking/scores may differ from FAISS (RRF vs multiplicative boost); a search-quality eval (`scripts/evaluate_search.py`) shows no material regression, rather than byte-identical output.
+- [ ] Server/agent registration, toggle, and deletion still update the DocumentDB search index (write-path coverage, not just read).
+- [ ] Selecting `STORAGE_BACKEND=file` boots successfully, logs a prominent warning that semantic search is disabled, and returns empty search results (file storage CRUD still works).
+- [ ] The telemetry `search_backend` field no longer emits `faiss`; the Lambda collector schema continues to accept `faiss` during the rollout window (narrowed only after the fleet is upgraded).
+- [ ] All FAISS-specific tests are deleted; all remaining tests pass (`uv run pytest tests/`) with no regressions.
+- [ ] Documentation describing FAISS as the current search mechanism is rewritten to describe DocumentDB hybrid search; `mkdocs build` succeeds with no broken links.
 
 ### Out of Scope
-- Changing the embeddings provider, model, or dimensions (`EMBEDDINGS_*` settings unchanged).
-- Changing the DocumentDB/MongoDB search algorithm, RRF tuning, or the `/api/search` request and
-  response schemas.
-- Adding a new vector database (e.g. Atlas Vector Search config changes) beyond what already exists.
-- Migrating data: the `file` backend re-indexes from source on startup, so there is no FAISS index
-  to migrate.
-- Removing the `metrics-service` historical `faiss_search_time_ms` column (a stored time-series
-  schema field); this is handled as an optional, separately-gated cleanup in the LLD, not a blocker.
+- Removing the `file` storage backend's non-search repositories (`FileServerRepository`, `FileAgentRepository`, etc.). File-based *storage* remains; only file-based *search* (FAISS) is removed.
+- Changing the DocumentDB hybrid search algorithm, HNSW parameters, or fusion method.
+- Removing the `registry/embeddings/` abstraction (it is backend-neutral and required by DocumentDB search).
+- Renaming the persisted metric column `faiss_search_time_ms` in the metrics-service database schema (a separate, backward-incompatible DB migration; the LLD proposes deprecating rather than renaming it).
 
 ### Dependencies
-- None external. This is an internal refactor that removes one runtime dependency (`faiss-cpu`).
+- Requires a running MongoDB-compatible backend (already shipped in `docker-compose.yml` as the `mongodb` service; provisioned by Terraform for `documentdb`).
 
 ### Related Issues
-- Storage backend allowlist / repository abstraction (referenced in `registry/core/config.py`,
-  issue #955) - this change extends the same repository-pattern consolidation to search.
+- #1285 (reference issue for this task)

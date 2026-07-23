@@ -119,7 +119,9 @@ It exits non-zero and logs the validation error if the file is invalid.
 
 ## The runner config
 
-The dataset says *what* to run; the runner config says *how* to run it. It is a small YAML file ([config/runner.example.yaml](config/runner.example.yaml)) holding the run-time parameters: which endpoint and model to drive, which dataset to run, where artifacts go, and how `claude -p` is invoked. [scripts/runner_config.py](scripts/runner_config.py) parses it into a validated Pydantic `RunnerConfig`.
+The dataset says *what* to run; the runner config says *how* to run it. It is a small YAML file ([config/runner.example.yaml](config/runner.example.yaml)) holding the run-time parameters: which provider, endpoint, and model to drive, which dataset to run, where artifacts go, and how `claude -p` is invoked. [scripts/runner_config.py](scripts/runner_config.py) parses it into a validated Pydantic `RunnerConfig`.
+
+The harness reaches models two ways, selected by the `provider` field: through an OpenAI/Anthropic-compatible **`endpoint`** (a local vLLM server, a gateway, or the Anthropic API -- the default), or directly on **Amazon Bedrock** (`provider: bedrock`). See [How routing works](#how-routing-works) for the details of each path.
 
 Every field can be overridden on the command line, and **CLI flags always win over the file**, so a committed config stays the reusable default while one-off runs stay flexible.
 
@@ -133,7 +135,7 @@ cp config/runner.example.yaml config/runner.yaml
 # then edit config/runner.yaml: set your endpoint (and api_key if needed)
 ```
 
-`config/runner.yaml` is gitignored, so your local endpoint and key never get committed. Keep `config/runner.example.yaml` as the checked-in, documented template; point the harness at your copy with `--config config/runner.yaml`. Leave `settings_file` commented out unless you specifically need the options in the vLLM settings file -- the harness synthesizes routing from `endpoint` and `api_key` on its own (see [How routing to the endpoint works](#how-routing-to-the-endpoint-works)).
+`config/runner.yaml` is gitignored, so your local endpoint and key never get committed. Keep `config/runner.example.yaml` as the checked-in, documented template; point the harness at your copy with `--config config/runner.yaml`. Leave `settings_file` commented out unless you specifically need the options in the vLLM settings file -- the harness synthesizes routing from `endpoint` and `api_key` on its own (see [How routing works](#how-routing-works)).
 
 The two values that change from run to run -- **`model`** and **`dataset`** -- are deliberately left unset in the template. Pass them on the command line so one config file serves every model and dataset instead of maintaining a file per combination:
 
@@ -146,9 +148,11 @@ CLI flags always win, so you can still pin `model`/`dataset` in the file if you 
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `endpoint` | str | -- | Base URL of the OpenAI/Anthropic-compatible endpoint the model is served on. |
-| `model` | str | -- | Model name/id passed to `claude --model`; also the `{model-name}` artifact subfolder. Usually supplied with `--model` rather than pinned in the file; required from one source or the other. |
-| `api_key` | str | `local` | API key sent to the endpoint (local servers ignore the value). |
+| `provider` | str | `endpoint` | How `claude -p` reaches the model: `endpoint` (a base URL) or `bedrock` (native Amazon Bedrock). |
+| `endpoint` | str | -- | Base URL of the OpenAI/Anthropic-compatible endpoint the model is served on. Required for `provider: endpoint`; ignored for `provider: bedrock`. |
+| `model` | str | -- | Model name/id passed to `claude --model`; also the `{model-name}` artifact subfolder. For `provider: bedrock` this is a Bedrock model id or inference profile (e.g. `us.anthropic.claude-opus-4-8`). Usually supplied with `--model` rather than pinned in the file; required from one source or the other. |
+| `api_key` | str | `local` | API key sent to the endpoint (local servers ignore the value). `provider: endpoint` only. |
+| `aws_region` | str | -- | AWS region for `provider: bedrock` (e.g. `us-east-1`). Falls back to `AWS_REGION` / `AWS_DEFAULT_REGION` from the environment when unset. |
 | `dataset` | str | -- | Path to the dataset YAML (relative to `benchmarks/`). Usually supplied with `--dataset` rather than pinned in the file; required from one source or the other. |
 | `output_dir` | str | `swe-benchmark-data` | Directory (under `benchmarks/`) where the `/swe` skill writes artifacts. |
 | `clone_dir` | str | `/tmp` | Parent directory for per-task temporary repo clones. |
@@ -180,18 +184,26 @@ uv run scripts/runner_config.py config/runner.example.yaml \
 
 It runs `claude -p` with `--permission-mode acceptEdits` and a narrow `--allowedTools` allowlist; it never uses `bypassPermissions` or `--dangerously-skip-permissions`.
 
-### How routing to the endpoint works
+### How routing works
 
-The harness always passes `claude --settings`, and this matters: a Claude Code settings object's `env` block takes precedence over process environment variables, including any in your global `~/.claude/settings.json`. If that global file pins `CLAUDE_CODE_USE_BEDROCK=1` (a common setup), then merely exporting `CLAUDE_CODE_USE_BEDROCK=0` before the run is silently overridden, the request goes to Amazon Bedrock instead of your endpoint, and Bedrock rejects the local model id with `400 The provided model identifier is invalid`. Passing `--settings` is what reliably wins over the global file.
+The `provider` field selects how `claude -p` reaches the model. Either way the harness always passes `claude --settings`, and this matters: a Claude Code settings object's `env` block takes precedence over process environment variables, including any in your global `~/.claude/settings.json`. Passing `--settings` is what reliably wins over that global file and pins routing to whatever the config asked for.
 
-The harness sources the settings two ways:
+**`provider: endpoint` (default) -- route through a base URL.** For a local vLLM server, a gateway, or the Anthropic API. If your global `~/.claude/settings.json` pins `CLAUDE_CODE_USE_BEDROCK=1` (a common setup), merely exporting `CLAUDE_CODE_USE_BEDROCK=0` before the run is silently overridden, the request goes to Amazon Bedrock instead of your endpoint, and Bedrock rejects the local model id with `400 The provided model identifier is invalid` -- so the `--settings` override is what keeps the run on your endpoint. The harness sources the settings two ways:
 
 - If the config sets `settings_file`, it passes that file (e.g. the vLLM `self-hosted/vllm/config/claude-code.json`).
 - Otherwise it synthesizes an inline settings object from the config's `endpoint` and `api_key`, pinning `CLAUDE_CODE_USE_BEDROCK=0`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, and an `apiKeyHelper`.
 
-The `apiKeyHelper` is required even against a local server that ignores the key's value: without a token source Claude Code aborts with `Not logged in - Please run /login`. The synthesized settings set it to `echo <api_key>`, so the config's `api_key` field doubles as that token.
+The `apiKeyHelper` is required even against a local server that ignores the key's value: without a token source Claude Code aborts with `Not logged in - Please run /login`. The synthesized settings set it to `echo <api_key>`, so the config's `api_key` field doubles as that token. Because routing is synthesized from `endpoint`/`api_key`, runs work with `settings_file` left unset (commented out) -- keep it set only when you need the extra options in the vLLM settings file.
 
-Because routing is synthesized from `endpoint`/`api_key`, runs work with `settings_file` left unset (commented out) -- keep it set only when you need the extra options in the vLLM settings file.
+**`provider: bedrock` -- drive models directly on Amazon Bedrock.** The harness flips `CLAUDE_CODE_USE_BEDROCK=1`, sets `AWS_REGION` from `aws_region` (falling back to `AWS_REGION` / `AWS_DEFAULT_REGION` in the environment), and clears any stray `ANTHROPIC_BASE_URL` so nothing redirects the client off Bedrock. Authentication uses your **ambient AWS credentials** (the standard `boto3`/AWS CLI chain: environment variables, `~/.aws/credentials`, an SSO session, or an instance/role profile), so no `api_key` or `apiKeyHelper` is set. `model` is a Bedrock model id or inference profile, e.g. `us.anthropic.claude-opus-4-8`. Because Bedrock exposes no Prometheus `/metrics` surface, the `vllm_prometheus` block is **omitted entirely** from `metrics.json` (and the vLLM-only `prefix_cache_hit_rate` drops out of `metrics_that_matter`) rather than written as a permanently-unavailable stub -- so a Bedrock run is limited to what `claude -p` itself reports. The per-run API metrics (tokens, latency, turns, cost) are captured exactly as with the endpoint path, and against Bedrock the cache-token fields are populated straight from the model API.
+
+```bash
+cd benchmarks
+uv run scripts/run-swe-headless.py --config config/runner.yaml \
+    --provider bedrock --aws-region us-east-1 \
+    --model us.anthropic.claude-opus-4-8 \
+    --dataset dataset/mcp-gateway-registry.yaml
+```
 
 When `claude -p` returns an error, the harness records the error message and `api_error_status` in `metrics.json` and logs them, so a failed run is diagnosable without re-running it by hand.
 
@@ -246,7 +258,7 @@ cd benchmarks
 ./scripts/run-swe-benchmark.sh --dataset dataset/hello-world.yaml --dry-run
 ```
 
-Before running against a live endpoint, make sure the model is served and reachable at the config's `endpoint` (for the vLLM path, see [self-hosted/vllm/README.md](../self-hosted/vllm/README.md)).
+Before running against a live endpoint, make sure the model is served and reachable at the config's `endpoint` (for the vLLM path, see [self-hosted/vllm/README.md](../self-hosted/vllm/README.md)). For `provider: bedrock`, make sure your AWS credentials are configured for the target region and that the requested model id is enabled in Amazon Bedrock.
 
 ### The metrics file
 
@@ -264,7 +276,9 @@ Alongside the four artifacts, each run writes a `metrics.json` capturing what th
     "hello-world"
   ],
   "model": "qwen3.6-35b",
+  "provider": "endpoint",
   "endpoint": "http://127.0.0.1:8000",
+  "aws_region": null,
   "artifacts_produced": 4,
   "artifacts_expected": 4,
   "generation_tokens_per_sec": 124.0,
@@ -333,11 +347,11 @@ Alongside the four artifacts, each run writes a `metrics.json` capturing what th
 
 (The `counters`, `histograms`, `gauges`, and the `metrics_that_matter.sources` map above are abbreviated -- the harness records **every** `vllm:` family and a source for every headline metric, not just these.)
 
-**Start with `metrics_that_matter`.** This is a curated headline block that answers "how did this run perform?" without the reader having to know which source owns each number. For every metric it picks the best available source and records that choice in a parallel `sources` map: token counts and turns come from the model API when it reports them, cache-token counts fall back to vLLM's server-side counters when the API is silent (as vLLM's Anthropic route is), and `prefix_cache_hit_rate` is the rate the harness derives from vLLM's counters. `generation_tokens_per_sec` is `output_tokens / latency_seconds`. KV-cache utilization is **intentionally excluded** from this block: on a serial, single-tenant benchmark it barely varies (it tracks one request's working set as a fraction of the pool, not anything the benchmark controls), so it cannot discriminate between runs; the sampled peak/mean still lives in `vllm_prometheus.gauges_sampled` as capacity telemetry, and it becomes a headline concern only under concurrent load. Every value sourced from `vllm_prometheus` inherits that block's single-tenant caveat (below).
+**Start with `metrics_that_matter`.** This is a curated headline block that answers "how did this run perform?" without the reader having to know which source owns each number. For every metric it picks the best available source and records that choice in a parallel `sources` map: token counts and turns come from the model API when it reports them, cache-token counts fall back to vLLM's server-side counters when the API is silent (as vLLM's Anthropic route is), and `prefix_cache_hit_rate` is the rate the harness derives from vLLM's counters. `generation_tokens_per_sec` is `output_tokens / latency_seconds`. KV-cache utilization is **intentionally excluded** from this block: on a serial, single-tenant benchmark it barely varies (it tracks one request's working set as a fraction of the pool, not anything the benchmark controls), so it cannot discriminate between runs; the sampled peak/mean still lives in `vllm_prometheus.gauges_sampled` as capacity telemetry, and it becomes a headline concern only under concurrent load. Every value sourced from `vllm_prometheus` inherits that block's single-tenant caveat (below). Under `provider: bedrock` there is no vLLM server, so the vLLM fallbacks and `prefix_cache_hit_rate` are dropped and this block reports only what the model API returned (cache-token counts included, since Bedrock reports them per request).
 
 The remaining top-level fields report **only what the model API returned** for the run. That is deliberate: `cache_read_tokens` and `cache_creation_tokens` are omitted entirely rather than reported as `0`, because vLLM's Anthropic-compatible `/v1/messages` usage does not emit per-request cache-token fields. A `0` there would read as "no caching happened," which is misleading -- prefix caching is in fact active on the server. Reporting only the fields the API actually returns keeps the top-level record honest.
 
-Everything vLLM exposes is instead reported in the nested `vllm_prometheus` block, scraped from the server's Prometheus `/metrics` endpoint. This block **deliberately duplicates** some top-level numbers (e.g. token counts) -- because it is namespaced under `vllm_prometheus` and every key keeps its full `vllm:` metric name, there is never any ambiguity about where a number came from: the top level is the model API's per-request accounting, this block is vLLM's server-side view. Rather than curate a subset, the harness scrapes the entire `vllm:` surface, so nothing is omitted and new vLLM metrics appear automatically. When the endpoint exposes no `vllm:` metrics (e.g. a non-vLLM backend), `available` is `false` and the groups are empty.
+Everything vLLM exposes is instead reported in the nested `vllm_prometheus` block, scraped from the server's Prometheus `/metrics` endpoint. This block **deliberately duplicates** some top-level numbers (e.g. token counts) -- because it is namespaced under `vllm_prometheus` and every key keeps its full `vllm:` metric name, there is never any ambiguity about where a number came from: the top level is the model API's per-request accounting, this block is vLLM's server-side view. Rather than curate a subset, the harness scrapes the entire `vllm:` surface, so nothing is omitted and new vLLM metrics appear automatically. When an endpoint exposes no `vllm:` metrics (e.g. a non-vLLM backend behind `provider: endpoint`), `available` is `false` and the groups are empty. Under `provider: bedrock` there is no server to scrape at all, so the whole `vllm_prometheus` block is **omitted** from the record (and `prefix_cache_hit_rate` drops out of `metrics_that_matter`) rather than written as an empty stub.
 
 The block is organized by Prometheus metric type, plus a small derived summary:
 
@@ -353,7 +367,7 @@ A metric present in neither snapshot is reported as `null` (distinct from `0`, w
 
 > **Single-tenant assumption -- read this before trusting these numbers.** The vLLM Prometheus metrics are **server-wide and cumulative**; they carry no per-request or per-session label. The `vllm_prometheus` block is a window delta of those metrics, so every counter and histogram equals *this run's* activity **only if the run was the sole traffic on the endpoint while it executed**. If any other request hit the same vLLM server during the run -- another benchmark task, a concurrent client, a health probe -- its tokens, latencies, and hits are folded into these numbers and the block over-counts. Gauges are worse still: they reflect whatever the server is doing at the instant of the scrape, not the run. Run benchmarks against a dedicated, otherwise-idle endpoint when these numbers matter. The `note` field in every block restates this caveat inline.
 
-Because the file records the task, model, and endpoint next to the token, latency, throughput, and turn-count numbers, the same task can be run against many models and the resulting `metrics.json` files compared side by side -- so you can see how each model differs in cost, speed, and how many turns it took to produce the artifacts. On a failed run the file also carries an `error` string and `api_error_status`, so a failure is diagnosable without re-running the task.
+Because the file records the task, model, and provider (endpoint or Amazon Bedrock) next to the token, latency, throughput, and turn-count numbers, the same task can be run against many models and the resulting `metrics.json` files compared side by side -- so you can see how each model differs in cost, speed, and how many turns it took to produce the artifacts. On a failed run the file also carries an `error` string and `api_error_status`, so a failure is diagnosable without re-running the task.
 
 These metrics measure the *cost* of a run, not the *quality* of what it produced. The judge (next section) scores the four artifacts and adds those results to this same `metrics.json` under an `evaluation` key, so a single file holds both what a run cost and how good its output was -- the basis for ranking models on the benchmark.
 
