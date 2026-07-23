@@ -23,6 +23,21 @@ benchmarks/
   - [docs/path-anthropic-on-bedrock.md](docs/path-anthropic-on-bedrock.md) -- Path 1: Anthropic models directly on Amazon Bedrock.
   - [docs/path-open-weight-on-bedrock-litellm.md](docs/path-open-weight-on-bedrock-litellm.md) -- Path 2: open-weight models on Amazon Bedrock via a LiteLLM proxy.
   - [docs/path-self-hosted-vllm.md](docs/path-self-hosted-vllm.md) -- Path 3: self-hosted open-weight models on EC2 with vLLM.
+- **[docs/end-to-end-self-hosted-run.md](docs/end-to-end-self-hosted-run.md)** -- a full run-book that ties Path 3 together end to end: pre-flight checks, serve the model, capture GPU metrics into DuckDB, run the benchmark, and score with the judge.
+
+## One-command end-to-end run
+
+[scripts/run-e2e-benchmark.sh](scripts/run-e2e-benchmark.sh) wraps the whole flow -- pre-flight and error checks (including clearing stale artifact folders that would stall the headless run), the benchmark harness over a dataset, and the codex judge -- behind three inputs, failing loudly at the first problem and printing the tail/status command for each step. It does not start the vLLM server or the LiteLLM proxy; bring those up first (they are long-lived services).
+
+```bash
+cd benchmarks
+# provider is one of: bedrock | litellm | vllm
+./scripts/run-e2e-benchmark.sh --provider vllm --model qwen3-coder-30b \
+    --dataset dataset/mcp-gateway-registry.yaml --yes
+./scripts/run-e2e-benchmark.sh --help
+```
+
+The **`/benchmark` skill** drives this same script interactively -- run it from Claude Code when you want to be prompted for the provider, model, and dataset and walked through each step.
 
 ## Quick start
 
