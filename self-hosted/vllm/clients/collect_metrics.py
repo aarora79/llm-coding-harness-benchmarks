@@ -215,7 +215,7 @@ def store_scrape(
                 len(samples),
             ],
         ).fetchone()
-        assert scrape_id is not None
+        assert scrape_id is not None  # nosec B101 - INSERT ... RETURNING always yields a row
         scrape_id_value = int(scrape_id[0])
         if samples:
             connection.execute(

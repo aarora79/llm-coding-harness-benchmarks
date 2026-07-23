@@ -57,8 +57,8 @@ _GAUGE_METRICS = {
 
 # Histogram base names rendered as per-interval mean latency (delta sum / delta count).
 _LATENCY_METRICS = {
-    "vllm:time_to_first_token_seconds": "Time to first token",
-    "vllm:inter_token_latency_seconds": "Inter-token latency (TPOT)",
+    "vllm:time_to_first_token_seconds": "Time to first token",  # nosec B105 - chart label, not a secret
+    "vllm:inter_token_latency_seconds": "Inter-token latency (TPOT)",  # nosec B105 - chart label, not a secret
     "vllm:request_queue_time_seconds": "Queue time",
     "vllm:e2e_request_latency_seconds": "End-to-end latency",
 }
