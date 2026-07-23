@@ -27,17 +27,22 @@ benchmarks/
 
 ## One-command end-to-end run
 
-[scripts/run-e2e-benchmark.sh](scripts/run-e2e-benchmark.sh) wraps the whole flow -- pre-flight and error checks (including clearing stale artifact folders that would stall the headless run), the benchmark harness over a dataset, and the codex judge -- behind three inputs, failing loudly at the first problem and printing the tail/status command for each step. It does not start the vLLM server or the LiteLLM proxy; bring those up first (they are long-lived services).
+The whole flow -- pre-flight and error checks (including clearing stale artifact folders that would stall the headless run), the benchmark harness over a dataset, and the codex judge -- runs behind three inputs: `provider` (`bedrock` | `litellm` | `vllm`), `model`, and `dataset`.
+
+**Recommended: the `/benchmark` skill.** Run it from Claude Code to drive the run interactively -- it prompts for the three inputs and walks each step, printing the tail/status command to watch. For the **vllm** path it also manages the backing service: it checks the HuggingFace token, (re)starts the vLLM server on the requested model (stopping any other model first) using that model's guide at its largest context window, starts the DuckDB metrics collector, and at the end stops the collector and archives its snapshot tagged with model/scope/timestamp.
+
+```
+/benchmark provider=vllm model=qwen3.6-35b dataset=dataset/mcp-gateway-registry.yaml
+```
+
+**Headless: [scripts/run-e2e-benchmark.sh](scripts/run-e2e-benchmark.sh).** The same flow as a script, failing loudly at the first problem. It does *not* start the vLLM server or the LiteLLM proxy -- bring those up first (they are long-lived services).
 
 ```bash
 cd benchmarks
-# provider is one of: bedrock | litellm | vllm
 ./scripts/run-e2e-benchmark.sh --provider vllm --model qwen3-coder-30b \
     --dataset dataset/mcp-gateway-registry.yaml --yes
 ./scripts/run-e2e-benchmark.sh --help
 ```
-
-The **`/benchmark` skill** drives this same script interactively -- run it from Claude Code when you want to be prompted for the provider, model, and dataset and walked through each step.
 
 ## Quick start
 

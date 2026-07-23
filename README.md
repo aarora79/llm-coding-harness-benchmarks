@@ -179,14 +179,22 @@ All cells are percentages (0-100%), averaged across the 4 artifacts per (task x 
    cp config/runner.example.yaml config/runner.yaml
    ```
 
-2. **Pick a path and follow its guide** -- each ends with a copy-pasteable run command:
+2. **Run a benchmark.** The fastest way is the **`/benchmark` skill** from Claude Code, which drives the whole flow interactively -- pre-flight checks, the harness run over a dataset, and the judge -- for any of the three paths. It even manages the vLLM server and metrics collector for the self-hosted path:
+
+   ```
+   /benchmark provider=vllm model=qwen3.6-35b dataset=dataset/mcp-gateway-registry.yaml
+   ```
+
+   Prefer a script? The same flow runs headless via [benchmarks/scripts/run-e2e-benchmark.sh](benchmarks/scripts/run-e2e-benchmark.sh) (`--provider bedrock|litellm|vllm --model ... --dataset ...`).
+
+3. **Pick a path and follow its guide** for the setup details each one needs -- every guide ends with a copy-pasteable run command:
    - [Path 1 - Anthropic models directly on Amazon Bedrock](benchmarks/docs/path-anthropic-on-bedrock.md)
    - [Path 2 - open-weight models on Amazon Bedrock via a LiteLLM proxy](benchmarks/docs/path-open-weight-on-bedrock-litellm.md)
    - [Path 3 - self-hosted open-weight models on EC2 with vLLM](benchmarks/docs/path-self-hosted-vllm.md)
 
-3. **Read the shared mechanics** once (they apply to every path): the [harness reference](benchmarks/docs/harness-reference.md) covers the dataset format, the runner config, running the benchmark, the metrics file, and the judge.
+4. **Read the shared mechanics** once (they apply to every path): the [harness reference](benchmarks/docs/harness-reference.md) covers the dataset format, the runner config, running the benchmark, the metrics file, and the judge.
 
-For Path 3 you must first stand up the vLLM server itself -- see [self-hosted/vllm/README.md](self-hosted/vllm/README.md).
+For Path 3 you must first stand up the vLLM server itself -- see [self-hosted/vllm/README.md](self-hosted/vllm/README.md) (or let the `/benchmark` skill start it for you).
 
 ## Repository structure
 
@@ -202,6 +210,7 @@ claude-code-multi-model/
 ├── .github/                   Issue and pull-request templates
 ├── .claude/                   ← Claude Code skills shipped with the repo
 │   └── skills/
+│       ├── benchmark/         /benchmark — run one end-to-end benchmark (service + harness + judge)
 │       ├── swe/               /swe — drive a model through a SWE task on any repo
 │       ├── security-check/    /security-check — Cipher security review + fix before any commit
 │       └── vllm-setup/        /vllm-setup — stand up the EC2 vLLM server (Path 3)
