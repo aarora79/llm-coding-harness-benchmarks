@@ -143,11 +143,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Check or clear the artifact folders a benchmark run would write to.",
     )
-    parser.add_argument("--dataset", required=True, help="Dataset YAML path (relative to benchmarks/).")
-    parser.add_argument("--model", required=True, help="Model id (the full id passed to the harness).")
+    parser.add_argument(
+        "--dataset", required=True, help="Dataset YAML path (relative to benchmarks/)."
+    )
+    parser.add_argument(
+        "--model", required=True, help="Model id (the full id passed to the harness)."
+    )
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--check", action="store_true", help="Report existing folders (exit 2 if any).")
-    group.add_argument("--clear", action="store_true", help="Remove existing artifact folders.")
+    group.add_argument(
+        "--check", action="store_true", help="Report existing folders (exit 2 if any)."
+    )
+    group.add_argument(
+        "--clear", action="store_true", help="Remove existing artifact folders."
+    )
     args = parser.parse_args()
 
     try:

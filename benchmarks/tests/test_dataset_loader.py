@@ -93,13 +93,16 @@ class LoadDatasetTest(unittest.TestCase):
         self.assertTrue(task.problem_issue_url)
 
     def test_duplicate_task_id_raises(self) -> None:
-        text = _MINIMAL + """\
+        text = (
+            _MINIMAL
+            + """\
   - id: only-task
     repo: https://github.com/example/repo
     complexity: high
     tags: [dupe]
     problem_statement: duplicate id
 """
+        )
         with self.assertRaisesRegex(DatasetError, "duplicate task id"):
             load_dataset(_write(text))
 

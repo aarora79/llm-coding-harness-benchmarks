@@ -59,9 +59,7 @@ class RepoNameTest(unittest.TestCase):
         )
 
     def test_strips_git_suffix_and_trailing_slash(self) -> None:
-        self.assertEqual(
-            harness._repo_name("https://github.com/foo/bar.git/"), "bar"
-        )
+        self.assertEqual(harness._repo_name("https://github.com/foo/bar.git/"), "bar")
 
 
 class BuildPromptTest(unittest.TestCase):
@@ -122,12 +120,15 @@ class MetricsFromResultTest(unittest.TestCase):
 class ArtifactDirTest(unittest.TestCase):
     def test_path_follows_skill_convention(self) -> None:
         path = harness._artifact_dir(_config(output_dir="swe-benchmark-data"), _task())
-        self.assertEqual(path.parts[-4:], (
-            "swe-benchmark-data",
-            "mcp-gateway-registry",
-            "remove-faiss",
-            "qwen3.6-35b",
-        ))
+        self.assertEqual(
+            path.parts[-4:],
+            (
+                "swe-benchmark-data",
+                "mcp-gateway-registry",
+                "remove-faiss",
+                "qwen3.6-35b",
+            ),
+        )
 
 
 class BuildClaudeCmdTest(unittest.TestCase):
@@ -330,7 +331,9 @@ class FormatStreamEventTest(unittest.TestCase):
                 ]
             },
         }
-        self.assertEqual(harness._format_stream_event(event), "[tool_result:error] boom")
+        self.assertEqual(
+            harness._format_stream_event(event), "[tool_result:error] boom"
+        )
 
     def test_empty_tool_result_still_shows_marker(self) -> None:
         event = {
@@ -492,9 +495,7 @@ class SummaryMetricsTest(unittest.TestCase):
             "latency_seconds": 49.7,
             "num_turns": 14,
         }
-        s = harness._summary_metrics(
-            metrics, harness._vllm_metrics(None, None), 128.2
-        )
+        s = harness._summary_metrics(metrics, harness._vllm_metrics(None, None), 128.2)
         self.assertEqual(s["input_tokens"], 245870)
         self.assertEqual(s["output_tokens"], 6370)
         self.assertEqual(s["latency_seconds"], 49.7)
@@ -518,18 +519,14 @@ class SummaryMetricsTest(unittest.TestCase):
                 }
             ),
         )
-        s = harness._summary_metrics(
-            {"input_tokens": 1, "output_tokens": 1}, vllm, 0.0
-        )
+        s = harness._summary_metrics({"input_tokens": 1, "output_tokens": 1}, vllm, 0.0)
         self.assertEqual(s["cache_read_tokens"], 208032)
         self.assertEqual(s["cache_write_tokens"], 246414 - 208032)
         self.assertIn("vllm_prometheus", s["sources"]["cache_read_tokens"])
 
     def test_prefers_api_cache_tokens_when_present(self) -> None:
         metrics = {"cache_read_tokens": 999, "cache_creation_tokens": 111}
-        s = harness._summary_metrics(
-            metrics, harness._vllm_metrics(None, None), 0.0
-        )
+        s = harness._summary_metrics(metrics, harness._vllm_metrics(None, None), 0.0)
         self.assertEqual(s["cache_read_tokens"], 999)
         self.assertEqual(s["cache_write_tokens"], 111)
         self.assertIn("claude_api", s["sources"]["cache_read_tokens"])

@@ -83,9 +83,7 @@ class LoadRunnerConfigTest(unittest.TestCase):
         self.assertEqual(config.tasks, ["a", "b"])
 
     def test_none_overrides_are_ignored(self) -> None:
-        config = load_runner_config(
-            _write(_MINIMAL), {"model": None, "endpoint": None}
-        )
+        config = load_runner_config(_write(_MINIMAL), {"model": None, "endpoint": None})
         self.assertEqual(config.model, "test-model")
 
     def test_missing_file_raises(self) -> None:
@@ -143,7 +141,11 @@ class BedrockProviderTest(unittest.TestCase):
 
     def test_bedrock_without_region_fails(self) -> None:
         text = "provider: bedrock\nmodel: m\ndataset: d.yaml\n"
-        env = {k: v for k, v in os.environ.items() if k not in ("AWS_REGION", "AWS_DEFAULT_REGION")}
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("AWS_REGION", "AWS_DEFAULT_REGION")
+        }
         with mock.patch.dict(os.environ, env, clear=True):
             with self.assertRaisesRegex(RunnerConfigError, "requires an AWS region"):
                 load_runner_config(_write(text))
@@ -198,8 +200,11 @@ class ModelSlugTest(unittest.TestCase):
     def test_config_model_slug_property(self) -> None:
         config = load_runner_config(
             _write(_MINIMAL),
-            {"provider": "bedrock", "aws_region": "us-east-1",
-             "model": "us.anthropic.claude-opus-4-8"},
+            {
+                "provider": "bedrock",
+                "aws_region": "us-east-1",
+                "model": "us.anthropic.claude-opus-4-8",
+            },
         )
         self.assertEqual(config.model, "us.anthropic.claude-opus-4-8")
         self.assertEqual(config.model_slug, "claude-opus-4-8")

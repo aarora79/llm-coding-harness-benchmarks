@@ -158,7 +158,9 @@ class RunnerConfig(BaseModel):
 
     # How claude -p is invoked.
     permission_mode: str = Field(default=DEFAULT_PERMISSION_MODE)
-    allowed_tools: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_TOOLS))
+    allowed_tools: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_ALLOWED_TOOLS)
+    )
     max_turns: int = Field(default=DEFAULT_MAX_TURNS, ge=1)
     max_output_tokens: int = Field(default=DEFAULT_MAX_OUTPUT_TOKENS, ge=1)
     timeout_seconds: int = Field(default=DEFAULT_TIMEOUT_SECONDS, ge=1)
