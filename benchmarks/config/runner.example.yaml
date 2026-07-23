@@ -116,8 +116,19 @@ allowed_tools:
   - Grep
   - Write
   - Edit
-  - Bash(git clone*)
-  - Bash(git -C*)
+  # Git and read-only shell for exploring the cloned repo. Claude models use
+  # `git -C <dir>`; other models (e.g. Kimi) emit `cd <dir> && git ...` or plain
+  # ls/cat/find, so we allow those forms too -- applied to every model equally
+  # so the benchmark environment stays identical. Kept read-only: no mutation
+  # of the target repo beyond the four artifacts written via Write/Edit.
+  - Bash(git*)
+  - Bash(cd*)
+  - Bash(ls*)
+  - Bash(cat*)
+  - Bash(find*)
+  - Bash(head*)
+  - Bash(tail*)
+  - Bash(wc*)
   - Bash(mktemp*)
   - Task
 max_turns: 60

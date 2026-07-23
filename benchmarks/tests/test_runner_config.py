@@ -12,7 +12,11 @@ from unittest import mock
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from runner_config import RunnerConfigError, load_runner_config  # noqa: E402
+from runner_config import (  # noqa: E402
+    RunnerConfigError,
+    load_runner_config,
+    model_to_slug,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _SHIPPED_CONFIG = _REPO_ROOT / "benchmarks" / "config" / "runner.example.yaml"
@@ -161,6 +165,44 @@ class BedrockProviderTest(unittest.TestCase):
         )
         self.assertTrue(config.is_bedrock)
         self.assertEqual(config.resolved_region(), "us-west-2")
+
+
+class ModelSlugTest(unittest.TestCase):
+    def test_bedrock_prefix_and_suffix_stripped(self) -> None:
+        self.assertEqual(
+            model_to_slug("us.anthropic.claude-opus-4-8[1m]"), "claude-opus-4-8"
+        )
+
+    def test_bedrock_prefix_stripped_without_suffix(self) -> None:
+        self.assertEqual(
+            model_to_slug("us.anthropic.claude-opus-4-8"), "claude-opus-4-8"
+        )
+
+    def test_other_region_and_vendor_prefix_stripped(self) -> None:
+        self.assertEqual(model_to_slug("eu.meta.llama3-70b"), "llama3-70b")
+
+    def test_mantle_prefix_preserved(self) -> None:
+        # Mantle names use a single vendor token (no 2-letter region), so the
+        # inference-profile regex must not touch them.
+        self.assertEqual(
+            model_to_slug("moonshotai.kimi-k2-thinking"),
+            "moonshotai.kimi-k2-thinking",
+        )
+
+    def test_version_dot_preserved(self) -> None:
+        self.assertEqual(model_to_slug("glm-5.2"), "glm-5.2")
+
+    def test_plain_name_unchanged(self) -> None:
+        self.assertEqual(model_to_slug("qwen3-coder-30b"), "qwen3-coder-30b")
+
+    def test_config_model_slug_property(self) -> None:
+        config = load_runner_config(
+            _write(_MINIMAL),
+            {"provider": "bedrock", "aws_region": "us-east-1",
+             "model": "us.anthropic.claude-opus-4-8"},
+        )
+        self.assertEqual(config.model, "us.anthropic.claude-opus-4-8")
+        self.assertEqual(config.model_slug, "claude-opus-4-8")
 
 
 if __name__ == "__main__":

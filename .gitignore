@@ -45,3 +45,7 @@ security-review-findings.xlsx
 tmp/
 .claude/worktrees/
 benchmarks/config/runner.yaml
+# Proxy runtime artifacts (bearer token, pid, log) written by bedrock-mantle-proxy.sh
+benchmarks/.mantle-token
+benchmarks/.litellm.pid
+benchmarks/.litellm.log

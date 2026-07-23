@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,34 @@ PROVIDER_ENDPOINT = "endpoint"
 PROVIDER_BEDROCK = "bedrock"
 VALID_PROVIDERS = {PROVIDER_ENDPOINT, PROVIDER_BEDROCK}
 DEFAULT_PROVIDER = PROVIDER_ENDPOINT
+
+# Amazon Bedrock model ids carry a region/vendor inference-profile prefix
+# (e.g. "us.anthropic.claude-opus-4-8") and may carry a bracketed context-window
+# suffix (e.g. "[1m]"). The /swe skill strips both to name its artifact folder,
+# so the harness must derive the same slug to find the artifacts the skill wrote.
+# Matches a leading "<region>.<vendor>." such as "us.anthropic." or "eu.meta.".
+_BEDROCK_PREFIX_RE = re.compile(r"^[a-z]{2}\.[a-z0-9-]+\.")
+# Matches a trailing bracketed suffix such as "[1m]".
+_MODEL_SUFFIX_RE = re.compile(r"\[[^\]]*\]$")
+
+
+def model_to_slug(model: str) -> str:
+    """Normalize a model id to the folder slug the /swe skill uses.
+
+    Mirrors the skill's rule (SKILL.md): strip a Bedrock inference-profile
+    prefix like ``us.anthropic.`` and a bracketed context-window suffix like
+    ``[1m]``. Nothing else is altered -- dots inside a version (e.g. ``glm-5.2``)
+    and existing kebab-case are preserved, matching the on-disk folder names.
+
+    Args:
+        model: The raw model id (e.g. ``us.anthropic.claude-opus-4-8[1m]``).
+
+    Returns:
+        The artifact-folder slug (e.g. ``claude-opus-4-8``).
+    """
+    slug = _MODEL_SUFFIX_RE.sub("", model)
+    slug = _BEDROCK_PREFIX_RE.sub("", slug)
+    return slug
 
 
 class RunnerConfigError(Exception):
@@ -142,6 +171,22 @@ class RunnerConfig(BaseModel):
     def is_bedrock(self) -> bool:
         """True when claude -p should route natively to Amazon Bedrock."""
         return self.provider == PROVIDER_BEDROCK
+
+    @property
+    def model_slug(self) -> str:
+        """The artifact-folder name for this model.
+
+        ``model`` is the full id passed to ``claude --model`` (for Bedrock, an
+        inference profile such as ``us.anthropic.claude-opus-4-8``). The /swe
+        skill strips the vendor/region prefix and any ``[...]`` suffix to name
+        its output folder, so the harness derives the same slug -- otherwise it
+        looks for artifacts in a folder the skill never wrote to. See
+        ``model_to_slug``.
+
+        Returns:
+            The normalized folder slug (e.g. ``claude-opus-4-8``).
+        """
+        return model_to_slug(self.model) if self.model else ""
 
     def resolved_region(self) -> str | None:
         """Return the AWS region for Bedrock, falling back to the environment.

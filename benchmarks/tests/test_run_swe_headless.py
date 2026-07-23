@@ -293,6 +293,34 @@ class FormatStreamEventTest(unittest.TestCase):
         self.assertIn("+50 chars", line)
         self.assertLess(len(line), len(big))
 
+    def test_verbose_shows_full_tool_result(self) -> None:
+        big = "x" * (harness.TOOL_RESULT_PREVIEW_CHARS + 50)
+        event = {
+            "type": "user",
+            "message": {"content": [{"type": "tool_result", "content": big}]},
+        }
+        line = harness._format_stream_event(event, verbose=True) or ""
+        self.assertIn(big, line)
+        self.assertNotIn("chars)", line)
+
+    def test_verbose_shows_full_assistant_text(self) -> None:
+        big = "y" * 500
+        event = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": big}]},
+        }
+        line = harness._format_stream_event(event, verbose=True) or ""
+        self.assertIn(big, line)
+
+    def test_non_verbose_truncates_assistant_text(self) -> None:
+        big = "y" * 500
+        event = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": big}]},
+        }
+        line = harness._format_stream_event(event) or ""
+        self.assertIn("+300 chars", line)
+
     def test_tool_result_error_marker(self) -> None:
         event = {
             "type": "user",

@@ -355,6 +355,12 @@ def _metrics_from_result(result: dict[str, Any], elapsed: float) -> dict[str, An
         metrics["cache_read_tokens"] = usage["cache_read_input_tokens"]
     if "cache_creation_input_tokens" in usage:
         metrics["cache_creation_tokens"] = usage["cache_creation_input_tokens"]
+    # Streaming-only: peak running estimate of extended-thinking tokens for
+    # reasoning models. output_tokens already includes these; this records the
+    # thinking portion the model streamed as system/thinking_tokens events.
+    thinking = result.get("_thinking_tokens_estimate")
+    if thinking:
+        metrics["thinking_tokens_estimate"] = thinking
     # Capture the error message so failures are diagnosable from metrics.json
     # without re-running the task by hand.
     if is_error:
@@ -785,18 +791,43 @@ def _tool_result_text(content: Any) -> str:
     return ""
 
 
-def _format_stream_event(event: dict[str, Any]) -> str | None:
-    """Render one stream-json event as a short human-readable trace line.
+def _truncate(text: str, limit: int, verbose: bool) -> str:
+    """Return text as-is when verbose, else truncated to limit with a marker.
+
+    Args:
+        text: The text to (maybe) truncate.
+        limit: Max characters to keep when not verbose.
+        verbose: When True, never truncate.
+
+    Returns:
+        The full text (verbose) or a truncated preview with a "+N chars" tail.
+    """
+    if verbose or len(text) <= limit:
+        return text
+    return f"{text[:limit]}... (+{len(text) - limit} chars)"
+
+
+def _format_stream_event(event: dict[str, Any], verbose: bool = False) -> str | None:
+    """Render one stream-json event as a human-readable trace line.
 
     Args:
         event: A single parsed event object from `--output-format stream-json`.
+        verbose: When True, print assistant text and tool results in full
+            instead of truncating them (thinking is always shown in full).
 
     Returns:
-        A one-line summary to print, or None for events not worth showing.
+        A summary to print, or None for events not worth showing.
     """
     etype = event.get("type")
     if etype == "system":
-        return f"[system] {event.get('subtype', '')}".rstrip()
+        subtype = event.get("subtype", "")
+        # Reasoning models (e.g. Kimi K2 Thinking) stream a running estimate of
+        # extended-thinking tokens as system/thinking_tokens events. Surface the
+        # count instead of a bare, repeated subtype line.
+        if subtype == "thinking_tokens":
+            est = event.get("estimated_tokens")
+            return f"[system] thinking ~{est:,} tokens" if est is not None else None
+        return f"[system] {subtype}".rstrip()
     if etype == "result":
         return None  # The caller logs the final result separately.
     if etype not in ("assistant", "user"):
@@ -806,23 +837,29 @@ def _format_stream_event(event: dict[str, Any]) -> str | None:
     for block in blocks:
         btype = block.get("type")
         if btype == "text" and block.get("text", "").strip():
-            parts.append(f"[{etype}] {block['text'].strip()[:200]}")
+            parts.append(f"[{etype}] {_truncate(block['text'].strip(), 200, verbose)}")
         elif btype == "thinking" and block.get("thinking", "").strip():
-            parts.append(f"[{etype}:thinking] {block['thinking'].strip()[:160]}")
+            # Print the full reasoning trace, not a preview: for reasoning models
+            # the thinking is the interesting signal, and truncating it hides why
+            # a run stalled or how it reached a decision.
+            parts.append(f"[{etype}:thinking] {block['thinking'].strip()}")
         elif btype == "tool_use":
-            parts.append(f"[tool] {block.get('name', '?')}")
+            # In verbose mode also show the tool's input arguments, so a blocked
+            # or surprising command is fully visible in the trace.
+            line = f"[tool] {block.get('name', '?')}"
+            if verbose and block.get("input"):
+                line += f" {json.dumps(block['input'], default=str)}"
+            parts.append(line)
         elif btype == "tool_result":
             text = _tool_result_text(block.get("content"))
-            preview = text[:TOOL_RESULT_PREVIEW_CHARS]
-            if len(text) > TOOL_RESULT_PREVIEW_CHARS:
-                preview += f"... (+{len(text) - TOOL_RESULT_PREVIEW_CHARS} chars)"
+            preview = _truncate(text, TOOL_RESULT_PREVIEW_CHARS, verbose)
             marker = "[tool_result:error]" if block.get("is_error") else "[tool_result]"
             parts.append(f"{marker} {preview}" if preview else marker)
     return "\n".join(parts) if parts else None
 
 
 def _run_claude_streaming(
-    cmd: list[str], env: dict[str, str], timeout: int
+    cmd: list[str], env: dict[str, str], timeout: int, verbose: bool = False
 ) -> dict[str, Any]:
     """Run `claude -p` in streaming mode, printing a live trace.
 
@@ -834,6 +871,8 @@ def _run_claude_streaming(
         cmd: The command argument vector (must include stream-json/--verbose).
         env: Environment for the subprocess.
         timeout: Wall-clock timeout in seconds.
+        verbose: When True, print assistant text and tool results in full
+            instead of truncating them in the live trace.
 
     Returns:
         The parsed final result event.
@@ -851,6 +890,7 @@ def _run_claude_streaming(
         bufsize=1,
     )
     final: dict[str, Any] | None = None
+    thinking_tokens = 0
     if proc.stdout is None:  # pragma: no cover - stdout is always a pipe here
         raise RuntimeError("claude -p produced no stdout stream")
     try:
@@ -868,7 +908,14 @@ def _run_claude_streaming(
             if event.get("type") == "result":
                 final = event
             else:
-                trace = _format_stream_event(event)
+                # Track the peak running estimate of extended-thinking tokens
+                # emitted by reasoning models; the result event does not report
+                # it separately, so we carry it over from the stream.
+                if event.get("subtype") == "thinking_tokens":
+                    est = event.get("estimated_tokens")
+                    if isinstance(est, int):
+                        thinking_tokens = max(thinking_tokens, est)
+                trace = _format_stream_event(event, verbose=verbose)
                 if trace:
                     logger.info("  %s", trace)
         proc.wait(timeout=timeout)
@@ -883,6 +930,10 @@ def _run_claude_streaming(
             f"{stderr[:500]}"
         )
     final["_elapsed_seconds"] = round(time.time() - start, 1)
+    # Only present when the model streamed thinking_tokens events; buffered
+    # (non-streaming) runs never see these, so the field stays absent there.
+    if thinking_tokens:
+        final["_thinking_tokens_estimate"] = thinking_tokens
     return final
 
 
@@ -905,7 +956,7 @@ def _artifact_dir(config: RunnerConfig, task: Task) -> Path:
         / config.output_dir
         / _repo_name(task.repo)
         / task.id
-        / config.model
+        / config.model_slug
     )
 
 
@@ -1063,6 +1114,7 @@ def _save_metrics(
         "complexity": task.complexity,
         "tags": task.tags,
         "model": config.model,
+        "model_slug": config.model_slug,
         "provider": config.provider,
         "endpoint": config.endpoint if not config.is_bedrock else None,
         "aws_region": config.resolved_region() if config.is_bedrock else None,
@@ -1091,6 +1143,7 @@ def _run_task(
     concurrent: bool = False,
     position: int = 1,
     total: int = 1,
+    verbose: bool = False,
 ) -> dict[str, Any]:
     """Run a single task end to end and return its outcome summary.
 
@@ -1106,6 +1159,8 @@ def _run_task(
             across the overlapping runs) rather than passed off as per-run.
         position: This task's 1-based position in the run (for legible logs).
         total: Total number of tasks in the run.
+        verbose: When True (and streaming), print assistant text and tool
+            results in full instead of truncating them in the live trace.
 
     Returns:
         A summary dict: task id, ok flag, artifacts produced, and metrics.
@@ -1117,7 +1172,7 @@ def _run_task(
     clone_path = _clone_repo(task, ref, config.clone_dir, log_prefix=label)
     clone_parent = clone_path.parent
     try:
-        prompt = _build_prompt(task, clone_path, ref, config.model)
+        prompt = _build_prompt(task, clone_path, ref, config.model_slug)
         cmd = _build_claude_cmd(config, prompt, stream=stream, clone_path=clone_path)
         env = _build_env(config)
         logger.info("  %s Running claude -p (max_turns=%s)...", label, config.max_turns)
@@ -1140,7 +1195,9 @@ def _run_task(
         run_started_at = _utc_now_iso()
         with _GaugePoller(metrics_endpoint) as poller:
             if stream:
-                result = _run_claude_streaming(cmd, env, config.timeout_seconds)
+                result = _run_claude_streaming(
+                    cmd, env, config.timeout_seconds, verbose=verbose
+                )
             else:
                 result = _run_claude(cmd, env, config.timeout_seconds)
         run_ended_at = _utc_now_iso()
@@ -1174,11 +1231,14 @@ def _run_task(
             if hits is not None and queries is not None
             else f", prefix cache {hit_rate * 100:.1f}% hit ({scope})"
         )
+    thinking_suffix = ""
+    if metrics.get("thinking_tokens_estimate"):
+        thinking_suffix = f" (~{metrics['thinking_tokens_estimate']:,} thinking)"
     summary = (
         f"{label} | {'OK' if ok else 'INCOMPLETE'}: "
         f"{len(produced)}/{len(ARTIFACT_FILENAMES)} artifacts, "
         f"{metrics['num_turns']} turns, "
-        f"{metrics['input_tokens']:,} in / {metrics['output_tokens']:,} out tokens, "
+        f"{metrics['input_tokens']:,} in / {metrics['output_tokens']:,} out{thinking_suffix} tokens, "
         f"{metrics['latency_seconds']}s{cache_suffix}"
     )
     banner = "=" * len(summary)
@@ -1229,7 +1289,7 @@ def _dry_run(config: RunnerConfig, dataset: Dataset, tasks: list[Task]) -> None:
     for task in tasks:
         ref = dataset.resolved_ref(task)
         placeholder = Path(config.clone_dir) / "<tmp>" / _repo_name(task.repo)
-        prompt = _build_prompt(task, placeholder, ref, config.model)
+        prompt = _build_prompt(task, placeholder, ref, config.model_slug)
         cmd = _build_claude_cmd(config, prompt, clone_path=placeholder)
         print(f"\n=== {task.id} [{task.complexity}] ref={ref} ===")
         print("PROMPT:")
@@ -1246,6 +1306,7 @@ def _run_task_safe(
     concurrent: bool,
     position: int,
     total: int,
+    verbose: bool = False,
 ) -> dict[str, Any]:
     """Run one task, converting a RuntimeError into a failed-summary dict.
 
@@ -1261,6 +1322,7 @@ def _run_task_safe(
             concurrent=concurrent,
             position=position,
             total=total,
+            verbose=verbose,
         )
     except RuntimeError:
         logger.exception("[task=%s] %s of %s failed", task.id, position, total)
@@ -1268,7 +1330,11 @@ def _run_task_safe(
 
 
 def _run(
-    config: RunnerConfig, dataset: Dataset, tasks: list[Task], stream: bool = False
+    config: RunnerConfig,
+    dataset: Dataset,
+    tasks: list[Task],
+    stream: bool = False,
+    verbose: bool = False,
 ) -> None:
     """Run every selected task and log a final pass/fail summary.
 
@@ -1303,7 +1369,8 @@ def _run(
     if concurrency == 1:
         summaries = [
             _run_task_safe(
-                config, dataset, task, stream, False, position=i, total=total
+                config, dataset, task, stream, False, position=i, total=total,
+                verbose=verbose,
             )
             for i, task in enumerate(tasks, start=1)
         ]
@@ -1406,6 +1473,12 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print a live event trace as each task runs (uses stream-json)",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="With --stream, print assistant text and tool results in full "
+        "instead of truncating them in the live trace",
+    )
     return parser.parse_args()
 
 
@@ -1443,7 +1516,9 @@ def main() -> None:
     if args.dry_run:
         _dry_run(config, dataset, tasks)
         return
-    _run(config, dataset, tasks, stream=args.stream)
+    if args.verbose and not args.stream:
+        logger.warning("--verbose has no effect without --stream; ignoring it.")
+    _run(config, dataset, tasks, stream=args.stream, verbose=args.verbose)
 
 
 if __name__ == "__main__":
