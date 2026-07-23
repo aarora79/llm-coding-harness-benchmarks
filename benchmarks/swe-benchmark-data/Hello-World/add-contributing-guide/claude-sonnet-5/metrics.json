@@ -1,0 +1,49 @@
+{
+  "task": "add-contributing-guide",
+  "repo": "https://github.com/octocat/Hello-World",
+  "ref": "master",
+  "complexity": "low",
+  "tags": [
+    "sanity-check",
+    "docs",
+    "hello-world"
+  ],
+  "model": "us.anthropic.claude-sonnet-5",
+  "model_slug": "claude-sonnet-5",
+  "provider": "bedrock",
+  "endpoint": null,
+  "aws_region": "us-east-1",
+  "artifacts_produced": 4,
+  "artifacts_expected": 4,
+  "generation_tokens_per_sec": 97.0,
+  "metrics_that_matter": {
+    "note": "Headline metrics as reported by the model API (claude -p); there is no vLLM server for this provider, so no server-side cache telemetry.",
+    "input_tokens": 38,
+    "output_tokens": 20898,
+    "cache_read_tokens": 1183065,
+    "cache_write_tokens": 81429,
+    "latency_seconds": 215.4,
+    "num_turns": 23,
+    "generation_tokens_per_sec": 97.0,
+    "sources": {
+      "input_tokens": "claude_api.usage.input_tokens",
+      "output_tokens": "claude_api.usage.output_tokens",
+      "cache_read_tokens": "claude_api.usage.cache_read_input_tokens",
+      "cache_write_tokens": "claude_api.usage.cache_creation_input_tokens",
+      "latency_seconds": "harness wall-clock (or claude_api.duration_ms)",
+      "num_turns": "claude_api.num_turns",
+      "generation_tokens_per_sec": "derived: output_tokens / latency_seconds"
+    }
+  },
+  "input_tokens": 38,
+  "output_tokens": 20898,
+  "latency_seconds": 215.4,
+  "num_turns": 23,
+  "total_cost_usd": 1.4130965999999996,
+  "is_error": false,
+  "session_id": "c44615dc-681b-44da-830b-ab595332988a",
+  "cache_read_tokens": 1183065,
+  "cache_creation_tokens": 81429,
+  "run_started_at": "2026-07-23T15:54:55.317354Z",
+  "run_ended_at": "2026-07-23T15:58:32.684828Z"
+}

@@ -1,175 +1,222 @@
 # Expert Review: Migrate remaining sensitive ECS env vars to AWS Secrets Manager
 
-*Related LLD: `./lld.md`*
 *Related Issue: `./github-issue.md`*
+*Related LLD: `./lld.md`*
+*Reviewed: 2026-07-23*
 
-Five reviewer personas evaluate the design. Reviews are deliberately critical and identify real risks, not just praise.
-
----
-
-## 1. Backend Engineer - "Byte"
-
-**Focus:** Task-definition wiring, variable plumbing, module behavior.
-
-### Strengths
-- Correctly recognizes the repo already has a Secrets Manager pattern and extends it rather than reinventing one. The `secrets = concat([...], <conditional>)` and `Resource = concat([...], <conditional>)` shapes are reused verbatim, which keeps the diff reviewable.
-- Catches that `sensitive = true` does not keep values out of the rendered task definition or state - a subtle but central point that a weaker design would miss.
-- The sentinel-vs-conditional decision rule is articulated clearly and matches existing precedent (`embeddings_api_key` sentinel vs `entra_client_secret` count).
-
-### Concerns
-1. **Duplicate-env-name failure mode is real and easy to hit.** The `terraform-aws-modules/ecs/aws` module merges `environment` and `secrets`; a name present in both fails apply. The LLD says to remove and add together, but with ~12 names across two large containers this is exactly where a copy-paste slip happens. Recommend a grep-based assertion in CI (see testing.md) and editing one name at a time.
-2. **`REGISTRY_API_KEYS` is a JSON map, not a single token.** Storing it as a whole-value secret is fine, but the value contains embedded quotes/braces. Confirm the secret round-trips byte-for-byte through `valueFrom` (it does - the whole value is injected verbatim - but the implementer should not be tempted to use the `:key::` JSON-extraction syntax here).
-3. **Sentinel value `"not-configured"` reaches the app for unconfigured optional features.** Today an unset `var.ans_api_key` injects an empty string; after migration it injects `"not-configured"`. If any code path does `if os.environ.get("ANS_API_KEY"):` it still sees truthy. This is a behavior change for empty-string-sensitive code. Recommend verifying each consumer treats `"not-configured"` the same as empty, or use `count` (conditional) for the optional ones gated by an `*_enabled` flag.
-
-### New libraries / infra dependencies required
-None. Reuses existing provider resources. Good.
-
-### Better alternatives considered
-For the optional, feature-gated secrets (ANS, federation when disabled, registration gate), prefer the **conditional** (`count`) variant over the sentinel to preserve exact empty-string behavior. Use the sentinel only for always-on secrets.
-
-### Recommendations
-- Adopt conditional creation for feature-gated secrets to avoid the `"not-configured"` behavior change.
-- Add a CI grep gate that fails if any known secret name appears under `environment`.
-
-### Questions for author
-- Have you confirmed no consumer distinguishes empty string from `"not-configured"`? (Open Question 3 territory.)
-
-### Verdict: **APPROVED WITH CHANGES**
+Five reviewers examined the design against the live repo at `terraform/aws-ecs/`. Several reviewers surfaced genuine defects, two of which were factual errors in the initial LLD draft. The LLD has since been corrected; each reviewer section below notes where a fix was applied and where an item remains open. Verdicts reflect the design as reviewed (before those corrections) so the record is honest; the Review Summary and Next Steps reflect the post-correction state.
 
 ---
 
-## 2. SRE / DevOps Engineer - "Circuit"
+## Reviewer 1: Frontend Engineer (Pixel)
 
-**Focus:** Deployment, rollout, rollback, operational toil.
-
-### Strengths
-- Staged rollout (non-prod first, set values out-of-band, force new deployment, smoke test) is realistic and matches how `ignore_changes` secrets actually behave operationally.
-- Rollback story is concrete: revert Terraform or roll the ECS service to the previous task-definition revision. Keeping the prior revision is the right call.
-- Notes the cold-start impact (parallel `GetSecretValue` per task start) and correctly concludes it is negligible.
-
-### Concerns
-1. **The Grafana execution-role question is a latent apply/runtime failure.** This is the biggest operational risk. If the Grafana service uses a different execution role and the IAM grant is not attached to it, the task will fail to start with a `ResourceInitializationError: unable to pull secrets` - and it will fail at *runtime*, not at `plan` time, so it sails through validation and breaks in the environment. This must be resolved before apply, not discovered after. Elevate Open Question 1 to a blocker.
-2. **First apply leaves real secrets unset.** Because versions use `ignore_changes = [secret_string]` with a `"not-configured"`/placeholder seed, the very first deployment runs with placeholder secrets until an operator sets them in the console. For `GF_SECURITY_ADMIN_PASSWORD` that means Grafana briefly has a known placeholder admin password. Document a hard step: set real values immediately after first apply and before exposing the service, or seed from the variable on first apply.
-3. **Task-definition revision churn rolls every service.** Moving entries changes the task def, so auth-server, registry, and grafana all get new revisions and roll. Fine, but call out that this is a rolling restart of the whole stack, to be done in a window.
-4. **No rotation for the new secrets.** Acceptable per scope, but operationally these are now "set once, forget" secrets. Recommend tagging them (e.g. `rotation = "manual"`) so an audit can distinguish them from the rotated DB secrets.
-
-### New libraries / infra dependencies required
-None.
-
-### Recommendations
-- **Blocker:** confirm and wire the Grafana execution-role grant before apply.
-- Add an explicit "set real secret values now" runbook step in OPERATIONS.md with the exact `aws secretsmanager put-secret-value` commands.
-- Add a `rotation = "manual"` tag to the new secrets for auditability.
-
-### Questions for author
-- What is the exact `aws ecs update-service` rollback command you expect operators to use? (Pin the previous revision ARN in the runbook.)
-
-### Verdict: **NEEDS REVISION** (until the Grafana IAM grant is resolved)
-
----
-
-## 3. Security Engineer - "Cipher"
-
-**Focus:** Exposure surface, least privilege, secret lifecycle.
+Focus: UI/UX, components, state, API integration.
 
 ### Strengths
-- Directly closes the stated exposure: secrets leave `environment`, so they no longer appear in `ecs:DescribeTaskDefinition`, task-def revision history, or (for `ignore_changes` values set out-of-band) Terraform state.
-- Least privilege is preserved: the IAM grant lists explicit ARNs and reuses the single KMS key already scoped to `*task-exec*` principals. No wildcard `secretsmanager:*` or `Resource = "*"`.
-- Correctly scopes the grant to the **execution** role (used by the ECS agent to fetch secrets at start), not the task role - this is the right ECS semantics and avoids over-granting the application runtime.
+- No frontend surface is touched. The React frontend (`frontend/`) authenticates via the auth-server and never reads these Terraform-level secrets, so the migration is invisible to the UI.
+- The one indirect UI touchpoint - the Grafana admin login - is handled: the design ensures Grafana always has a valid admin password (operator-supplied or generated), so the Grafana UI login continues to work.
 
 ### Concerns
-1. **Secrets still in env vars at runtime (residual risk).** The `secrets` block injects values as process environment variables. Anything that can read `/proc/<pid>/environ` inside the container, or a crash dump, or a verbose log of `os.environ`, still sees them. This design's threat model is "no plaintext in the control plane / state," which it meets; it does not defend against in-container compromise. That is the Alt-3 (in-app SDK) tradeoff and should be stated as a known residual, not silently implied.
-2. **Values transit Terraform state when seeded from variables.** Even with `ignore_changes`, the *initial* `secret_string` from `var.x` is written to state on first apply. For true "never in state" handling, seed with a placeholder and set the real value only via console/CLI. The LLD mentions this but should make it the recommended default for the most sensitive items (`GITHUB_APP_PRIVATE_KEY`, `FEDERATION_ENCRYPTION_KEY`).
-3. **`recovery_window_in_days = 0`** (inherited convention) means deleted secrets are unrecoverable. Fine for ephemeral/dev, riskier for prod federation keys whose loss could strand encrypted data (`FEDERATION_ENCRYPTION_KEY` decrypts stored federation tokens - losing it is data loss). Recommend a non-zero recovery window for the encryption key specifically, or at minimum a documented warning.
-4. **Placeholder admin password window** (also raised by Circuit) is a genuine security gap for Grafana.
+1. **[Low]** If the Grafana admin password is auto-generated (empty input), operators need a documented way to retrieve it to log in to the Grafana UI. Without that, the Grafana dashboard becomes unreachable via the admin account. The LLD Step 2 note now calls for documenting retrieval from Secrets Manager / a sensitive output.
 
-### New libraries / infra dependencies required
+### New libraries / infra dependencies
 None.
 
 ### Better alternatives considered
-For `FEDERATION_ENCRYPTION_KEY` and `GITHUB_APP_PRIVATE_KEY`, consider console-only seeding (placeholder in TF, real value set out-of-band) so the material never lands in state. This is a per-secret policy, not a blanket one.
+None applicable to the frontend.
 
 ### Recommendations
-- State the in-container residual risk explicitly in the issue/LLD (done partially in Alt 3 - make it a first-class "Security residual" note).
-- Use placeholder-seed + console-set for the highest-sensitivity secrets; reserve a non-zero `recovery_window_in_days` for `FEDERATION_ENCRYPTION_KEY`.
-- Verify no application log line dumps full `os.environ` (CLAUDE.md already forbids logging secrets).
-
-### Verdict: **APPROVED WITH CHANGES**
-
----
-
-## 4. SMTS / Overall Architect - "Sage"
-
-**Focus:** Architecture, maintainability, scope discipline.
-
-### Strengths
-- Excellent scope discipline: the design separates "already done" (15 secrets) from "still to do" (the plaintext leftovers) and resists the temptation to re-architect. This is the single most important judgment call in the task and it is correct.
-- The deliberate divergence from the benchmark table's "update application code at runtime" wording is explicitly justified (Alt 3) rather than ignored - the ECS `secrets` block delivers the same security outcome at far lower risk. Good engineering judgment, transparently argued.
-- Decision rules (sentinel vs conditional, Option A vs B for Mongo) are written for a future implementer and tie back to concrete existing precedents.
-
-### Concerns
-1. **The design is ~12 near-identical resource blocks.** Maintainable but verbose. A `for_each` over a map of `{name => {var, condition}}` could collapse `secrets.tf` additions and keep the IAM list in sync automatically, reducing the copy-paste risk Byte flagged. The LLD chose explicit blocks for consistency with the existing file (which is all explicit blocks) - a defensible call, but worth noting the `for_each` alternative for the IAM resource list at least, since that is where drift bugs hide.
-2. **Two sources of truth for "which secrets exist."** `secrets.tf` (definitions) and `iam.tf` (grants) must stay in lockstep; the existing code already has this coupling and the design preserves it. A `for_each` keyed on a shared local would eliminate the class of "added a secret, forgot the IAM grant" bug. Recommend at least a shared `locals` list consumed by both.
-3. **Reserved-env-name coupling** is correctly flagged but easy to under-deliver. Since these names were already chart-managed, they are probably present, but "probably" should be "verified" with the helm unittest suite.
-
-### New libraries / infra dependencies required
-None.
-
-### Recommendations
-- Consider a shared `local.migrated_secrets` map driving both the resource `for_each` and the IAM `concat`, to make definition and grant a matched pair by construction.
-- Run the helm unittest suite to confirm reserved-name lists are consistent.
+- Ensure `OPERATIONS.md` documents retrieving a generated Grafana admin password.
 
 ### Questions for author
-- Is the explicit-block style a hard constraint (match existing file) or would maintainers accept a `for_each` refactor for the new additions?
+1. Is Grafana admin login the only user-facing surface affected? (Believed yes.)
 
-### Verdict: **APPROVED WITH CHANGES**
+### Verdict
+**APPROVED** - No frontend impact; the single UX touchpoint (Grafana login) is addressed.
 
 ---
 
-## 5. Frontend Engineer - "Pixel"
+## Reviewer 2: Backend Engineer (Byte)
 
-**Focus:** UI/UX surfaces.
+Focus: how the app reads config, fallback transparency, secret-flow edge cases.
 
-### Assessment
-This is an infrastructure-only change with no frontend component. The only user-visible surface is the **Grafana login**: after migration the admin password is delivered via Secrets Manager rather than a plaintext task-def env var, but the login UX is unchanged provided operators set the real password promptly (see Circuit/Cipher's placeholder-window concern). No React/SPA, component, or API-integration changes.
+### Strengths
+- The timing/availability dimension of the fallback is genuinely transparent. ECS injects `secrets`-block values as ordinary env vars before the process starts, so the many import-time module-level reads (`auth_server/server.py:187,190`, `registry/utils/keycloak_manager.py:20`) and the `Settings()` singleton (`registry/core/config.py:1209`) all still see the values. Moving from `environment` to `secrets` does not change when a var is visible.
+- PEM newline fidelity holds: `registry/services/github_auth.py:129` does `settings.github_app_private_key.replace("\\n", "\n")`, so both a real multi-line PEM and an escaped single-line PEM sign RS256 JWTs correctly.
+- Per-secret resources (not one JSON blob) is the right IAM-granularity call.
 
-One adjacent UX note: operator-facing **documentation** is a UX surface. The runbook step "set the real secret value in the console after first apply" must be unambiguous, or operators will leave placeholders in place. Recommend copy-paste `aws secretsmanager put-secret-value` snippets in OPERATIONS.md.
+### Concerns
+1. **[Blocker -> resolved in LLD]** A `"not-configured"` truthy sentinel (a tempting way to satisfy the non-empty `secret_string` rule) would turn empty credentials into live values. `if REGISTRY_API_TOKEN:` (`server.py:380`) and the federation-token admin check (`server.py:2592`, `hmac.compare_digest`) would accept the literal `not-configured` as a valid admin bearer token - a direct privilege escalation. **The LLD now explicitly prohibits any truthy sentinel and mandates `count`-gating so an empty var yields an absent env var** (falsy Pydantic/`os.getenv` default preserved). Confirm the implementer follows this and does not reintroduce a sentinel to dodge the empty-string restriction.
+2. **[High -> resolved in LLD]** Empty values flipping falsy->truthy would break `if settings.github_pat:` (`github_auth.py:110`, sends `Bearer not-configured` to GitHub), `FEDERATION_STATIC_TOKEN` peer auth, `REGISTRATION_WEBHOOK_AUTH_TOKEN`, and the ANS/registration-gate credentials. Same root cause as #1; same fix (count-gating). Now documented as a hard constraint in the LLD.
+3. **[Medium -> resolved in LLD]** `FEDERATION_ENCRYPTION_KEY` sentinel would fail `Fernet("not-configured".encode())` on every federation call, converting a clean "unset -> None" path (`registry/utils/federation_encryption.py:34-46`) into recurring error-log spam. Count-gating keeps the var absent when federation is unused.
+4. **[Medium -> resolved in LLD]** `GF_SECURITY_ADMIN_PASSWORD` had no empty-string handling; Secrets Manager rejects an empty `secret_string`, so `apply` would fail when observability is on but the password is blank. The LLD now generates a `random_password` when empty.
+5. **[Low]** Pre-existing insecure `"development-secret-key"` fallback in `auth_server/providers/{okta,auth0,keycloak}.py`. Not activated by this migration (`SECRET_KEY` is a first-tier secret, always non-empty), but adjacent and worth closing. Captured as an Open Question.
 
-### New libraries / infra dependencies required
+### New libraries / infra dependencies
+None. Reuses `aws_kms_key.secrets`, existing secret resources, `ecs_secrets_access`, and the ECS service module.
+
+### Better alternatives considered
+- Count-gating (absent env var when empty) over any sentinel - this is more faithful to current empty semantics because Pydantic/`os.getenv` defaults are falsy. Adopted as the primary design.
+
+### Recommendations
+- Add an explicit test that `Bearer not-configured` is rejected by `/admin/federation-token` and never appears in `_STATIC_TOKEN_MAP`.
+- Smoke-test the empty-var semantic change in the secrets-on path for all 13 consumers.
+- Verify the injected `GITHUB_APP_PRIVATE_KEY` signs a valid GitHub App JWT.
+
+### Questions for author
+1. Confirmed the implementer will use count-gating and never a truthy sentinel? (LLD now mandates this.)
+2. Is the loss of the empty-string env var in the secrets-on path confirmed harmless for every Pydantic field with a non-empty default? (Believed yes; smoke-test required.)
+
+### Verdict
+**NEEDS REVISION** (as reviewed) - The sentinel-driven behavior changes were release-blocking. **The LLD has since been revised to prohibit sentinels and mandate count-gating, addressing Concerns 1-4;** re-review would move this to APPROVED WITH CHANGES pending the recommended tests.
+
+---
+
+## Reviewer 3: SRE / DevOps Engineer (Circuit)
+
+Focus: deployment, operations, reliability.
+
+### Strengths
+- Count-gating keeps each optional secret's IAM ARN guarded by the same boolean that gates the secret resource, so Terraform builds a correct policy->secret dependency edge and never indexes `[0]` on a zero-count resource.
+- The already-migrated `metrics-service` block (`observability.tf:158-278`) is a proven template attaching `ecs_secrets_access` to both roles and consuming KMS-encrypted secrets.
+- KMS decrypt is granted two ways (identity policy `iam.tf:38-47` + resource policy `secrets.tf:23-42`).
+
+### Concerns
+1. **[Blocker -> resolved in LLD]** Grafana's execution role attaches ONLY `EcsExecTaskExecution` (`observability.tf:505-508`), not `ecs_secrets_access`. The ECS agent uses the execution role to resolve `valueFrom`, so moving `GF_SECURITY_ADMIN_PASSWORD` to `secrets` without this grant fails every grafana task launch with `ResourceInitializationError: unable to pull secrets`. **The LLD Step 7 is now imperative** and adds `SecretsManagerAccess` to the grafana execution role.
+2. **[Blocker -> resolved in LLD]** No `aws_secretsmanager_secret` existed for the grafana admin password, and the value is consumed in two containers (grafana `:582-584` and the grafana-config sidecar `:645`, which interpolates `$${GF_SECURITY_ADMIN_PASSWORD}` in a shell command at `:630`). **The LLD now creates the secret and wires both containers' `secrets` blocks.**
+3. **[High]** Moving env->secrets rewrites the container definitions of auth-server, registry, and grafana in one apply, forcing a simultaneous rolling replace of all three. The module sets no `deployment_circuit_breaker` / `wait_for_steady_state`. Recommend pinning the circuit breaker with rollback and staging the rollout per service. (Open - operational recommendation.)
+4. **[High]** IAM eventual consistency: on first enable of a toggled feature, ECS may pull the new task-def revision before the `PutRolePolicy` propagates, causing transient `AccessDeniedException` on GetSecretValue until IAM converges. Usually self-heals via ECS retries; document "expect 1-2 failed placements on first enable." (Open - runbook note.)
+5. **[Medium]** `recovery_window_in_days = 0` on all secrets means immediate, unrecoverable deletion. For externally-sourced, hard-to-reissue secrets (GitHub App PEM, OAuth client secrets) prefer `>= 7`. (Open - see security review Concern 7.)
+6. **[Medium]** Rollback via `use_secrets_manager_for_env = false` restores service start but is not a clean revert: secrets remain provisioned (ungated by the flag) and plaintext is re-written into the task-def/state. Acceptable as break-glass; document it. (Documented in LLD Rollout/Open Questions.)
+
+### New libraries / infra dependencies
+- No new providers/modules. ~14 new `aws_secretsmanager_secret` + version pairs (13 + grafana). Each is a standing monthly cost plus KMS decrypt calls on every task start. Grafana task init now depends on Secrets Manager + KMS reachability (previously it had none), widening the init failure surface.
+
+### Better alternatives considered
+- Stage the rollout per service (registry, then auth, then grafana) to shrink blast radius.
+- Reference exec-role ARNs explicitly in the KMS key policy rather than the `*task-exec*` wildcard.
+
+### Recommendations
+1. (Done) Add `SecretsManagerAccess` to the grafana execution role.
+2. (Done) Add the grafana admin password secret and wire both grafana containers.
+3. Pin `deployment_circuit_breaker = { enable = true, rollback = true }` and stage the migration.
+4. Raise `recovery_window_in_days` for externally-sourced secrets.
+5. Add a runbook note for transient first-enable GetSecretValue denials.
+
+### Questions for author
+1. Are the three services rolled in one apply or staged? What circuit-breaker defaults does the v6 module apply?
+2. Confirmed the grafana exec-role name matches `*task-exec*` for KMS decrypt? (Consistent with the working metrics-service.)
+
+### Verdict
+**NEEDS REVISION** (as reviewed) - Two blockers (grafana exec-role grant; missing grafana secret) would break task startup the moment grafana env moved to `secrets`. **Both are now fixed in the LLD.** Remaining items (circuit breaker, recovery window, first-enable note) are APPROVED-WITH-CHANGES-level hardening.
+
+---
+
+## Reviewer 4: Security Engineer (Cipher)
+
+Focus: secret handling, IAM least-privilege, encryption, audit.
+
+### Strengths
+- Correct direction and real risk reduction: moving OAuth secrets, the GitHub PAT/App PEM, the Fernet key, static tokens, and the Grafana password out of the cleartext task-def JSON (readable via `ecs:DescribeTaskDefinition` / `docker inspect`) into `valueFrom` is the right data-protection move.
+- Reuses the CMK `aws_kms_key.secrets` (rotation enabled) - better than the AWS-managed default.
+- Per-secret granularity preserves least-privilege on the IAM `Resource` list and gives per-secret CloudTrail auditing.
+- Count-gated `secrets` fragments filter `if spec.arn != ""`, avoiding the `ResourceInitializationError` foot-gun.
+
+### Concerns
+1. **[High]** The `ecs_secrets_access` policy is attached to BOTH the execution role and the task role (`ecs-services.tf:51-64`). Only the execution role needs `GetSecretValue`/`kms:Decrypt`; the app reads injected env vars and never calls the Secrets Manager API. Granting the task role read on the whole catalog means an RCE/SSRF in a container can enumerate every secret via the task-role credentials on the ECS metadata endpoint - this widens blast radius versus today. **The LLD now attaches the policy to grafana's execution role ONLY**, and captures removing the auth/registry task-role attachment as a tracked follow-up (it changes an existing pattern).
+2. **[High]** The KMS key policy grants `kms:Decrypt` to `Principal AWS "*"` gated on `aws:PrincipalArn StringLike role/*task-exec*` (`secrets.tf:26-41`). Any future in-account role whose name contains `task-exec` inherits decrypt. Account-scoping (`aws:PrincipalAccount`) caps this at High, not Blocker. Recommend binding to explicit execution-role ARNs. (Pre-existing; Open Question.)
+3. **[Medium]** Plaintext fallback (`false`) re-introduces every secret into task-def JSON and state. Acceptable only as short-lived break-glass with a tracked removal date and a Terraform precondition/warning. (Captured in Open Questions.)
+4. **[Medium - arguably top priority]** Secret values persist in Terraform state as `secret_string` even on the Secrets Manager path, and the root stack has no `backend` block (`main.tf`), so state defaults to a local unencrypted file. Without an S3 + SSE-KMS backend, the migration moves secrets from one cleartext location to another. **The LLD now flags encrypted remote state as a hard prerequisite** (Open Questions), though the backend change itself is out of scope for this issue.
+5. **[Medium]** `"development-secret-key"` fallback in the auth providers is a JWT-forgery/auth-bypass primitive if `SECRET_KEY` is ever unset. Not activated by this migration but should be closed (fail-closed). Captured as an Open Question.
+6. **[Low]** No rotation (`CKV2_AWS_57` skipped) is acceptable - these are externally-managed secrets; document a manual rotation runbook for the Fernet key and GitHub PAT.
+7. **[Low]** `recovery_window_in_days = 0` - use `>= 7` for hard-to-reissue secrets (GitHub App PEM, OAuth client secrets).
+
+### New libraries / infra dependencies
+- None introduced. Implied missing dependency: an encrypted remote state backend (Concern 4).
+
+### Better alternatives considered
+- Split execution-role vs task-role IAM policies (addresses Concern 1) - strictly better least-privilege at trivial cost.
+- Grant KMS decrypt via the execution-role IAM policy and drop the wildcard-principal key statement (addresses Concern 2).
+
+### Recommendations
+1. (Grafana done) Do not attach the read policy to task roles; execution role only. Track removing the auth/registry task-role attachment.
+2. Tighten the KMS key policy to explicit execution-role ARNs.
+3. Configure an encrypted S3 backend before shipping.
+4. Remove the `"development-secret-key"` fallback (fail-closed).
+5. File a dated removal issue for the plaintext fallback; add a precondition when `false`.
+6. Use `recovery_window_in_days >= 7` for externally-sourced secrets.
+
+### Questions for author
+1. Does any runtime code path call `secretsmanager:GetSecretValue` directly? (No - so the task-role attachment has no functional justification.)
+2. Where does Terraform state live today? If local/unencrypted, Concern 4 is a Blocker.
+3. Can the `"development-secret-key"` removal be bundled here?
+
+### Verdict
+**NEEDS REVISION** (as reviewed) - The migration is directionally correct, but the task-role over-grant, the KMS wildcard, and the absent encrypted state backend must be addressed. **The LLD now scopes grafana to execution-role-only, flags the state backend as a prerequisite, and tracks the KMS and task-role items;** addressing the state backend and task-role split moves this to APPROVED WITH CHANGES.
+
+---
+
+## Reviewer 5: SMTS / Overall (Sage)
+
+Focus: architecture, code quality, maintainability.
+
+### Strengths
+- Faithful reuse of the established secret+version and `secrets = concat(base, conditional...)` idioms - one pattern, not two.
+- Correct raw-vs-JSON decision (single values as raw strings, bare ARN; `:key::` reserved for multi-field secrets). `REGISTRY_API_KEYS` is a JSON blob but still one env value, so raw storage is right.
+- The variable grouping is verified-correct: the 7 "shared" vars appear in both auth-server and registry; the 5 "registry-only" vars appear only in registry.
+- Real constraints surfaced (ECS duplicate-name prohibition, `ResourceInitializationError`, the grafana IAM gap).
+
+### Concerns
+1. **[High -> resolved in LLD]** The initial draft claimed `grafana_admin_password` has a non-empty default and created its secret unconditionally. `variables.tf:1175-1180` shows `default = ""`. Unconditional creation would orphan a secret (and fail `apply` on an empty `secret_string`) for every non-observability deployer. **The LLD now gates the grafana secret on `enable_observability` and generates a random password when empty.**
+2. **[Medium -> partially resolved]** The non-empty predicate was triplicated (secret `count`, locals filter, IAM `Resource`). **The LLD now recommends driving the IAM `Resource` list from the `local.*_specs` maps** and offers a full `for_each` refactor (Alternative 4) as the single-source-of-truth option.
+3. **[Medium -> resolved in LLD]** Byte-for-byte fidelity is only claimed for the `false` path; the default path drops the empty env var. **The LLD now documents this semantic change and requires a smoke test.**
+4. **[Medium]** The fallback flag is a single global boolean with no committed removal plan; its "off" state re-exposes all 13 values. Recommend a dated follow-up and considering per-group flags. (Captured in Open Questions.)
+5. **[Low]** 13 secrets across three services in one PR (~240 LOC) is reviewable but mechanical; consider splitting along the three groups.
+6. **[Low -> resolved]** PEM newline was left as an open question; now resolved with the `.replace("\\n","\n")` finding and an explicit smoke-test requirement.
+
+### New libraries / infra dependencies
 None.
 
-### Verdict: **APPROVED** (not applicable beyond the docs/runbook note)
+### Better alternatives considered
+- `for_each` over a single secret-spec map (now Alternative 4) - the cleanest fix for triplication and reviewability.
+- Per-group toggle rather than one global bool.
+
+### Recommendations
+1. (Done) Gate the grafana secret on `enable_observability`; handle empty password.
+2. (Done) Make Step 7 imperative.
+3. Drive IAM `Resource` from the specs map (ideally `for_each`).
+4. File a dated removal issue for the fallback flag.
+5. Consider splitting the PR along the three variable groups.
+
+### Questions for author
+1. Confirmed the grafana secret is gated on observability and never stores an empty string? (LLD now does both.)
+2. Reuse the specs map for IAM, or keep 13 hand-written lines? (LLD recommends the comprehension.)
+
+### Verdict
+**APPROVED WITH CHANGES** - The architecture is sound and consistent with the repo's pattern. The grafana factual error and the imperative role attachment were the must-fixes and are now corrected; collapsing the triplication is the remaining maintainability ask.
 
 ---
 
 ## Review Summary
 
-| Reviewer | Verdict | Blockers | Key Recommendations |
-|----------|---------|----------|---------------------|
-| Backend (Byte) | APPROVED WITH CHANGES | 0 | Use `count` for feature-gated secrets to preserve empty-string behavior; CI grep gate for duplicate names |
-| SRE (Circuit) | NEEDS REVISION | 1 | Resolve Grafana execution-role grant before apply; runbook for setting real values; rolling-restart window |
-| Security (Cipher) | APPROVED WITH CHANGES | 0 | State in-container residual risk; placeholder-seed high-sensitivity secrets; non-zero recovery window for `FEDERATION_ENCRYPTION_KEY` |
-| SMTS (Sage) | APPROVED WITH CHANGES | 0 | Shared `locals` map / `for_each` to keep defs and IAM grants in lockstep; run helm unittests |
-| Frontend (Pixel) | APPROVED | 0 | Make the "set real value" runbook step copy-paste explicit |
+| Reviewer | Verdict (as reviewed) | Blockers | Key Recommendations |
+|----------|-----------------------|----------|---------------------|
+| Frontend (Pixel) | APPROVED | 0 | Document retrieval of a generated Grafana password |
+| Backend (Byte) | NEEDS REVISION | 1 (resolved) | No truthy sentinels; count-gate; test `not-configured` rejection |
+| SRE (Circuit) | NEEDS REVISION | 2 (resolved) | Grafana exec-role grant + secret (done); circuit breaker; recovery window |
+| Security (Cipher) | NEEDS REVISION | 0 (2 High) | Execution-role-only grant; encrypted state backend; tighten KMS wildcard |
+| SMTS (Sage) | APPROVED WITH CHANGES | 0 | Gate grafana on observability (done); collapse IAM triplication |
 
-**Net verdict:** APPROVED WITH CHANGES, with one must-fix blocker from SRE.
+All items raised as Blockers or factual errors in the initial draft (the truthy-sentinel behavior changes, the grafana "non-empty default" mistake, the missing grafana secret, and the non-imperative role attachment) have been corrected in `lld.md`. The remaining High/Medium items are hardening and process work that do not change the approach:
 
-## Blockers to resolve before implementation
-
-1. **(SRE, blocker)** Confirm which ECS task execution role the Grafana service uses and ensure `secretsmanager:GetSecretValue` on the Grafana password ARN is attached to *that* role. A missing grant fails at task start (runtime), not at plan time.
-
-## Recommended (non-blocking) changes
-
-1. Use the conditional (`count`) variant for feature-gated optional secrets (ANS, registration gate) to preserve exact empty-vs-set behavior; reserve the sentinel for always-on secrets. (Byte, Sage)
-2. Introduce a shared `local.migrated_secrets` consumed by both `secrets.tf` (`for_each`) and `iam.tf` (`concat`) so a new secret cannot be added without its IAM grant. (Sage)
-3. For `FEDERATION_ENCRYPTION_KEY` (and ideally `GITHUB_APP_PRIVATE_KEY`): placeholder-seed in Terraform and set the real value out-of-band; use a non-zero `recovery_window_in_days` for the encryption key to avoid irrecoverable data loss. (Cipher)
-4. Add a runbook in OPERATIONS.md with copy-paste `aws secretsmanager put-secret-value` commands and an explicit "do this before exposing the service" warning. (Circuit, Pixel)
-5. Add a CI grep gate asserting no known secret name appears under any `environment` block. (Byte)
-6. Run the helm unittest suite to confirm reserved-env-name consistency. (Sage)
+- **Must resolve before implementation lands:** confirm an encrypted remote Terraform state backend exists (Cipher #4); attach the secrets-read policy to execution roles only and track removing the auth/registry task-role attachment (Cipher #1).
+- **Should resolve during implementation:** pin `deployment_circuit_breaker`; raise `recovery_window_in_days >= 7` for externally-sourced secrets; drive IAM from the specs map; add the `Bearer not-configured` rejection test and the empty-var + PEM smoke tests.
+- **Track as follow-ups:** tighten the KMS wildcard principal; remove the `"development-secret-key"` fallback; file a dated removal issue for the plaintext fallback flag; consider per-group toggles.
 
 ## Next Steps
 
-1. Resolve the Grafana execution-role blocker (Open Question 1).
-2. Decide sentinel vs conditional per secret (default conditional for feature-gated).
-3. Decide Mongo Option A vs B (LLD recommends A).
-4. Proceed to implementation per `lld.md` Steps 1-8, then execute `testing.md`.
+1. Implementer applies count-gating for all optional secrets (no truthy sentinels), gates the grafana secret on `enable_observability` with a generated fallback password, and wires both grafana containers.
+2. Add `SecretsManagerAccess` to the grafana execution role; keep the task role free of secrets read.
+3. Confirm/provision an encrypted S3 state backend as a prerequisite.
+4. Extend `terraform.tfvars.example`, `README.md`/`OPERATIONS.md` with the flag and the fallback/rollback procedure.
+5. Execute `testing.md`: `terraform validate`/`plan` (flag on and off), IAM ARN coverage check, and the live task-start smoke test (including `not-configured` rejection and GitHub App JWT signing).

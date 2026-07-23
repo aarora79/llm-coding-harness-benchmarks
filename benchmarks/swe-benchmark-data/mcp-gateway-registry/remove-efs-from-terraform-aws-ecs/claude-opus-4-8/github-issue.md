@@ -48,9 +48,12 @@ the `registry` service already set:
    and `mcpgw` task definitions; route persistence through DocumentDB and route
    logs to CloudWatch only (as `registry` already does).
 3. Repoint the auth-server `SCOPES_CONFIG_PATH` from the EFS path
-   (`/efs/auth_config/auth_config/scopes.yml`) to the in-image path the registry
-   already uses (`/app/auth_server/scopes.yml`), and bootstrap scopes through the
-   existing DocumentDB initialization path rather than the EFS scopes-init task.
+   (`/efs/auth_config/auth_config/scopes.yml`) to the auth image's in-image path
+   (`/app/scopes.yml` - `Dockerfile.auth` does `WORKDIR /app` + `COPY auth_server/ /app/`;
+   note this differs from the registry image, which uses `/app/auth_server/scopes.yml`),
+   and bootstrap scopes through the existing DocumentDB initialization path rather than
+   the EFS scopes-init task. Under the default `documentdb` backend this env var is not
+   read (scopes load from the DB), so the repoint primarily matters for the `file` backend.
 4. Remove the `efs_throughput_mode` and `efs_provisioned_throughput` variables, the
    `efs_*` module outputs, and the `mcp_gateway_efs_*` root outputs.
 5. Retire `scripts/run-scopes-init-task.sh` and the EFS branch in
@@ -76,9 +79,13 @@ the `registry` service already set:
       file system, access point, mount target, NFS security group, or egress rule.
 - [ ] The `auth-server` and `mcpgw` task definitions declare `volume = {}` and
       contain no EFS `mountPoints` (matching the `registry` service pattern).
-- [ ] Auth-server `SCOPES_CONFIG_PATH` no longer references any `/efs/...` path.
+- [ ] Auth-server `SCOPES_CONFIG_PATH` no longer references any `/efs/...` path, and
+      points at a path the auth image actually ships (`/app/scopes.yml` for the current
+      `Dockerfile.auth`).
 - [ ] `efs_throughput_mode` and `efs_provisioned_throughput` variables are removed
-      from both `variables.tf` files; no references remain.
+      from the module `variables.tf` (`modules/mcp-gateway/variables.tf`); no references
+      remain. (These vars do not exist in the root `variables.tf` or
+      `terraform.tfvars.example`, so no change is needed there.)
 - [ ] `efs_id`, `efs_arn`, `efs_access_points` module outputs and
       `mcp_gateway_efs_id`, `mcp_gateway_efs_arn`, `mcp_gateway_efs_access_points`
       root outputs are removed.
@@ -92,15 +99,24 @@ the `registry` service already set:
       being destroyed and no unintended changes to unrelated resources.
 - [ ] README and architecture docs no longer describe EFS as a storage backend and
       the example IAM policy no longer grants `elasticfilesystem:*`.
+- [ ] `docs/deployment-modes.md` and `terraform/aws-ecs/README.md` no longer instruct
+      operators to run the removed `scripts/run-scopes-init-task.sh`.
+- [ ] `mcp_gateway_efs_id` is removed from the `required_outputs` validation list in
+      `scripts/post-deployment-setup.sh` (not just the fallback branch).
+- [ ] The orphaned `mcp-gateway-scopes-init` build target in `codebuild.tf` is either
+      removed or explicitly documented as knowingly-retained dead code with a follow-up.
 
 ### Out of Scope
 
 - Changing the registry service (already EFS-free).
 - Modifying the Python application code in `registry/`, `auth_server/`, or `mcpgw/`
   (the `SCOPES_CONFIG_PATH` is read by existing code; only the Terraform-provided
-  value changes). If the auth-server image does not already ship `scopes.yml` at
-  `/app/auth_server/scopes.yml`, that packaging change is tracked as a dependency,
-  not done here.
+  value changes). The auth image already ships `scopes.yml` at `/app/scopes.yml`, so
+  pointing there needs no image change. Only if the team prefers the registry's
+  `/app/auth_server/scopes.yml` layout for auth would a `Dockerfile.auth` packaging
+  change be needed - that is tracked as a dependency, not done here. Reconciling
+  `FileScopeRepository`'s hardcoded scopes path (a `file`-backend-only concern) is
+  likewise out of scope for this Terraform change.
 - Docker Compose, Podman, and Helm/EKS deployment surfaces. This issue is limited
   to `terraform/aws-ecs/`.
 - Any data migration of existing EFS contents. Operators must confirm DocumentDB
@@ -109,10 +125,13 @@ the `registry` service already set:
 
 ### Dependencies
 
-- The auth-server container image must provide `scopes.yml` at
-  `/app/auth_server/scopes.yml` (the path the registry already uses), or scopes must
-  be initialized into DocumentDB by `scripts/run-documentdb-init.sh`. Confirm the
-  current image/bootstrap before merging.
+- The auth-server container image already provides `scopes.yml` at `/app/scopes.yml`
+  (verified: `Dockerfile.auth` uses `WORKDIR /app` + `COPY auth_server/ /app/`). Point
+  `SCOPES_CONFIG_PATH` there for the `file` backend, or rely on DocumentDB initialized
+  by `scripts/run-documentdb-init.sh` for the default backend. If instead the team wants
+  the registry's `/app/auth_server/scopes.yml` layout for auth, that requires a
+  Dockerfile.auth change and is tracked as a packaging dependency (see Out of Scope).
+  Confirm the current image/bootstrap before merging.
 - Whatever was persisted to the `mcpgw_data` EFS access point (`/app/data`) must be
   confirmed as either reconstructable, ephemeral, or already stored in DocumentDB
   before the mount is removed.

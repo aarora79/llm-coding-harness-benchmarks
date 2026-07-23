@@ -1,59 +1,65 @@
-# GitHub Issue: SSRF Hardening -- Outbound URL Validation
+# GitHub Issue: SSRF hardening for agent-card fetch and server health-check outbound requests
 
 ## Title
-Harden outbound HTTP calls against SSRF by promoting `_is_safe_url()` to a shared utility and applying it at all user-originated URL call sites
+Harden agent-card fetch and health-check paths against SSRF by reusing the existing `_is_safe_url` guard
 
 ## Labels
 - security
 - enhancement
 - backend
 
+(Only labels that already exist in the upstream repo should be applied. If a dedicated `ssrf` or `security-hardening` label would help triage, suggest it in a comment rather than creating it during issue filing.)
+
 ## Description
 
 ### Problem Statement
-The registry fetches user-supplied URLs (proxy_pass_url, agent URLs, SKILL.md URLs) from multiple services, but SSRF protection (`_is_safe_url()` with private-IP and cloud-metadata blocking) exists only inside `skill_service.py`. All other outbound call sites -- the MCP client, health check service, agent validator, skill scanner, and auth-server proxy -- connect to user-originated URLs with no SSRF guard. An attacker who registers a server with `proxy_pass_url=http://169.254.169.254/latest/meta-data/` can exfiltrate cloud credentials or probe internal networks.
+
+The registry makes outbound HTTP requests to URLs that are supplied by users at agent/server registration time. A working SSRF guard (`_is_safe_url`) already exists in `registry/services/skill_service.py` and protects the SKILL.md fetch path, but it is **not reused** on two other outbound paths that also fetch user-supplied URLs:
+
+1. **Agent-card reachability probe** - `registry/utils/agent_validator.py::_check_endpoint_reachability` (line 196) builds `f"{url}/.well-known/agent-card.json"` and calls synchronous `httpx.get(...)`. Triggered by `POST /agents/register` (via `verify_endpoint=True`). The `AgentCard.url` is a required free-form string validated only for scheme/hostname format - no private-IP, loopback, or cloud-metadata checks.
+
+2. **Server/agent health checks** - `registry/health/service.py` makes numerous outbound `httpx` GET/POST/HEAD requests to the user-supplied `proxy_pass_url` (and derived `mcp_endpoint`/`sse_endpoint`) both on a periodic background loop and via the immediate "check now" path (`perform_immediate_health_check`). Reachable from `POST /agents/{path}/health`, server register/edit/refresh/toggle endpoints. No SSRF validation is applied, and `follow_redirects=True` is set on nearly every request, so even a permitted host can redirect to an internal target. Configured credentials are injected into these requests, so an SSRF to an internal service can also leak credentials.
+
+Because these URLs are never SSRF-validated, an attacker who can register an agent or server can drive the gateway to issue requests to internal-only addresses (e.g. `http://169.254.169.254/latest/meta-data/`, `http://10.0.0.5:8500/`, `http://localhost:6379/`), enabling internal network reconnaissance and cloud-metadata theft from the ECS task.
 
 ### Proposed Solution
-1. Extract `_is_safe_url()`, `_is_private_ip()`, and the trusted-domain allowlist into a new shared utility module (`registry/utils/ssrf.py`).
-2. Add a new configuration parameter `SSRF_ADDITIONAL_TRUSTED_DOMAINS` (comma-separated) so operators can allowlist internal corporate hosts without coupling to the GitHub-specific `github_extra_hosts` setting.
-3. Apply the shared `is_safe_url()` check at every call site where the URL originates from user input:
-   - `registry/core/mcp_client.py` (transport detection + tool fetching)
-   - `registry/health/service.py` (background + immediate health checks)
-   - `registry/utils/agent_validator.py` (agent reachability probe)
-   - `registry/services/skill_scanner.py` (skill content download)
-   - `auth_server/server.py` (MCP proxy via `X-Upstream-Url`)
-4. Validate at registration time: when a server, agent, or skill URL is first submitted, reject it early if it fails the SSRF check. This protects all downstream consumers in a single enforcement point.
-5. Add structured logging and a counter metric (`ssrf_blocked_total`) for blocked requests.
+
+1. **Promote the existing guard into a shared utility.** Move `_is_safe_url`, `_is_private_ip`, `_trusted_domains`, and `_DEFAULT_TRUSTED_DOMAINS` from `registry/services/skill_service.py` into a new `registry/utils/ssrf.py` module. Keep `skill_service._is_safe_url` as a thin re-export so all existing behavior and tests continue to pass (backwards-compatible).
+
+2. **Apply the guard on the agent-card path.** Validate the agent URL in `_check_endpoint_reachability` before the `httpx.get` and re-validate the final URL after any redirect (mirroring the SKILL.md pattern). On a blocked URL, treat the endpoint as unreachable (non-blocking, preserving current behavior where reachability failures do not fail registration).
+
+3. **Apply the guard on the health-check path.** Validate `proxy_pass_url`/resolved endpoints at the single choke point (`_check_server_endpoint_transport_aware` and/or `perform_immediate_health_check`) before any outbound request. A blocked URL yields an `unhealthy`/blocked status instead of an outbound request. Disable or re-validate redirects.
+
+4. **Add a configurable allowlist.** Introduce a dedicated `SSRF_ALLOWED_HOSTS` setting (comma-separated), merged into the trusted-domain set alongside the existing `github_extra_hosts`, so operators can permit legitimate internal hosts (e.g. private MCP servers on internal IPs) without disabling protection globally. Behavior must remain backwards-compatible when the new setting is unset.
 
 ### User Stories
-- As a platform operator, I want all outbound requests to user-supplied URLs validated against private-IP and metadata-endpoint rules so that SSRF attacks cannot exfiltrate cloud credentials.
-- As a downstream team consuming the registry API, I want a clear 422 error when I accidentally register a server with a private URL so that I can fix the configuration immediately.
-- As an SRE, I want a metric (`ssrf_blocked_total`) counting blocked SSRF attempts so that I can alert on anomalous activity.
+
+- As an **operator** running the gateway, I want outbound fetches to internal/private IPs and cloud-metadata endpoints blocked by default so a malicious registration cannot turn the gateway into an SSRF pivot.
+- As an **operator** with legitimate internal MCP servers, I want an allowlist so I can permit specific internal hosts without weakening protection for everything else.
+- As a **downstream team** registering an MCP server or agent, I want a clear error/status when my URL is rejected so I understand why the health check fails.
 
 ### Acceptance Criteria
-- [ ] A new module `registry/utils/ssrf.py` exposes `is_safe_url(url: str) -> bool` and `is_private_ip(ip_str: str) -> bool` as public functions.
-- [ ] `is_safe_url()` blocks: non-http(s) schemes, unresolvable hostnames, IPs in private/loopback/link-local/reserved ranges, and the cloud metadata endpoint `169.254.169.254`.
-- [ ] `is_safe_url()` allows trusted domains (built-in defaults + `SSRF_ADDITIONAL_TRUSTED_DOMAINS` env var) without IP resolution.
-- [ ] All HIGH-risk call sites listed above call `is_safe_url()` before making the outbound request. Blocked URLs raise/return an appropriate error (HTTP 422 at API boundaries, `False`/`None` at service boundaries).
-- [ ] Registration endpoints (`POST /servers`, `POST /agents`, `POST /skills`) validate URL fields at submission time and reject with 422 + structured error body on failure.
-- [ ] The existing `skill_service.py` is refactored to import from `registry/utils/ssrf.py` instead of using private functions -- no behavior change.
-- [ ] Unit tests cover: private IPs (IPv4 + IPv6), cloud metadata IP, non-http schemes, unresolvable hostnames, trusted-domain bypass, valid public URLs.
-- [ ] Integration test confirms end-to-end rejection at registration time.
-- [ ] A Prometheus counter `ssrf_blocked_total` (labels: `call_site`, `reason`) is incremented on every block.
-- [ ] `SSRF_ADDITIONAL_TRUSTED_DOMAINS` is documented in `.env.example`, Helm values, Terraform variables, and Docker Compose extra_env examples.
-- [ ] All existing tests pass (`uv run pytest tests/ -n 8`); no regressions.
-- [ ] Backwards compatible: previously-registered servers with public URLs continue to work without re-registration.
+
+- [ ] `_is_safe_url` and helpers live in a shared `registry/utils/ssrf.py` module; `skill_service` re-uses them with no behavior change.
+- [ ] `_check_endpoint_reachability` (agent-card probe) validates the URL before fetching and re-validates after redirects; blocked URLs report unreachable without raising.
+- [ ] The health-check path validates `proxy_pass_url`/derived endpoints before every outbound request; blocked URLs produce an `unhealthy` status and are logged, with no outbound request made.
+- [ ] Requests to private, loopback, link-local, reserved IPs, and `169.254.169.254` are blocked by default on both paths.
+- [ ] A new `SSRF_ALLOWED_HOSTS` env var (comma-separated) extends the allowlist; unset preserves prior behavior.
+- [ ] `follow_redirects` is disabled or each redirect hop is re-validated on both hardened paths.
+- [ ] All existing skill SSRF tests still pass; new unit tests cover the agent-card and health-check paths.
+- [ ] Backwards-compatible: existing registrations with public URLs continue to be reachable and healthy; the new setting is optional.
 
 ### Out of Scope
-- Egress-layer network controls (security groups, VPC endpoints) -- those are complementary but separate.
-- Scanning or re-validating URLs that were registered before this change ships (migration/backfill).
-- Rate limiting or throttling of outbound requests (separate concern).
-- DNS rebinding protection beyond the initial resolution check (would require connect-time pinning, tracked separately).
-- Blocking admin-configured URLs (`registration_webhook_url`, `registration_gate_url`, etc.) -- those are operator-trusted.
+
+- Rewriting the health-check transport logic beyond inserting validation.
+- SSRF protection for federation clients (`asor_client`, `peer_registry_client`, `agentcore_client`) - these fetch operator-configured endpoints or inline content, not arbitrary user URLs.
+- Blocking outbound traffic at the network/infrastructure layer (security groups, egress firewall) - complementary but separate.
+- Changing the `AgentCard.url` / `proxy_pass_url` schema or making registration reject internal URLs outright (would break the local-runtime and internal-MCP use cases).
 
 ### Dependencies
-- No new external libraries required. The implementation uses only `socket`, `ipaddress`, and `urllib.parse` from the standard library.
-- Depends on the existing `registry/core/config.py` Settings class for the new env var.
+
+- No new third-party dependencies. Uses the standard library `ipaddress`, `socket`, `urllib.parse` already used by the existing guard.
 
 ### Related Issues
-- Existing SSRF allowlist tests at `tests/unit/services/test_skill_service_ssrf_allowlist.py` should be migrated to test the shared module.
+
+- Reference: https://github.com/agentic-community/mcp-gateway-registry/issues/1282

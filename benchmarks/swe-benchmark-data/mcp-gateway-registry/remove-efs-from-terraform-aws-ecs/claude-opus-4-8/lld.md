@@ -94,8 +94,13 @@ precedent.
 
 2. **In-image scopes path.** The registry already sets
    `SCOPES_CONFIG_PATH = "/app/auth_server/scopes.yml"` (`ecs-services.tf:821-822`),
-   demonstrating the non-EFS scopes location. Auth-server should adopt the same
-   value (currently `/efs/auth_config/auth_config/scopes.yml` at `:220-221`).
+   demonstrating the non-EFS scopes location. Auth-server should adopt an in-image
+   value (currently `/efs/auth_config/auth_config/scopes.yml` at `:220-221`). NOTE: the
+   correct auth value is `/app/scopes.yml`, NOT the registry's `/app/auth_server/scopes.yml`
+   - the two images bake the file at different paths. See "Constraints and Limitations
+   Discovered" (scopes.yml provenance) and review.md C2b. Later diagrams/snippets in this
+   doc that show `/app/auth_server/scopes.yml` for auth predate this correction; use
+   `/app/scopes.yml` unless a Dockerfile.auth change is added.
 
 3. **Storage backend selection.** `storage_backend` (root default `documentdb`,
    `variables.tf:399`; module default `file`, module `variables.tf:454`) already
@@ -114,17 +119,27 @@ precedent.
 | `registry` service | Pattern source | Provides the exact EFS-free task-definition shape to copy |
 | DocumentDB module | Persistence target | `mcpgw_data` and scopes should rely on DocumentDB; env already wired |
 | CloudWatch logging | Log sink | Already enabled on all services; replaces the EFS `logs` access point |
-| `data.aws_vpc.vpc` | Removed dependency | Only used by storage.tf NFS ingress CIDR; safe to remove if unused elsewhere |
+| `data.aws_vpc.vpc` | RETAINED dependency | storage.tf uses it for the NFS ingress CIDR, but it is ALSO consumed at `ecs-services.tf:2122` and `:2245` (demo-agent SG ingress `cidr_ipv4 = data.aws_vpc.vpc.cidr_block`). Verified in-repo - do NOT delete this data source or `plan` breaks |
 | `post-deployment-setup.sh` | Orchestration | Must always take the DocumentDB scopes path after change |
 
 ### Constraints and Limitations Discovered
 
 - **scopes.yml provenance.** Auth-server currently obtains `scopes.yml` from the EFS
   `auth_config` access point, populated by `run-scopes-init-task.sh`. After removal,
-  scopes must come from (a) the in-image file at `/app/auth_server/scopes.yml`, or
-  (b) DocumentDB via `run-documentdb-init.sh`. This LLD assumes the registry's
-  in-image path is valid for auth-server as well; confirm at implementation time
-  (see Open Questions).
+  scopes must come from (a) the in-image file, or (b) DocumentDB via
+  `run-documentdb-init.sh`. IMPORTANT PATH CORRECTION (verified against the
+  Dockerfiles): the auth and registry images bake `scopes.yml` at DIFFERENT paths.
+  `Dockerfile.auth` does `WORKDIR /app` + `COPY auth_server/ /app/`, so in the auth
+  image the file is at `/app/scopes.yml`; `Dockerfile.registry` copies to
+  `/app/auth_server/`, so the registry image has it at `/app/auth_server/scopes.yml`.
+  This LLD's repoint value `/app/auth_server/scopes.yml` is therefore the REGISTRY
+  path, not the auth path. For the auth service either (i) set
+  `SCOPES_CONFIG_PATH = "/app/scopes.yml"` (matches the existing auth image, no
+  Dockerfile change - lower risk), or (ii) add a Dockerfile.auth change to also ship
+  the file at `/app/auth_server/scopes.yml` (the packaging dependency already noted in
+  the issue's Out of Scope). Under the shipped `documentdb` backend this env var is not
+  read (scopes load from the DB via `reload_scopes_config`), so it is a no-op there;
+  it only bites the `file` backend. See review.md finding C2b.
 - **`mcpgw_data` semantics.** The `/app/data` mount holds runtime data whose
   durability requirements are not documented in Terraform. Removing it means data is
   ephemeral per task. Confirm with the mcpgw application owner that `/app/data` does

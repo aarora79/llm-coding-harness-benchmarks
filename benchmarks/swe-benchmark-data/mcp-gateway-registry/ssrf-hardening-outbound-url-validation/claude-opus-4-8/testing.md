@@ -1,786 +1,482 @@
-# Testing Plan: SSRF Hardening -- Outbound URL Validation
+# Testing Plan: SSRF Hardening for Agent-Card Fetch and Health-Check Paths
 
-*Created: 2026-07-21*
+*Created: 2026-07-23*
 *Related LLD: `./lld.md`*
 *Related Issue: `./github-issue.md`*
 
 ## Overview
 
 ### Scope of Testing
-Validates that the shared SSRF utility (`registry/utils/ssrf.py`) correctly blocks private IPs, cloud metadata, non-http schemes, and unresolvable hostnames while allowing trusted domains and public URLs. Also validates that all call sites integrate the check correctly, that registration endpoints reject unsafe URLs with 422, and that existing functionality is preserved for valid public URLs.
+
+Verify that outbound HTTP requests on the agent-card reachability probe and the server/agent health-check paths refuse URLs that resolve to private/loopback/link-local/reserved IPs, the cloud-metadata/container-credentials range (`169.254.0.0/16`, covering `169.254.169.254` and the Fargate `169.254.170.2`), IPv4-mapped IPv6 forms, and non-http(s) schemes; that public URLs and explicitly allowlisted hosts still work; that the existing SKILL.md SSRF behavior is unchanged after the guard is promoted to `registry/utils/ssrf.py`; and that monitor-only mode (`SSRF_ENFORCE=false`) logs/counts without blocking.
 
 ### Prerequisites
-- [ ] MongoDB running locally (`docker ps | grep mongo`)
-- [ ] Registry service running (`uv run python -m registry`)
-- [ ] Auth server running (for proxy tests)
-- [ ] Test environment configured (test settings auto-applied by conftest.py)
+
+- [ ] Python env with dev deps installed (`uv sync`).
+- [ ] Registry service running for functional tests (`docker compose up` or local run), reachable at `$REGISTRY_URL`.
+- [ ] A valid access token for authenticated registration/health endpoints.
+- [ ] Network access to a public test host (e.g. `https://example.com`) for positive cases.
 
 ### Shared Variables
+
 ```bash
-export REGISTRY_URL="http://localhost:8080"
-export ACCESS_TOKEN=$(jq -r '.access_token' .oauth-tokens/ingress.json)
-export AUTH_HEADER="Authorization: Bearer $ACCESS_TOKEN"
+export REGISTRY_URL="http://localhost:7860"
+# Obtain per the repo's auth flow; adjust path to your token file.
+export ACCESS_TOKEN=$(jq -r '.access_token' .oauth-tokens/ingress.json 2>/dev/null)
 ```
+
+---
 
 ## 1. Functional Tests
 
-### 1.1 Unit Tests -- `is_private_ip()`
+### 1.1 Unit Tests
 
-**File:** `tests/unit/utils/test_ssrf.py`
+Unit tests are the primary verification surface for this change (the guard logic is pure and deterministic). Place new files under `tests/unit/utils/` and `tests/unit/health/`, mirroring the existing `tests/unit/services/test_skill_service_ssrf_allowlist.py` conventions (patch settings, clear the `lru_cache`, mock `socket.getaddrinfo`).
 
-```python
-import pytest
-from registry.utils.ssrf import is_private_ip
-
-
-class TestIsPrivateIp:
-    @pytest.mark.parametrize(
-        "ip,expected",
-        [
-            # IPv4 private ranges
-            ("10.0.0.1", True),
-            ("10.255.255.255", True),
-            ("172.16.0.1", True),
-            ("172.31.255.255", True),
-            ("192.168.0.1", True),
-            ("192.168.255.255", True),
-            # Loopback
-            ("127.0.0.1", True),
-            ("127.255.255.255", True),
-            # Link-local
-            ("169.254.0.1", True),
-            ("169.254.169.254", True),
-            # Reserved
-            ("0.0.0.0", True),
-            ("255.255.255.255", True),
-            # Cloud metadata (explicit check)
-            ("169.254.169.254", True),
-            # IPv6 private/loopback/link-local
-            ("::1", True),
-            ("fe80::1", True),
-            ("fd00::1", True),
-            ("fc00::1", True),
-            # IPv4-mapped IPv6
-            ("::ffff:127.0.0.1", True),
-            ("::ffff:10.0.0.1", True),
-            ("::ffff:169.254.169.254", True),
-            ("::ffff:192.168.1.1", True),
-            # Public IPs -- should NOT be private
-            ("8.8.8.8", False),
-            ("1.1.1.1", False),
-            ("93.184.216.34", False),
-            ("104.16.132.229", False),
-            ("2606:4700::1", False),
-            ("2001:db8::1", True),  # documentation range, reserved
-            # Invalid input -- treated as private (fail-closed)
-            ("invalid", True),
-            ("", True),
-            ("not.an.ip", True),
-        ],
-    )
-    def test_ip_classification(self, ip: str, expected: bool) -> None:
-        assert is_private_ip(ip) == expected
-```
-
-### 1.2 Unit Tests -- `is_safe_url()`
-
-**File:** `tests/unit/utils/test_ssrf.py`
+#### 1.1.1 Shared guard: `tests/unit/utils/test_ssrf.py`
 
 ```python
-import socket
+"""Unit tests for the promoted shared SSRF guard (registry/utils/ssrf.py)."""
 from unittest.mock import patch
 
 import pytest
-from registry.utils.ssrf import is_safe_url, get_trusted_domains
 
 
-class TestIsSafeUrl:
-    """Unit tests for the shared SSRF URL validation function."""
+def _clear_cache() -> None:
+    from registry.utils.ssrf import _trusted_domains
+    _trusted_domains.cache_clear()
 
-    # --- Scheme validation ---
 
-    def test_blocks_ftp_scheme(self) -> None:
-        assert is_safe_url("ftp://example.com/file") is False
+class TestScheme:
+    @pytest.mark.parametrize("url", [
+        "ftp://example.com/x",
+        "file:///etc/passwd",
+        "gopher://127.0.0.1:6379/_",
+        "not-a-url",
+        "",
+    ])
+    @patch("registry.utils.ssrf.settings")
+    def test_non_http_schemes_blocked(self, mock_settings, url):
+        mock_settings.github_extra_hosts = ""
+        mock_settings.ssrf_allowed_hosts = ""
+        _clear_cache()
+        from registry.utils.ssrf import is_safe_url
+        assert is_safe_url(url) is False
 
-    def test_blocks_file_scheme(self) -> None:
-        assert is_safe_url("file:///etc/passwd") is False
 
-    def test_blocks_gopher_scheme(self) -> None:
-        assert is_safe_url("gopher://evil.com") is False
+class TestPrivateAndMetadataIPs:
+    @pytest.mark.parametrize("resolved_ip", [
+        "127.0.0.1",           # loopback
+        "10.0.0.5",            # private A
+        "192.168.1.10",        # private C
+        "172.16.0.1",          # private B
+        "169.254.169.254",     # EC2 IMDS
+        "169.254.170.2",       # Fargate task-role credentials endpoint
+        "0.0.0.0",             # unspecified
+        "::1",                 # IPv6 loopback
+        "fe80::1",             # IPv6 link-local
+        "fd00::1",             # IPv6 ULA (private)
+        "::",                  # IPv6 unspecified
+        "::ffff:169.254.169.254",  # IPv4-mapped IPv6 metadata (must be unwrapped)
+        "::ffff:10.0.0.1",         # IPv4-mapped IPv6 private
+    ])
+    @patch("registry.utils.ssrf.settings")
+    def test_blocked_addresses(self, mock_settings, resolved_ip):
+        mock_settings.github_extra_hosts = ""
+        mock_settings.ssrf_allowed_hosts = ""
+        _clear_cache()
+        with patch("registry.utils.ssrf.socket.getaddrinfo") as m:
+            m.return_value = [(None, None, None, None, (resolved_ip, 443))]
+            from registry.utils.ssrf import is_safe_url
+            assert is_safe_url("https://attacker-controlled.example/") is False
 
-    def test_blocks_javascript_scheme(self) -> None:
-        assert is_safe_url("javascript:alert(1)") is False
+    @patch("registry.utils.ssrf.settings")
+    def test_public_ip_allowed(self, mock_settings):
+        mock_settings.github_extra_hosts = ""
+        mock_settings.ssrf_allowed_hosts = ""
+        _clear_cache()
+        with patch("registry.utils.ssrf.socket.getaddrinfo") as m:
+            m.return_value = [(None, None, None, None, ("93.184.216.34", 443))]
+            from registry.utils.ssrf import is_safe_url
+            assert is_safe_url("https://example.com/") is True
 
-    def test_blocks_data_scheme(self) -> None:
-        assert is_safe_url("data:text/html,<script>alert(1)</script>") is False
-
-    def test_blocks_empty_scheme(self) -> None:
-        assert is_safe_url("://example.com") is False
-
-    # --- Hostname validation ---
-
-    def test_blocks_empty_url(self) -> None:
-        assert is_safe_url("") is False
-
-    def test_blocks_no_hostname(self) -> None:
-        assert is_safe_url("http://") is False
-
-    def test_blocks_malformed_url(self) -> None:
-        assert is_safe_url("not-a-url") is False
-
-    # --- Trusted domains ---
-
-    def test_allows_github_com(self) -> None:
-        assert is_safe_url("https://github.com/org/repo") is True
-
-    def test_allows_raw_githubusercontent(self) -> None:
-        assert is_safe_url("https://raw.githubusercontent.com/org/repo/main/file") is True
-
-    def test_allows_gitlab_com(self) -> None:
-        assert is_safe_url("https://gitlab.com/group/project") is True
-
-    def test_allows_bitbucket_org(self) -> None:
-        assert is_safe_url("https://bitbucket.org/team/repo") is True
-
-    def test_trusted_domains_case_insensitive(self) -> None:
-        assert is_safe_url("https://GitHub.COM/org/repo") is True
-        assert is_safe_url("https://GITLAB.com/group/project") is True
-
-    def test_trusted_domain_not_subdomain_match(self) -> None:
-        """Ensure evil.github.com is NOT treated as trusted."""
-        with patch("registry.utils.ssrf.socket.getaddrinfo") as mock_dns:
-            mock_dns.return_value = [
-                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 443))
+    @patch("registry.utils.ssrf.settings")
+    def test_any_private_in_multi_answer_blocks(self, mock_settings):
+        """If ANY resolved address is private, the URL is blocked."""
+        mock_settings.github_extra_hosts = ""
+        mock_settings.ssrf_allowed_hosts = ""
+        _clear_cache()
+        with patch("registry.utils.ssrf.socket.getaddrinfo") as m:
+            m.return_value = [
+                (None, None, None, None, ("93.184.216.34", 443)),
+                (None, None, None, None, ("10.0.0.5", 443)),
             ]
-            assert is_safe_url("https://evil.github.com/") is False
-
-    # --- DNS resolution and IP checks ---
-
-    @patch("registry.utils.ssrf.socket.getaddrinfo")
-    def test_blocks_private_ip_10_range(self, mock_dns) -> None:
-        mock_dns.return_value = [
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 80))
-        ]
-        assert is_safe_url("http://evil.com/path") is False
-
-    @patch("registry.utils.ssrf.socket.getaddrinfo")
-    def test_blocks_private_ip_172_range(self, mock_dns) -> None:
-        mock_dns.return_value = [
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("172.16.0.1", 443))
-        ]
-        assert is_safe_url("https://evil.com/") is False
-
-    @patch("registry.utils.ssrf.socket.getaddrinfo")
-    def test_blocks_loopback(self, mock_dns) -> None:
-        mock_dns.return_value = [
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))
-        ]
-        assert is_safe_url("http://localhost-alias.com/") is False
-
-    @patch("registry.utils.ssrf.socket.getaddrinfo")
-    def test_blocks_metadata_endpoint(self, mock_dns) -> None:
-        mock_dns.return_value = [
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 80))
-        ]
-        assert is_safe_url("http://metadata.internal/latest/meta-data/") is False
-
-    @patch("registry.utils.ssrf.socket.getaddrinfo")
-    def test_allows_public_ip(self, mock_dns) -> None:
-        mock_dns.return_value = [
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
-        ]
-        assert is_safe_url("https://example.com/") is True
-
-    @patch("registry.utils.ssrf.socket.getaddrinfo")
-    def test_blocks_dns_resolution_failure(self, mock_dns) -> None:
-        mock_dns.side_effect = socket.gaierror("Name or service not known")
-        assert is_safe_url("http://nonexistent.invalid/") is False
-
-    @patch("registry.utils.ssrf.socket.getaddrinfo")
-    def test_blocks_if_any_resolved_ip_is_private(self, mock_dns) -> None:
-        mock_dns.return_value = [
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80)),
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 80)),
-        ]
-        assert is_safe_url("http://dual-homed.com/") is False
-
-    @patch("registry.utils.ssrf.socket.getaddrinfo")
-    def test_allows_all_public_ips(self, mock_dns) -> None:
-        mock_dns.return_value = [
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.35", 443)),
-        ]
-        assert is_safe_url("https://cdn.example.com/") is True
-
-    # --- IPv6 edge cases ---
-
-    @patch("registry.utils.ssrf.socket.getaddrinfo")
-    def test_blocks_ipv6_loopback(self, mock_dns) -> None:
-        mock_dns.return_value = [
-            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", 80, 0, 0))
-        ]
-        assert is_safe_url("http://ipv6-loopback.com/") is False
-
-    @patch("registry.utils.ssrf.socket.getaddrinfo")
-    def test_blocks_ipv4_mapped_ipv6_private(self, mock_dns) -> None:
-        mock_dns.return_value = [
-            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::ffff:10.0.0.1", 80, 0, 0))
-        ]
-        assert is_safe_url("http://mapped-ipv6.com/") is False
-
-    # --- call_site parameter ---
-
-    @patch("registry.utils.ssrf.socket.getaddrinfo")
-    def test_call_site_passed_to_metric(self, mock_dns) -> None:
-        mock_dns.return_value = [
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 80))
-        ]
-        # Should not raise; call_site is informational
-        assert is_safe_url("http://evil.com/", call_site="test_caller") is False
+            from registry.utils.ssrf import is_safe_url
+            assert is_safe_url("https://mixed.example/") is False
 
 
-class TestGetTrustedDomains:
-    def test_includes_builtin_defaults(self) -> None:
-        get_trusted_domains.cache_clear()
-        domains = get_trusted_domains()
-        assert "github.com" in domains
-        assert "gitlab.com" in domains
-        assert "raw.githubusercontent.com" in domains
-        assert "bitbucket.org" in domains
+class TestAllowlistMerge:
+    @patch("registry.utils.ssrf.settings")
+    def test_ssrf_allowed_hosts_bypasses_dns(self, mock_settings):
+        """A host in SSRF_ALLOWED_HOSTS is trusted without DNS resolution."""
+        mock_settings.github_extra_hosts = ""
+        mock_settings.ssrf_allowed_hosts = "internal-mcp.corp"
+        _clear_cache()
+        # getaddrinfo must NOT be called for an allowlisted host.
+        with patch("registry.utils.ssrf.socket.getaddrinfo",
+                   side_effect=AssertionError("getaddrinfo called for allowlisted host")):
+            from registry.utils.ssrf import is_safe_url
+            assert is_safe_url("https://internal-mcp.corp/mcp") is True
 
-    def test_merges_github_extra_hosts(self) -> None:
-        with patch(
-            "registry.utils.ssrf.settings"
-        ) as mock_settings:
-            mock_settings.github_extra_hosts = "ghes.corp.com,git.internal"
-            mock_settings.ssrf_additional_trusted_domains = ""
-            get_trusted_domains.cache_clear()
-            domains = get_trusted_domains()
-            assert "ghes.corp.com" in domains
-            assert "git.internal" in domains
+    @patch("registry.utils.ssrf.settings")
+    def test_github_and_ssrf_hosts_both_merged(self, mock_settings):
+        mock_settings.github_extra_hosts = "ghes.corp"
+        mock_settings.ssrf_allowed_hosts = "mcp.corp"
+        _clear_cache()
+        from registry.utils.ssrf import _DEFAULT_TRUSTED_DOMAINS, _trusted_domains
+        assert _trusted_domains() == _DEFAULT_TRUSTED_DOMAINS | {"ghes.corp", "mcp.corp"}
 
-    def test_merges_ssrf_additional_domains(self) -> None:
-        with patch(
-            "registry.utils.ssrf.settings"
-        ) as mock_settings:
-            mock_settings.github_extra_hosts = ""
-            mock_settings.ssrf_additional_trusted_domains = "corp.example.com,internal.dev"
-            get_trusted_domains.cache_clear()
-            domains = get_trusted_domains()
-            assert "corp.example.com" in domains
-            assert "internal.dev" in domains
+    @patch("registry.utils.ssrf.settings")
+    def test_unconfigured_internal_host_blocked(self, mock_settings):
+        mock_settings.github_extra_hosts = ""
+        mock_settings.ssrf_allowed_hosts = ""
+        _clear_cache()
+        with patch("registry.utils.ssrf.socket.getaddrinfo") as m:
+            m.return_value = [(None, None, None, None, ("10.0.0.5", 443))]
+            from registry.utils.ssrf import is_safe_url
+            assert is_safe_url("https://internal.example.com/foo") is False
 
-    def test_handles_empty_and_whitespace(self) -> None:
-        with patch(
-            "registry.utils.ssrf.settings"
-        ) as mock_settings:
-            mock_settings.github_extra_hosts = " , , "
-            mock_settings.ssrf_additional_trusted_domains = ""
-            get_trusted_domains.cache_clear()
-            domains = get_trusted_domains()
-            # Should only contain builtins, no empty strings
-            assert "" not in domains
+
+class TestResolutionFailure:
+    @patch("registry.utils.ssrf.settings")
+    def test_unresolvable_host_fails_closed(self, mock_settings):
+        import socket as _socket
+        mock_settings.github_extra_hosts = ""
+        mock_settings.ssrf_allowed_hosts = ""
+        _clear_cache()
+        with patch("registry.utils.ssrf.socket.getaddrinfo",
+                   side_effect=_socket.gaierror("no such host")):
+            from registry.utils.ssrf import is_safe_url
+            assert is_safe_url("https://does-not-resolve.invalid/") is False
 ```
 
-### 1.3 curl / HTTP Tests -- Registration-Time Validation
+Assertions:
+- Non-http(s) schemes and malformed URLs return `False`.
+- Every private/loopback/link-local/reserved/unspecified/metadata address (IPv4, IPv6, and IPv4-mapped IPv6) returns `False`.
+- The Fargate `169.254.170.2` and IPv4-mapped `::ffff:169.254.169.254` are blocked (regression guard for the metadata-bypass finding).
+- A public IP returns `True`; a mixed answer with any private IP returns `False`.
+- `SSRF_ALLOWED_HOSTS` bypasses DNS (asserted by making `getaddrinfo` raise); the merged allowlist equals defaults + both configured sets.
+- Resolution failure fails closed.
 
-#### 1.3.1 Server Registration Blocked (private IP)
-
-```bash
-# Register a server with a private IP URL -- expect 422
-curl -s -w "\n%{http_code}" -X POST "$REGISTRY_URL/servers/register" \
-  -H "$AUTH_HEADER" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "ssrf-test-private",
-    "description": "SSRF test server",
-    "proxy_pass_url": "http://10.0.0.5:8080/mcp"
-  }'
-
-# Expected: HTTP 422
-# Expected body contains: "reason": "private_ip"
-```
-
-#### 1.3.2 Server Registration Blocked (metadata endpoint)
-
-```bash
-curl -s -w "\n%{http_code}" -X POST "$REGISTRY_URL/servers/register" \
-  -H "$AUTH_HEADER" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "ssrf-test-metadata",
-    "description": "SSRF metadata test",
-    "proxy_pass_url": "http://169.254.169.254/latest/meta-data/"
-  }'
-
-# Expected: HTTP 422
-# Expected body contains: "reason": "private_ip" or "metadata_endpoint"
-```
-
-#### 1.3.3 Server Registration Blocked (non-http scheme)
-
-```bash
-curl -s -w "\n%{http_code}" -X POST "$REGISTRY_URL/servers/register" \
-  -H "$AUTH_HEADER" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "ssrf-test-ftp",
-    "description": "SSRF scheme test",
-    "proxy_pass_url": "ftp://evil.com/payload"
-  }'
-
-# Expected: HTTP 422
-# Expected body contains: "reason": "invalid_scheme"
-```
-
-#### 1.3.4 Server Registration Allowed (public URL)
-
-```bash
-curl -s -w "\n%{http_code}" -X POST "$REGISTRY_URL/servers/register" \
-  -H "$AUTH_HEADER" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "ssrf-test-public",
-    "description": "Valid public server",
-    "proxy_pass_url": "https://mcp.example.com:443/mcp"
-  }'
-
-# Expected: HTTP 201 (or 200 depending on endpoint convention)
-```
-
-#### 1.3.5 Agent Registration Blocked (loopback)
-
-```bash
-curl -s -w "\n%{http_code}" -X POST "$REGISTRY_URL/agents/register" \
-  -H "$AUTH_HEADER" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "ssrf-test-agent",
-    "description": "SSRF agent test",
-    "url": "http://127.0.0.1:9090"
-  }'
-
-# Expected: HTTP 422
-```
-
-#### 1.3.6 Skill Registration Blocked (private IP)
-
-```bash
-curl -s -w "\n%{http_code}" -X POST "$REGISTRY_URL/skills/register" \
-  -H "$AUTH_HEADER" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "ssrf-test-skill",
-    "description": "SSRF skill test",
-    "skill_md_url": "http://192.168.1.100/SKILL.md"
-  }'
-
-# Expected: HTTP 422
-```
-
-### 1.4 Unit Tests -- Call Site Integration
+#### 1.1.2 Alternate IP-encoding vectors (resolver-dependent, mark clearly)
 
 ```python
-"""Tests verifying each call site correctly integrates is_safe_url()."""
-import pytest
-from unittest.mock import patch, AsyncMock, MagicMock
-
-
-class TestMcpClientIntegration:
-    @pytest.mark.asyncio
-    @patch("registry.core.mcp_client.is_safe_url", return_value=False)
-    async def test_detect_transport_returns_blocked(self, mock_ssrf) -> None:
-        from registry.core.mcp_client import detect_server_transport
-
-        result = await detect_server_transport("http://10.0.0.1:8080")
-        assert result == "blocked"
-        mock_ssrf.assert_called_once()
-
-    @pytest.mark.asyncio
-    @patch("registry.core.mcp_client.is_safe_url", return_value=False)
-    async def test_get_tools_returns_none(self, mock_ssrf) -> None:
-        from registry.core.mcp_client import get_tools_from_server_with_transport
-
-        result = await get_tools_from_server_with_transport("http://10.0.0.1:8080")
-        assert result is None
-        mock_ssrf.assert_called_once()
-
-
-class TestHealthServiceIntegration:
-    @pytest.mark.asyncio
-    @patch("registry.health.service.is_safe_url", return_value=False)
-    async def test_health_check_marks_unhealthy(self, mock_ssrf) -> None:
-        # Verify that a blocked URL causes the server to be marked UNHEALTHY
-        # (specific setup depends on HealthService constructor mocking)
-        pass  # Implementation depends on test fixtures
-
-
-class TestAgentValidatorIntegration:
-    @patch("registry.utils.agent_validator.is_safe_url", return_value=False)
-    def test_reachability_returns_false(self, mock_ssrf) -> None:
-        from registry.utils.agent_validator import _check_agent_reachability
-
-        is_reachable, error = _check_agent_reachability("http://10.0.0.1:9090")
-        assert is_reachable is False
-        assert "SSRF" in error
-
-
-class TestSkillScannerIntegration:
-    @patch("registry.services.skill_scanner.is_safe_url", return_value=False)
-    def test_download_raises_value_error(self, mock_ssrf) -> None:
-        from registry.services.skill_scanner import SkillScanner
-
-        scanner = SkillScanner()
-        with pytest.raises(ValueError, match="SSRF"):
-            scanner._download_skill_content("http://10.0.0.1/SKILL.md")
+class TestAlternateEncodings:
+    """urlparse does not normalize these; glibc getaddrinfo does. These assert
+    the guard blocks them when the resolver expands them to a blocked IP."""
+    @pytest.mark.parametrize("host,resolved", [
+        ("2130706433", "127.0.0.1"),   # decimal loopback
+        ("0177.0.0.1", "127.0.0.1"),   # octal
+        ("0x7f000001", "127.0.0.1"),   # hex
+    ])
+    @patch("registry.utils.ssrf.settings")
+    def test_encoded_loopback_blocked(self, mock_settings, host, resolved):
+        mock_settings.github_extra_hosts = ""
+        mock_settings.ssrf_allowed_hosts = ""
+        _clear_cache()
+        with patch("registry.utils.ssrf.socket.getaddrinfo") as m:
+            m.return_value = [(None, None, None, None, (resolved, 80))]
+            from registry.utils.ssrf import is_safe_url
+            assert is_safe_url(f"http://{host}/") is False
 ```
+
+#### 1.1.3 Agent-card probe: `tests/unit/utils/test_agent_validator_ssrf.py`
+
+```python
+from unittest.mock import patch
+
+
+class TestAgentCardReachabilitySSRF:
+    def test_blocked_url_returns_unreachable_without_fetch(self):
+        from registry.utils import agent_validator
+        with patch("registry.utils.agent_validator.is_safe_url", return_value=False), \
+             patch("registry.utils.agent_validator.httpx.get") as mock_get:
+            ok, reason = agent_validator._check_endpoint_reachability("http://169.254.169.254")
+            assert ok is False
+            assert "SSRF" in reason
+            mock_get.assert_not_called()   # no outbound request made
+
+    def test_safe_url_proceeds_to_fetch(self):
+        from registry.utils import agent_validator
+        mock_resp = type("R", (), {"status_code": 200, "is_redirect": False})()
+        with patch("registry.utils.agent_validator.is_safe_url", return_value=True), \
+             patch("registry.utils.agent_validator.httpx.get", return_value=mock_resp) as mock_get:
+            ok, reason = agent_validator._check_endpoint_reachability("https://example.com")
+            assert ok is True
+            mock_get.assert_called_once()
+            # redirects must not be followed
+            _, kwargs = mock_get.call_args
+            assert kwargs.get("follow_redirects") is False
+```
+
+#### 1.1.4 Health path: `tests/unit/health/test_health_service_ssrf.py`
+
+```python
+import pytest
+from unittest.mock import AsyncMock, patch
+
+from registry.constants import HealthStatus
+
+
+class TestHealthCheckSSRF:
+    @pytest.mark.asyncio
+    async def test_private_proxy_url_blocked_no_request(self):
+        from registry.health.service import health_service
+        client = AsyncMock()   # any outbound call would show up here
+        with patch("registry.health.service.is_safe_url", return_value=False):
+            healthy, status = await health_service._check_server_endpoint_transport_aware(
+                client, "http://10.0.0.5:8000", {"supported_transports": ["streamable-http"]}
+            )
+        assert healthy is False
+        assert status == HealthStatus.UNHEALTHY_SSRF_BLOCKED
+        client.post.assert_not_awaited()
+        client.get.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_proxy_url_still_returns_missing_status(self):
+        """Existing behavior preserved: empty URL -> UNHEALTHY_MISSING_PROXY_URL, not SSRF."""
+        from registry.health.service import health_service
+        client = AsyncMock()
+        healthy, status = await health_service._check_server_endpoint_transport_aware(
+            client, "", {}
+        )
+        assert healthy is False
+        assert status == HealthStatus.UNHEALTHY_MISSING_PROXY_URL
+```
+
+Assertions:
+- A private/metadata `proxy_pass_url` yields `UNHEALTHY_SSRF_BLOCKED` and makes no outbound `get`/`post`/`head`.
+- The pre-existing missing-URL path is untouched.
+- (Add a case asserting the guard is invoked via `asyncio.to_thread` if the implementation exposes it; at minimum assert no event-loop blocking by mocking `is_safe_url`.)
+
+### 1.2 curl / HTTP Tests
+
+Run against a live registry. These require the service and a valid token.
+
+#### 1.2.1 Agent registration with an internal URL (agent-card probe)
+
+```bash
+curl -s -X POST "$REGISTRY_URL/agents/register" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "name": "ssrf-probe-test",
+        "path": "/agents/ssrf-probe-test",
+        "url": "http://169.254.169.254",
+        "description": "SSRF test",
+        "version": "1.0.0"
+      }' | jq .
+```
+
+Expected: registration succeeds (reachability is non-blocking) but the reachability field / server logs show the URL was blocked by SSRF protection. Grep the registry logs:
+
+```bash
+docker compose logs registry 2>&1 | grep -i "SSRF protection: refusing to probe agent endpoint"
+```
+
+Negative/positive control: register with `"url": "https://example.com"` and confirm no SSRF warning is logged and reachability is attempted.
+
+#### 1.2.2 Agent health check on an internal URL
+
+```bash
+# After an agent with an internal URL is registered (path from 1.2.1):
+curl -s -X POST "$REGISTRY_URL/agents/agents/ssrf-probe-test/health" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | jq .
+```
+
+Expected: `status` is `"unhealthy: blocked by SSRF protection"` and no outbound request reaches `169.254.169.254`. Assert:
+
+```bash
+STATUS=$(curl -s -X POST "$REGISTRY_URL/agents/agents/ssrf-probe-test/health" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | jq -r '.status')
+[ "$STATUS" = "unhealthy: blocked by SSRF protection" ] && echo PASS || echo "FAIL: $STATUS"
+```
+
+#### 1.2.3 Server registration + immediate health check on an internal URL
+
+```bash
+curl -s -X POST "$REGISTRY_URL/register" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -F "name=ssrf-server-test" \
+  -F "path=/ssrf-server-test" \
+  -F "proxy_pass_url=http://10.0.0.5:8000" \
+  -F "supported_transports=streamable-http" | jq .
+```
+
+Expected: the server is registered, and the immediate health check (dispatched on registration) reports `UNHEALTHY_SSRF_BLOCKED`. Verify via the service list / health endpoint and the log line `SSRF protection: blocked health check for proxy_pass_url 'http://10.0.0.5:8000'`.
+
+### 1.3 CLI Tests
+
+**Not Applicable** - this change adds no new CLI command and modifies no existing CLI invocation. The `cli/` tooling registers agents/servers through the same API paths already covered by the curl tests above; no CLI flag or output changes.
+
+---
 
 ## 2. Backwards Compatibility Tests
 
-### 2.1 Existing Servers with Public URLs Continue Working
+### 2.1 Existing SKILL.md SSRF behavior unchanged (with repointed patch targets)
+
+The guard moved to `registry/utils/ssrf.py` and `skill_service` re-exports it. The existing behavior must not change, but `tests/unit/services/test_skill_service_ssrf_allowlist.py` must be updated to patch the new module location (see LLD Step 2). Run:
 
 ```bash
-# Register a server with a valid public URL
-curl -s -w "\n%{http_code}" -X POST "$REGISTRY_URL/servers/register" \
-  -H "$AUTH_HEADER" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "backwards-compat-test",
-    "description": "Public server for compat test",
-    "proxy_pass_url": "https://httpbin.org/get"
-  }'
-
-# Expected: HTTP 201 -- registration succeeds as before
-
-# Verify health check runs successfully
-sleep 10
-curl -s "$REGISTRY_URL/servers/backwards-compat-test/health" \
-  -H "$AUTH_HEADER"
-
-# Expected: healthy status (URL is reachable and passes SSRF check)
+uv run pytest tests/unit/services/test_skill_service_ssrf_allowlist.py -v
+uv run pytest tests/unit/test_skill_service_github_auth.py -v
+uv run pytest tests/unit/test_skill_routes_github_auth.py -v
+uv run pytest tests/unit/api/test_skill_inline_content.py -v
 ```
 
-### 2.2 Trusted Domains Still Work
+Expected: all pass. The eight files that patch `registry.services.skill_service._is_safe_url` directly pass unchanged (the re-exported name still exists). The allowlist file passes after its `settings`/`getaddrinfo`/`cache_clear` targets are repointed to `registry.utils.ssrf`.
+
+Assert the re-export symbols still resolve:
 
 ```bash
-# Register a skill pointing to GitHub (trusted domain)
-curl -s -w "\n%{http_code}" -X POST "$REGISTRY_URL/skills/register" \
-  -H "$AUTH_HEADER" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "trusted-domain-test",
-    "description": "GitHub skill for compat test",
-    "skill_md_url": "https://raw.githubusercontent.com/org/repo/main/SKILL.md"
-  }'
-
-# Expected: HTTP 201 -- trusted domain bypasses IP check
+uv run python -c "from registry.services.skill_service import _is_safe_url, _is_private_ip, _trusted_domains, _DEFAULT_TRUSTED_DOMAINS; print('re-export OK')"
+uv run python -c "from registry.utils.ssrf import is_safe_url, _is_safe_url; assert is_safe_url is _is_safe_url; print('alias OK')"
 ```
 
-### 2.3 Configuration Defaults Preserve Prior Behavior
+### 2.2 Public-URL registrations and health checks behave as before
 
-```python
-"""Verify that with default settings, behavior matches pre-change."""
+- Registering an agent/server with a public `url`/`proxy_pass_url` produces the same reachability/health outcome as pre-change (positive control in 1.2).
+- With `SSRF_ALLOWED_HOSTS` and `SSRF_ENFORCE` unset, only private/internal targets change behavior; public deployments see no difference. Verify by diffing the health status of a known-good public server before and after the change.
 
-def test_default_ssrf_additional_trusted_domains_is_empty() -> None:
-    from registry.core.config import Settings
+### 2.3 Monitor-only mode preserves prior behavior
 
-    s = Settings()
-    assert s.ssrf_additional_trusted_domains == ""
-
-
-def test_existing_github_extra_hosts_still_honored() -> None:
-    """If GITHUB_EXTRA_HOSTS was set before, those domains still bypass."""
-    import os
-    os.environ["GITHUB_EXTRA_HOSTS"] = "ghes.corp.com"
-    from registry.utils.ssrf import get_trusted_domains
-
-    get_trusted_domains.cache_clear()
-    domains = get_trusted_domains()
-    assert "ghes.corp.com" in domains
-    del os.environ["GITHUB_EXTRA_HOSTS"]
+```bash
+# Deploy with SSRF_ENFORCE=false
+export SSRF_ENFORCE=false
 ```
 
-### 2.4 Existing skill_service.py Behavior Unchanged
+Expected: an internal `proxy_pass_url` is still contacted (behavior identical to pre-change) but a `WARNING` log and `ssrf_blocked_total` increment are emitted. This is the safety valve for fleets with internal servers.
 
-```python
-"""Verify that skill_service still blocks private IPs after refactoring."""
-from unittest.mock import patch
-import socket
+### 2.4 Default preserves the trusted GitHub/GitLab domains
 
+Confirm `github.com`, `gitlab.com`, `raw.githubusercontent.com`, `bitbucket.org` remain trusted (SKILL.md fetches to GHES via `github_extra_hosts` still work). Covered by `test_github_and_ssrf_hosts_both_merged` and the existing allowlist suite.
 
-@patch("registry.utils.ssrf.socket.getaddrinfo")
-def test_skill_service_still_blocks_private_via_shared_module(mock_dns) -> None:
-    mock_dns.return_value = [
-        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 443))
-    ]
-    from registry.utils.ssrf import is_safe_url
-
-    # This is what skill_service now calls internally
-    assert is_safe_url("https://evil.com/SKILL.md", call_site="skill_service") is False
-```
+---
 
 ## 3. UX Tests
 
-### 3.1 Error Message Clarity
+The change touches user-visible surfaces only indirectly (health status rendering and registration feedback).
 
-```bash
-# Verify error messages are actionable
-RESPONSE=$(curl -s -X POST "$REGISTRY_URL/servers/register" \
-  -H "$AUTH_HEADER" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "ux-test",
-    "proxy_pass_url": "http://10.0.0.5:8080/mcp"
-  }')
+- **Health dashboard rendering:** a server/agent that is SSRF-blocked shows a red "Unhealthy" indicator in `ServerCard`/`AgentCard`. Verify the frontend does not crash on the new `"unhealthy: blocked by SSRF protection"` status value - it is normalized by prefix (`healthStatus.ts`) to the `unhealthy` bucket. Load the dashboard with such a server present and confirm the card renders.
+- **Reason legibility (recommended follow-up, per review):** if the tooltip enhancement is implemented, hovering the status dot should show "blocked by SSRF protection". If not implemented, this is a known gap documented in the LLD Observability section - the reason is only visible in logs/metrics.
+- **Registration feedback:** confirm the behavior when registering an internal agent URL. Today the toast shows success (reachability is non-blocking); the recommended change is a warning toast. Note which behavior is in effect.
+- **Error-message clarity:** the log line `SSRF protection: blocked ...` includes the offending URL and the path, and the health status string is human-readable.
 
-echo "$RESPONSE" | jq .
-
-# Expected structure:
-# {
-#   "detail": "URL validation failed: proxy_pass_url resolves to a private IP address",
-#   "field": "proxy_pass_url",
-#   "url": "http://10.0.0.5:8080/mcp",
-#   "reason": "private_ip"
-# }
-
-# Assertions:
-# - "detail" is a human-readable sentence
-# - "field" identifies which input field failed
-# - "url" echoes back the problematic URL
-# - "reason" is a machine-readable slug
-```
-
-### 3.2 Health Dashboard Shows Correct Status
-
-```bash
-# Register a server that will be blocked at health-check time
-# (simulates DNS rebinding: registered with public IP, then DNS changes)
-# In practice, mock the DNS in test environment
-
-# After SSRF block in health loop, verify status endpoint shows UNHEALTHY
-curl -s "$REGISTRY_URL/servers/rebind-test/health" \
-  -H "$AUTH_HEADER" | jq '.status'
-
-# Expected: "unhealthy"
-```
+---
 
 ## 4. Deployment Surface Tests
 
-### 4.1 Docker Compose -- Environment Variable Picked Up
+### 4.1 Docker wiring
+
+Confirm both new vars are passed through in list form (matching `GITHUB_EXTRA_HOSTS`):
 
 ```bash
-# Create extra_env file with the new variable
-mkdir -p extra_env
-echo "SSRF_ADDITIONAL_TRUSTED_DOMAINS=internal.corp.com,git.private.net" > extra_env/registry.env
-
-# Start the stack
-./build_and_run.sh
-
-# Verify the variable is set inside the container
-docker exec mcp-registry env | grep SSRF_ADDITIONAL_TRUSTED_DOMAINS
-
-# Expected: SSRF_ADDITIONAL_TRUSTED_DOMAINS=internal.corp.com,git.private.net
-
-# Verify the trusted domains include the configured values
-curl -s "$REGISTRY_URL/skills/register" \
-  -H "$AUTH_HEADER" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "internal-corp-skill",
-    "skill_md_url": "https://internal.corp.com/skills/SKILL.md"
-  }'
-
-# Expected: HTTP 201 (internal.corp.com is now trusted)
-
-# Cleanup
-rm extra_env/registry.env
+grep -n "SSRF_ALLOWED_HOSTS\|SSRF_ENFORCE" docker-compose.yml docker-compose.podman.yml docker-compose.prebuilt.yml
+# Expect: - SSRF_ALLOWED_HOSTS=${SSRF_ALLOWED_HOSTS:-}  and  - SSRF_ENFORCE=${SSRF_ENFORCE:-true}
 ```
 
-### 4.2 Docker Compose -- Preflight Validates Reserved Name
+Bring the stack up with an allowlist set and confirm the process sees it:
 
 ```bash
-# Attempt to set the reserved name via extra_env (should be blocked by preflight)
-echo "SSRF_ADDITIONAL_TRUSTED_DOMAINS=evil.com" > extra_env/registry.env
-
-# If preflight validator is updated to include this name:
-./build_and_run.sh 2>&1 | grep -i "reserved"
-
-# Note: This test only applies AFTER the reserved-name list is updated.
-# If the preflight validator does not block it, the variable will be set
-# (which is the intended behavior -- this variable IS user-configurable).
-# The reserved-name list should NOT include SSRF_ADDITIONAL_TRUSTED_DOMAINS
-# because operators are expected to set it.
-
-rm extra_env/registry.env
+SSRF_ALLOWED_HOSTS="internal-mcp.corp" docker compose up -d registry
+docker compose exec registry python -c "from registry.core.config import settings; print(settings.ssrf_allowed_hosts, settings.ssrf_enforce)"
+# Expect: internal-mcp.corp True
 ```
 
-### 4.3 Terraform -- Variable Wiring
+### 4.2 Terraform / ECS wiring
+
+Confirm the var flows through the four Terraform files that carry `GITHUB_EXTRA_HOSTS`:
 
 ```bash
-# Verify Terraform variable exists
-cd terraform/aws-ecs
-grep -A 5 "ssrf_additional_trusted_domains" variables.tf
-
-# Expected: variable definition with type = string and default = ""
-
-# Verify it's wired into the ECS task definition
-grep "SSRF_ADDITIONAL_TRUSTED_DOMAINS" main.tf
-
-# Expected: environment variable block referencing the Terraform variable
+grep -rn "ssrf_allowed_hosts\|SSRF_ALLOWED_HOSTS\|ssrf_enforce\|SSRF_ENFORCE" \
+  terraform/aws-ecs/variables.tf \
+  terraform/aws-ecs/main.tf \
+  terraform/aws-ecs/modules/mcp-gateway/variables.tf \
+  terraform/aws-ecs/modules/mcp-gateway/ecs-services.tf
 ```
 
-### 4.4 Helm -- Values and Reserved Names
+Expected: a root variable declaration, root->module wiring in `main.tf`, a module variable, and a container env injection in `ecs-services.tf`, mirroring `github_extra_hosts`. Validate the plan:
 
 ```bash
-# Verify Helm value exists
-grep -A 2 "ssrfAdditionalTrustedDomains\|SSRF_ADDITIONAL_TRUSTED_DOMAINS" charts/registry/values.yaml
-
-# Verify it's NOT in reserved names (operators SHOULD be able to set it)
-grep "SSRF_ADDITIONAL_TRUSTED_DOMAINS" charts/registry/templates/_helpers.tpl
-
-# Expected: present in reserved names list (because it's chart-managed, not user-overridable via extraEnv)
-
-# Run Helm unit tests
-helm unittest charts/registry
+cd terraform/aws-ecs && terraform validate
 ```
 
-### 4.5 Rollback Verification
+(Do not run `terraform apply` here; validation only.)
+
+### 4.3 Helm / EKS wiring
 
 ```bash
-# Deploy the new version
-# Then rollback to the previous version (without ssrf.py)
-
-# After rollback, verify:
-# 1. Registry starts without errors (no import errors for missing ssrf module)
-#    This is automatically handled because the old code has its own _is_safe_url()
-# 2. Existing servers still work
-curl -s "$REGISTRY_URL/health"
-# Expected: HTTP 200
+grep -n "ssrfAllowedHosts\|SSRF_ALLOWED_HOSTS\|ssrfEnforce\|SSRF_ENFORCE" \
+  charts/mcpgw/values.yaml \
+  charts/mcpgw/templates/deployment.yaml \
+  charts/mcpgw/reserved-env-names.txt
+helm template charts/mcpgw --set ssrfAllowedHosts="internal-mcp.corp" | grep -A1 "SSRF_ALLOWED_HOSTS"
 ```
+
+Expected: `values.yaml` default (`ssrfAllowedHosts: ""`, `ssrfEnforce: true`), the deployment template maps them to env vars, and the reserved-env-names guard includes `SSRF_ALLOWED_HOSTS` / `SSRF_ENFORCE`.
+
+### 4.4 Deploy and verify (staged rollout)
+
+1. Deploy with `SSRF_ENFORCE=false` (monitor-only). Confirm `ssrf_blocked_total` increments for any internal server without changing its health status.
+2. Inventory blocked hosts from the metric/logs; add legitimate ones to `SSRF_ALLOWED_HOSTS`; restart the task (required due to `lru_cache`).
+3. Deploy with `SSRF_ENFORCE=true`. Confirm allowlisted internal servers are healthy and non-allowlisted internal targets report `UNHEALTHY_SSRF_BLOCKED`.
+
+### 4.5 Rollback verification
+
+Set `SSRF_ENFORCE=false` (or unset the new vars entirely) and restart. Confirm behavior reverts to pre-change (internal servers contacted again). Since the feature is additive and gated, rollback is a config change plus task restart - no schema or data migration to undo.
+
+---
 
 ## 5. End-to-End API Tests
 
-### 5.1 Full Registration-to-Health-Check Flow (Valid URL)
+Multi-step scenario spanning registration and health across both hardened paths:
 
 ```bash
-# Step 1: Register a server with a valid public URL
-REGISTER_RESPONSE=$(curl -s -X POST "$REGISTRY_URL/servers/register" \
-  -H "$AUTH_HEADER" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "e2e-ssrf-valid",
-    "description": "E2E test with valid URL",
-    "proxy_pass_url": "https://httpbin.org/get"
-  }')
+set -e
+# 1. Register an internal server (should register, health blocked)
+curl -s -X POST "$REGISTRY_URL/register" -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -F "name=e2e-ssrf" -F "path=/e2e-ssrf" \
+  -F "proxy_pass_url=http://169.254.170.2/" \
+  -F "supported_transports=streamable-http" > /dev/null
 
-echo "$REGISTER_RESPONSE" | jq .
-# Expected: 201 Created
+# 2. Trigger an immediate refresh and read health
+curl -s -X POST "$REGISTRY_URL/refresh/e2e-ssrf" -H "Authorization: Bearer $ACCESS_TOKEN" > /dev/null
+HEALTH=$(curl -s "$REGISTRY_URL/api/servers" -H "Authorization: Bearer $ACCESS_TOKEN" \
+  | jq -r '.[] | select(.path=="/e2e-ssrf") | .status')
+echo "server health: $HEALTH"   # expect unhealthy: blocked by SSRF protection
 
-# Step 2: Wait for health check cycle
-sleep 15
+# 3. Add the host to the allowlist, restart, and re-check (manual step)
+echo "Set SSRF_ALLOWED_HOSTS to include the host and restart, then re-run step 2 to confirm it is contacted."
 
-# Step 3: Check server health status
-HEALTH_RESPONSE=$(curl -s "$REGISTRY_URL/servers/e2e-ssrf-valid/health" \
-  -H "$AUTH_HEADER")
-
-echo "$HEALTH_RESPONSE" | jq '.status'
-# Expected: "healthy"
-
-# Step 4: Cleanup
-curl -s -X DELETE "$REGISTRY_URL/servers/e2e-ssrf-valid" \
-  -H "$AUTH_HEADER"
+# 4. Register a public server (control) and confirm it is contacted/healthy
+curl -s -X POST "$REGISTRY_URL/register" -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -F "name=e2e-public" -F "path=/e2e-public" \
+  -F "proxy_pass_url=https://example.com/" \
+  -F "supported_transports=streamable-http" > /dev/null
 ```
 
-### 5.2 Full Registration Rejection Flow (Private URL)
+Expected flow: internal server blocked at health; public server contacted normally; the metadata/credentials endpoint (`169.254.170.2`) is never reached (verify with a network capture or the absence of a corresponding outbound connection in logs).
 
-```bash
-# Step 1: Attempt to register with private URL
-REGISTER_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$REGISTRY_URL/servers/register" \
-  -H "$AUTH_HEADER" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "e2e-ssrf-private",
-    "description": "E2E test with private URL",
-    "proxy_pass_url": "http://10.0.0.5:8080/mcp"
-  }')
-
-HTTP_CODE=$(echo "$REGISTER_RESPONSE" | tail -1)
-BODY=$(echo "$REGISTER_RESPONSE" | head -1)
-
-# Assert HTTP 422
-[ "$HTTP_CODE" = "422" ] && echo "PASS: Got 422" || echo "FAIL: Got $HTTP_CODE"
-
-# Assert reason in body
-echo "$BODY" | jq -e '.reason' && echo "PASS: Has reason field" || echo "FAIL: Missing reason"
-
-# Step 2: Verify server was NOT registered
-LIST_RESPONSE=$(curl -s "$REGISTRY_URL/servers" \
-  -H "$AUTH_HEADER")
-
-echo "$LIST_RESPONSE" | jq '.[] | select(.name == "e2e-ssrf-private")'
-# Expected: empty (server not found)
-```
-
-### 5.3 Trusted Domain Override Flow
-
-```bash
-# Step 1: Set SSRF_ADDITIONAL_TRUSTED_DOMAINS (requires restart or env injection)
-# In test environment, inject via conftest.py or direct settings override
-
-# Step 2: Register a server on the newly-trusted domain
-REGISTER_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$REGISTRY_URL/servers/register" \
-  -H "$AUTH_HEADER" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "e2e-trusted-override",
-    "description": "Test trusted domain override",
-    "proxy_pass_url": "http://internal.corp.com:8080/mcp"
-  }')
-
-HTTP_CODE=$(echo "$REGISTER_RESPONSE" | tail -1)
-
-# If SSRF_ADDITIONAL_TRUSTED_DOMAINS includes "internal.corp.com":
-# Expected: HTTP 201 (domain is trusted, skips IP check)
-
-# If not configured:
-# Expected: HTTP 422 (private IP or DNS failure)
-```
-
-### 5.4 Metrics Emission Verification
-
-```bash
-# Trigger a blocked request
-curl -s -X POST "$REGISTRY_URL/servers/register" \
-  -H "$AUTH_HEADER" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "metrics-test",
-    "proxy_pass_url": "http://10.0.0.1:8080/mcp"
-  }'
-
-# Check metrics endpoint for ssrf_blocked_total
-curl -s "$REGISTRY_URL/metrics" | grep "ssrf_blocked_total"
-
-# Expected output contains:
-# ssrf_blocked_total{call_site="server_registration",reason="private_ip"} 1
-```
+---
 
 ## 6. Test Execution Checklist
 
-- [ ] Section 1.1 (is_private_ip unit tests) passes
-- [ ] Section 1.2 (is_safe_url unit tests) passes
-- [ ] Section 1.3 (curl registration tests) passes
-- [ ] Section 1.4 (call site integration tests) passes
-- [ ] Section 2 (backwards compatibility) verified
-- [ ] Section 3 (UX / error messages) verified
-- [ ] Section 4.1 (Docker Compose) verified
-- [ ] Section 4.3 (Terraform variable) verified
-- [ ] Section 4.4 (Helm values) verified
-- [ ] Section 4.5 (Rollback) verified
-- [ ] Section 5 (E2E flows) verified
-- [ ] Unit tests added under `tests/unit/utils/test_ssrf.py`
-- [ ] Integration tests added under `tests/integration/test_ssrf_registration.py`
-- [ ] `uv run pytest tests/ -n 8` passes with no regressions
-- [ ] Existing `test_skill_service_ssrf_allowlist.py` still passes after refactoring
-- [ ] No new Bandit findings (`uv run bandit -r registry/`)
-- [ ] No new mypy errors (`uv run mypy registry/`)
+- [ ] Section 1 (Functional) passes - unit tests for the guard, agent-card probe, and health path; curl tests against a live registry.
+- [ ] Section 2 (Backwards Compat) verified - existing skill SSRF suite green (with repointed patch targets); public URLs unchanged; monitor-only mode preserves behavior; default trusted domains intact.
+- [ ] Section 3 (UX) verified - dashboard renders the new status without error; registration/refresh feedback behavior noted.
+- [ ] Section 4 (Deployment) verified - Docker/Terraform/Helm wiring present for `SSRF_ALLOWED_HOSTS` and `SSRF_ENFORCE`; staged rollout and rollback exercised.
+- [ ] Section 5 (E2E) verified - internal blocked, public healthy, metadata endpoint never contacted.
+- [ ] IPv6 / IPv4-mapped / alternate-encoding vectors covered in unit tests (regression guard for the metadata-bypass finding).
+- [ ] Unit tests added under `tests/unit/utils/` and `tests/unit/health/`.
+- [ ] `uv run pytest tests/` passes with no regressions.
+- [ ] `uv run ruff check .` and `uv run ruff format --check .` clean on new/modified files.

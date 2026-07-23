@@ -1,34 +1,29 @@
 # Testing Plan: Migrate remaining sensitive ECS env vars to AWS Secrets Manager
 
-*Created: 2026-06-25*
+*Created: 2026-07-23*
 *Related LLD: `./lld.md`*
 *Related Issue: `./github-issue.md`*
 
 ## Overview
 
 ### Scope of Testing
-This change is infrastructure-only (Terraform/ECS). Testing verifies that (a) the migrated secret names no longer appear in any container `environment` block, (b) they appear in the `secrets` block with valid `valueFrom` ARNs, (c) new Secrets Manager resources and IAM grants are created/updated correctly, (d) `terraform validate`/`plan` succeed under both default and all-features-enabled configurations, and (e) services still start and authenticate after apply. There is no application code change, so the test focus is plan-diff assertions, rendered-task-definition inspection, and a deploy-and-verify smoke pass.
+This change is Terraform infrastructure that moves 13 sensitive values from the ECS `environment` block to the `secrets` block (Secrets Manager `valueFrom`) on the `auth-server`, `registry`, and `grafana` services, adds a `use_secrets_manager_for_env` fallback flag, and extends the IAM secrets-read policy. Testing verifies: (1) Terraform validates and plans cleanly with the flag on and off; (2) each sensitive variable appears in exactly one of `environment`/`secrets` per the flag; (3) the IAM policy grants read on every referenced secret ARN; (4) the running application boots and reads each value identically to the plaintext path; (5) empty optional secrets are absent (not injected as a truthy placeholder); (6) the fallback path is byte-for-byte identical to pre-change behavior.
 
-Per the SWE skill constraints, the commands below are the executable plan a future implementer runs. This skill does not execute them against the cloned `repo/`.
+There are no new HTTP endpoints or CLI commands. The dominant test surface is Terraform plan inspection, IAM coverage, and a live task-start smoke test.
 
 ### Prerequisites
-- [ ] Terraform >= the version pinned in `terraform/aws-ecs` initialized (`terraform init`).
-- [ ] AWS credentials for a non-prod account/stack for the deploy-and-verify section.
-- [ ] `jq` and `grep` available for plan/JSON assertions.
-- [ ] `helm` with the `unittest` plugin (for the reserved-env-name check).
-- [ ] The cloned repo at tag `1.24.4`.
+- [ ] Terraform >= the version pinned in `versions.tf`, AWS provider configured.
+- [ ] A representative `terraform.tfvars` (copy `terraform.tfvars.example`), including at least one non-empty value for each of `registry_api_token`, `github_pat`, `github_app_private_key`, `federation_encryption_key`, and (for observability) `enable_observability = true`.
+- [ ] AWS credentials with permission to plan/apply the stack in a non-production account.
+- [ ] `jq` installed for JSON assertions.
+- [ ] For the live smoke test: the stack applied and ECS services reaching steady state.
 
 ### Shared Variables
 ```bash
 export TF_DIR="terraform/aws-ecs"
-export MODULE_DIR="$TF_DIR/modules/mcp-gateway"
-
-# The secret env-var names being migrated (single source of truth for the asserts below)
-export MIGRATED_NAMES="REGISTRY_API_TOKEN REGISTRY_API_KEYS FEDERATION_STATIC_TOKEN FEDERATION_ENCRYPTION_KEY ANS_API_KEY ANS_API_SECRET REGISTRATION_WEBHOOK_AUTH_TOKEN REGISTRATION_GATE_AUTH_CREDENTIAL REGISTRATION_GATE_OAUTH2_CLIENT_SECRET GITHUB_PAT GITHUB_APP_PRIVATE_KEY GF_SECURITY_ADMIN_PASSWORD"
-
-# For deploy-and-verify (set to your stack)
 export AWS_REGION="us-east-1"
-export CLUSTER="<your-ecs-cluster-name>"
+export CLUSTER="mcp-gateway"            # adjust to your name_prefix
+export REGISTRY_URL="https://<your-registry-domain>"
 ```
 
 ---
@@ -37,293 +32,313 @@ export CLUSTER="<your-ecs-cluster-name>"
 
 ### 1.1 curl / HTTP Tests
 
-**Not Applicable** - this change adds no HTTP endpoints and modifies none. The services' HTTP surface is unchanged; only the injection mechanism for existing env vars changes. (Service-level smoke checks live in Section 5.)
+**Not Applicable** - This change adds no HTTP endpoints and modifies no request/response contract. The application reads the same environment variable names in both the plaintext and Secrets Manager paths, so existing endpoints are unchanged. The one endpoint whose auth depends on a migrated variable (`/admin/federation-token`, which checks `REGISTRY_API_TOKEN`) is covered as a negative security test in Section 5.
 
 ### 1.2 CLI Tests
 
-The "CLI" under test is Terraform. These are the core assertions.
-
-#### 1.2.1 Static validation
-
-```bash
-cd "$TF_DIR"
-terraform fmt -check -recursive
-terraform init -backend=false
-terraform validate
-```
-Expected: `Success! The configuration is valid.` and no fmt diffs.
-
-#### 1.2.2 Plan succeeds (default configuration)
-
-```bash
-terraform plan -out=tfplan.default
-terraform show -json tfplan.default > plan.default.json
-```
-Expected: exit 0; plan shows new `aws_secretsmanager_secret(_version)` resources to be created and `aws_iam_policy.ecs_secrets_access` updated in place.
-
-#### 1.2.3 Plan succeeds (all optional features enabled)
-
-Create a throwaway tfvars enabling every gated feature so conditional code paths are exercised:
-
-```bash
-cat > all-features.auto.tfvars <<'EOF'
-entra_enabled        = true
-okta_enabled         = true
-auth0_enabled        = true
-enable_observability = true
-ans_integration_enabled = true
-registration_gate_enabled = true
-# ... plus required non-secret companions (domains, client_ids) per variables.tf
-EOF
-
-terraform plan -out=tfplan.all -var-file=all-features.auto.tfvars
-terraform show -json tfplan.all > plan.all.json
-rm all-features.auto.tfvars
-```
-Expected: exit 0; no `index out of range` / count errors; Grafana secret + IAM grant present.
-
-#### 1.2.4 ASSERTION: no migrated secret appears in any `environment` block
-
-This is the central correctness gate. Inspect the planned task definitions in the JSON plan and confirm every migrated name appears only under `secrets`, never under `environment`.
-
-```bash
-for PLAN in plan.default.json plan.all.json; do
-  echo "=== $PLAN ==="
-  # Extract every container definition's environment + secrets from planned task defs
-  jq -r '
-    [.. | objects | select(.containerDefinitions? != null) | .containerDefinitions[]] as $cds
-    | $cds[]
-    | {name: .name,
-       env: ([.environment[]?.name]),
-       sec: ([.secrets[]?.name])}
-  ' "$PLAN" > /tmp/cds.$PLAN.json 2>/dev/null || true
-
-  for NAME in $MIGRATED_NAMES; do
-    if grep -q "\"$NAME\"" /tmp/cds.$PLAN.json; then
-      # Must be under sec, never under env
-      if jq -e --arg n "$NAME" 'select(.env | index($n))' /tmp/cds.$PLAN.json >/dev/null; then
-        echo "FAIL: $NAME still present in an environment block ($PLAN)"
-      else
-        echo "OK:   $NAME only in secrets ($PLAN)"
-      fi
-    fi
-  done
-done
-```
-Expected: every line is `OK:`; zero `FAIL:` lines.
-
-> Note: planned `containerDefinitions` may render as a JSON string inside the plan (the ECS module uses `jsonencode`). If so, pipe through `fromjson`:
-> `jq -r '.. | .container_definitions? // empty' plan.default.json | jq '.[] | {name, env:[.environment[]?.name], sec:[.secrets[]?.name]}'`
-> Adjust the extraction to whichever form `terraform show -json` emits for this module version.
-
-#### 1.2.5 ASSERTION: source grep gate (defense in depth)
-
-Independent of the plan, assert the HCL no longer wires any migrated name as plaintext `value =`:
-
-```bash
-cd "$MODULE_DIR"
-FAIL=0
-for NAME in $MIGRATED_NAMES; do
-  # find a 'name = "NAME"' immediately followed by a 'value =' (plaintext) within 2 lines
-  if grep -A2 "name *= *\"$NAME\"" ecs-services.tf observability.tf 2>/dev/null | grep -q 'value *='; then
-    echo "FAIL: $NAME appears to still use plaintext value ="
-    FAIL=1
-  fi
-done
-[ "$FAIL" -eq 0 ] && echo "OK: no migrated name uses plaintext value ="
-```
-Expected: `OK: no migrated name uses plaintext value =`.
-
-#### 1.2.6 ASSERTION: every migrated secret has a definition and an IAM grant
-
-```bash
-cd "$MODULE_DIR"
-for SLUG in registry_api_token registry_api_keys federation_static_token federation_encryption_key \
-            ans_api_key ans_api_secret registration_webhook_auth_token registration_gate_auth_credential \
-            registration_gate_oauth2_client_secret github_pat github_app_private_key grafana_admin_password; do
-  grep -q "aws_secretsmanager_secret\" \"$SLUG\"" secrets.tf \
-    && echo "OK def: $SLUG" || echo "FAIL def missing: $SLUG"
-  grep -q "$SLUG" iam.tf \
-    && echo "OK iam: $SLUG" || echo "FAIL iam grant missing: $SLUG"
-done
-```
-Expected: every secret has both `OK def:` and `OK iam:`. (This guards the "added a secret, forgot the IAM grant" bug Sage flagged.)
+**Not Applicable** - No CLI command is added or modified. The operator-facing surface is the Terraform workflow, covered in Section 4.
 
 ---
 
 ## 2. Backwards Compatibility Tests
 
-The contract: containers receive the same env var **names** with the same **values** at runtime. Only the delivery channel changes.
+The migration must be transparent to the application and, with the flag off, byte-for-byte identical to today.
 
-### 2.1 Env var name set is unchanged
-
-```bash
-# Compare the union of env+secret names before and after the change for each container.
-# On the pre-change checkout:
-git stash   # or check out the base revision in a worktree
-terraform show -json tfplan.base > plan.base.json   # generated from base
-# Extract names:
-jq -r '.. | .container_definitions? // empty' plan.base.json 2>/dev/null \
-  | jq -r '.[] | "\(.name): \([.environment[]?.name,.secrets[]?.name]|sort|join(","))"' \
-  | sort > /tmp/names.base.txt
-# Repeat on the post-change plan -> /tmp/names.head.txt
-diff /tmp/names.base.txt /tmp/names.head.txt
-```
-Expected: **no diff**. The set of delivered env var names per container is identical; only `environment` vs `secrets` membership shifts. (If a name moved containers or was dropped, this fails.)
-
-### 2.2 Deployments that leave optional secrets empty still apply
+### 2.1 Fallback flag off produces no net change
 
 ```bash
-# Default plan (Section 1.2.2) already exercises "all optional secrets empty".
-# Assert no conditional secret with count=0 is referenced with [0]:
-terraform plan -var-file=/dev/null   # all gated features off
+cd "$TF_DIR"
+# Baseline: capture the pre-change plan (run on the pre-migration commit, or against the current live task defs)
+terraform plan -var-file=terraform.tfvars -var 'use_secrets_manager_for_env=false' -out=tf-fallback.plan
+terraform show -json tf-fallback.plan > tf-fallback.json
+
+# Assert: with the flag OFF, no migrated var moves to a secrets block, and each still appears
+# as a plaintext environment entry on auth-server and registry.
+jq -r '
+  .resource_changes[]
+  | select(.type=="aws_ecs_task_definition")
+  | .change.after.container_definitions
+' tf-fallback.json > /dev/null && echo "task defs present"
 ```
-Expected: exit 0, no `Invalid index` errors. Confirms `count`/index guards are correct.
 
-### 2.3 `mongodb_connection_string` plaintext path
+**Expected:** With `use_secrets_manager_for_env=false`, `terraform plan` shows the 13 variables still injected as `environment` entries (values unchanged), and the `secrets` blocks contain only the previously-migrated first-tier secrets. No new secret is referenced by any task definition.
 
-- Deployment using `mongodb_connection_string_secret_arn` (the already-supported SM path): **unchanged** - assert the registry/auth-server `secrets` still reference the supplied ARN.
-- Deployment using the plaintext `var.mongodb_connection_string` (Option A): assert the new managed secret is created and referenced, and that `MONGODB_CONNECTION_STRING` no longer appears under `environment`.
+### 2.2 Application reads the same env var names in both modes
+
+The app reads every migrated value from a process env var by name (Pydantic `BaseSettings`, `case_sensitive=False`, `registry/core/config.py:56-60`; direct `os.environ.get(...)` in `auth_server/server.py`). ECS injects `secrets` as ordinary env vars under the same name, so no code path changes.
 
 ```bash
-echo 'mongodb_connection_string = "mongodb://user:pass@host:27017/db"' > mongo.auto.tfvars
-terraform plan -out=tfplan.mongo -var-file=mongo.auto.tfvars
-terraform show -json tfplan.mongo | grep -c "MONGODB_CONNECTION_STRING"   # appears in secrets, not environment
-rm mongo.auto.tfvars
+# On a running task (Secrets Manager path), confirm the app sees the expected env var names.
+# Use ECS Exec into the registry container:
+aws ecs execute-command --cluster "$CLUSTER" \
+  --task <registry-task-id> --container registry --interactive \
+  --command "/bin/sh -c 'env | grep -E \"^(REGISTRY_API_TOKEN|GITHUB_PAT|FEDERATION_ENCRYPTION_KEY)=\" | sed \"s/=.*/=<redacted>/\"'"
 ```
-Expected: `MONGODB_CONNECTION_STRING` present only in `secrets`; new managed secret planned.
 
-### 2.4 `*_extra_env` collision behavior unchanged
+**Expected:** Each configured variable is present in the container environment with a non-empty value. The names match exactly what the app reads; the app boots without `RuntimeError` on required values (`SECRET_KEY` guard at `config.py:924-931` still satisfied - `SECRET_KEY` is unchanged first-tier).
+
+### 2.3 Empty optional var yields an ABSENT env var, not a placeholder (regression guard)
+
+This is the critical backwards-compat assertion from the backend and security reviews: an empty optional value must NOT be injected as a truthy placeholder (e.g. `not-configured`), because the app gates on truthiness (`if REGISTRY_API_TOKEN:`, `if settings.github_pat:`, `hmac.compare_digest`).
 
 ```bash
-# Supplying a migrated name via extra_env must still be rejected by the existing validation.
-echo 'registry_extra_env = [{ name = "REGISTRY_API_TOKEN", value = "x" }]' > collide.auto.tfvars
-terraform plan -var-file=collide.auto.tfvars || echo "OK: collision rejected as expected"
-rm collide.auto.tfvars
+cd "$TF_DIR"
+# Plan with github_pat intentionally empty and the flag ON.
+terraform plan -var-file=terraform.tfvars -var 'github_pat=' -var 'use_secrets_manager_for_env=true' -out=tf-empty.plan
+terraform show -json tf-empty.plan > tf-empty.json
+
+# Assert: no secret resource is created for github_pat, and GITHUB_PAT is NOT present in the
+# registry container's secrets block.
+jq -r '[.resource_changes[] | select(.address | test("aws_secretsmanager_secret.github_pat"))] | length' tf-empty.json
+# Expected: 0
+
+jq -r '
+  .planned_values.root_module | ..
+  | .container_definitions? // empty
+' tf-empty.json | grep -c '"GITHUB_PAT"' || echo "GITHUB_PAT absent (expected)"
+# Expected: GITHUB_PAT absent from both environment and secrets
 ```
-Expected: plan fails with the reserved-name validation error (proves the migrated name is still reserved).
+
+**Expected:** With `github_pat` empty and the flag on, no `aws_secretsmanager_secret.github_pat` is created and `GITHUB_PAT` appears in neither block. At runtime the app's Pydantic field defaults to `""` (falsy) - identical to today's empty behavior. There is NO `not-configured` value anywhere.
+
+### 2.4 No variable appears in both environment and secrets (ECS duplicate-name guard)
+
+```bash
+# Extract each service's container definition and assert no name is in both blocks.
+terraform plan -var-file=terraform.tfvars -var 'use_secrets_manager_for_env=true' -out=tf-on.plan
+terraform show -json tf-on.plan > tf-on.json
+
+python3 - <<'PY'
+import json
+data = json.load(open("tf-on.json"))
+def walk(o):
+    if isinstance(o, dict):
+        if "container_definitions" in o:
+            yield o["container_definitions"]
+        for v in o.values():
+            yield from walk(v)
+    elif isinstance(o, list):
+        for v in o:
+            yield from walk(v)
+dupes = []
+for cds in walk(data):
+    cds = cds if isinstance(cds, list) else json.loads(cds)
+    for c in cds:
+        env = {e["name"] for e in c.get("environment", [])}
+        sec = {s["name"] for s in c.get("secrets", [])}
+        overlap = env & sec
+        if overlap:
+            dupes.append((c.get("name"), sorted(overlap)))
+print("DUPLICATES:", dupes)
+assert not dupes, "A variable appears in both environment and secrets"
+print("OK: no duplicate env/secret names")
+PY
+```
+
+**Expected:** `OK: no duplicate env/secret names`. ECS rejects task definitions with a name in both blocks; this guard catches the toggle-logic bug before apply.
 
 ---
 
 ## 3. UX Tests
 
-The only user-visible surface is the Grafana admin login; everything else is operator-facing docs.
+### 3.1 Grafana admin login still works
 
-### 3.1 Grafana login (post-deploy, observability enabled)
-- After apply and after setting the real admin password (Section 4.5), browse to `https://<domain>/grafana/` and log in as `admin` with the value stored in the `*-grafana-admin-password-*` secret.
-- Expected: login succeeds; the AMP datasource and dashboard provisioned by the `grafana-config` sidecar are present (proves the sidecar's `$${GF_SECURITY_ADMIN_PASSWORD}` reference still resolves via the injected secret).
-- Negative: logging in with the old plaintext value (if different) fails - confirms the secret value is the live credential.
+The only user-facing surface affected is the Grafana admin login. After migration, the admin password is sourced from Secrets Manager (operator-supplied or generated).
 
-### 3.2 Operator documentation clarity
-- Verify `OPERATIONS.md` lists each new secret name and gives a copy-paste `aws secretsmanager put-secret-value` command.
-- Expected: an operator can set every real secret value without reading the Terraform source.
+```bash
+# If the password was auto-generated because grafana_admin_password was empty, retrieve it:
+aws secretsmanager get-secret-value \
+  --secret-id "$(aws secretsmanager list-secrets \
+      --query "SecretList[?starts_with(Name, '${CLUSTER}-grafana-admin-password')].Name | [0]" \
+      --output text)" \
+  --query SecretString --output text
+```
+
+**Expected:** The Grafana UI at the grafana endpoint accepts login with `admin` / the retrieved password. Datasource and dashboard provisioning (run by the grafana-config sidecar, which reads `GF_SECURITY_ADMIN_PASSWORD` from its env) completed - dashboards are present.
+
+### 3.2 Error message clarity on misconfiguration
+
+```bash
+# Simulate a missing IAM grant by inspecting a failed task's stoppedReason (if a deploy fails).
+aws ecs describe-tasks --cluster "$CLUSTER" --tasks <failed-task-id> \
+  --query 'tasks[0].stoppedReason' --output text
+```
+
+**Expected:** If the execution role lacks a grant, the message is the standard `ResourceInitializationError: unable to pull secrets or registry auth ... AccessDeniedException`, which points the operator at the IAM policy. This is the expected failure mode documented in the LLD.
 
 ---
 
 ## 4. Deployment Surface Tests
 
 ### 4.1 Docker wiring
-**Not Applicable** - this change is scoped to `terraform/aws-ecs`. Docker Compose secret handling (`extra_env/`, `.env`) is unchanged and out of scope for issue #1134.
+
+**Not Applicable** - The Docker Compose surface (`docker-compose.yml`, `.env.example`) is unchanged. Local/Compose deployments continue to pass these values via `.env`; Secrets Manager is an ECS-only concern per the requirements.
 
 ### 4.2 Terraform / ECS wiring
 
-#### 4.2.1 Secrets Manager resources created
-```bash
-aws secretsmanager list-secrets --region "$AWS_REGION" \
-  --query "SecretList[?contains(Name, '-registry-api-token-') || contains(Name,'-federation-') || contains(Name,'-github-') || contains(Name,'-ans-') || contains(Name,'-grafana-admin-password-') || contains(Name,'-registration-')].Name" \
-  --output table
-```
-Expected: all migrated secrets listed with the `${name_prefix}-<slug>-<suffix>` naming.
+Anchor on the concrete files from the LLD.
 
-#### 4.2.2 IAM execution-role grant
 ```bash
-# Identify the execution role and its inline/attached secrets policy, then confirm the new ARNs are present.
-aws iam list-attached-role-policies --role-name "${STACK_NAME}-task-execution" --output table
-# Inspect the ecs_secrets_access policy document and grep for the new secret ARNs / GetSecretValue.
+cd "$TF_DIR"
+terraform init -backend=false
+terraform validate
 ```
-Expected: `secretsmanager:GetSecretValue` granted on each new ARN; KMS `Decrypt` on the secrets key already present (unchanged).
 
-#### 4.2.3 Rendered task definition has no plaintext secrets
+**Expected:** `Success! The configuration is valid.`
+
 ```bash
-for SVC in auth-server registry grafana; do
-  TD=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SVC" \
-        --query 'services[0].taskDefinition' --output text --region "$AWS_REGION")
-  echo "=== $SVC ($TD) ==="
-  aws ecs describe-task-definition --task-definition "$TD" --region "$AWS_REGION" \
-    --query 'taskDefinition.containerDefinitions[].{name:name, env:environment[].name, secrets:secrets[].name}'
+# Plan with the flag ON and observability ON.
+terraform plan -var-file=terraform.tfvars \
+  -var 'use_secrets_manager_for_env=true' -var 'enable_observability=true' -out=tf-on.plan
+terraform show -json tf-on.plan > tf-on.json
+
+# 4.2.a - New secrets exist for configured vars (spot-check three):
+for s in registry-api-token github-pat grafana-admin-password; do
+  n=$(jq -r --arg s "$s" '[.resource_changes[] | select(.address | test("aws_secretsmanager_secret\\..*" + ($s|gsub("-";"_"))))] | length' tf-on.json)
+  echo "$s secret resources planned: $n"
 done
 ```
-Expected: every migrated name appears under `secrets`, none under `env`. This is the live-environment equivalent of the plan assertion in 1.2.4.
+
+**Expected:** A secret + version pair is planned for each configured variable; `grafana-admin-password` is planned only because `enable_observability=true`.
+
+```bash
+# 4.2.b - IAM coverage: every secret ARN referenced by a task def is granted in ecs_secrets_access.
+python3 - <<'PY'
+import json
+data = json.load(open("tf-on.json"))
+def walk(o):
+    if isinstance(o, dict):
+        if "container_definitions" in o: yield o["container_definitions"]
+        for v in o.values(): yield from walk(v)
+    elif isinstance(o, list):
+        for v in o: yield from walk(v)
+referenced = set()
+for cds in walk(data):
+    cds = cds if isinstance(cds, list) else json.loads(cds)
+    for c in cds:
+        for s in c.get("secrets", []):
+            arn = s["valueFrom"].split(":")[:7]  # strip :jsonkey:: suffix
+            referenced.add(":".join(arn))
+# Collect the ecs_secrets_access policy Resource list from the plan
+granted = set()
+for rc in data["resource_changes"]:
+    if rc["type"]=="aws_iam_policy" and "ecs_secrets" in rc["address"]:
+        pol = json.loads(rc["change"]["after"]["policy"])
+        for stmt in pol["Statement"]:
+            if "secretsmanager:GetSecretValue" in (stmt["Action"] if isinstance(stmt["Action"],list) else [stmt["Action"]]):
+                res = stmt["Resource"]; granted |= set(res if isinstance(res,list) else [res])
+granted_prefixes = {g.split(":")[:7] and ":".join(g.split(":")[:7]) for g in granted}
+missing = {r for r in referenced if r not in granted_prefixes}
+print("REFERENCED:", len(referenced), "GRANTED:", len(granted))
+print("MISSING GRANTS:", missing)
+assert not missing, "A referenced secret ARN is not granted in ecs_secrets_access"
+print("OK: all referenced secret ARNs are granted")
+PY
+```
+
+**Expected:** `OK: all referenced secret ARNs are granted`. Note: plan-time ARNs may be unknown (computed); if so, run this assertion post-apply against `terraform state show` / the live task definition and the applied policy.
+
+```bash
+# 4.2.c - Grafana execution role attaches ecs_secrets_access.
+grep -n "SecretsManagerAccess" modules/mcp-gateway/observability.tf
+```
+
+**Expected:** The grafana `module "ecs_service_grafana"` `task_exec_iam_role_policies` map now includes `SecretsManagerAccess = aws_iam_policy.ecs_secrets_access.arn` (LLD Step 7).
 
 ### 4.3 Helm / EKS wiring
 
-#### 4.3.1 Reserved-env-name consistency
-```bash
-helm unittest charts/registry charts/auth-server charts/mcpgw charts/mcp-gateway-registry-stack
-```
-Expected: suites pass. Confirms the migrated names are present in `charts/*/reserved-env-names.txt` and that no positional/reserved assertion drifted. (Helm itself does not use ECS Secrets Manager, but the reserved-name lists are a cross-surface source of truth per CLAUDE.md.)
+**Not Applicable** - Helm/EKS (`charts/`) is explicitly out of scope per the requirements; this migration targets the Terraform ECS stack only.
 
 ### 4.4 Deploy and verify
+
 ```bash
 cd "$TF_DIR"
-terraform apply tfplan.default   # or tfplan.all in a feature-complete non-prod stack
-```
-Expected: apply succeeds; new secrets created; services roll to new task-definition revisions and reach steady state:
-```bash
-aws ecs wait services-stable --cluster "$CLUSTER" --services auth-server registry grafana --region "$AWS_REGION"
+terraform apply -var-file=terraform.tfvars -var 'use_secrets_manager_for_env=true'
+
+# Confirm services reach steady state.
+for svc in auth-server registry grafana; do
+  aws ecs describe-services --cluster "$CLUSTER" --services "$svc" \
+    --query 'services[0].deployments[0].rolloutState' --output text
+done
 ```
 
-### 4.5 Set real secret values (post-apply runbook step)
-Because versions use `ignore_changes = [secret_string]`, set the real values out-of-band, then force a new deployment:
-```bash
-aws secretsmanager put-secret-value --secret-id "<grafana-admin-password-arn>" \
-  --secret-string "$REAL_GRAFANA_PASSWORD" --region "$AWS_REGION"
-# repeat for each secret that needs a real value
-aws ecs update-service --cluster "$CLUSTER" --service grafana --force-new-deployment --region "$AWS_REGION"
-```
-Expected: tasks restart and pick up the real values; subsequent `terraform plan` shows **no drift** (proves `ignore_changes` works).
+**Expected:** Each service prints `COMPLETED`. No `ResourceInitializationError` in task events.
 
-### 4.6 Rollback verification
 ```bash
-# Roll a service back to its previous task-definition revision (no Terraform needed for fast rollback):
-aws ecs update-service --cluster "$CLUSTER" --service registry \
-  --task-definition "<previous-revision-arn>" --region "$AWS_REGION"
+# Verify CloudTrail recorded GetSecretValue by the execution role (audit trail is the goal).
+aws cloudtrail lookup-events \
+  --lookup-attributes AttributeKey=EventName,AttributeValue=GetSecretValue \
+  --max-results 5 --query 'Events[].CloudTrailEvent' --output text | jq -r '.userIdentity.arn' 2>/dev/null
 ```
-Expected: service returns to the prior revision and reaches steady state. Also verify a full `terraform destroy`-free revert: `git revert` the change, `terraform apply`, services roll back, secrets optionally remain (harmless).
+
+**Expected:** The caller ARN matches a `*-task-exec-*` execution role, confirming secrets are pulled at task start and audited.
+
+### 4.5 Rollback verification
+
+```bash
+cd "$TF_DIR"
+# Break-glass: flip the flag off and re-apply.
+terraform apply -var-file=terraform.tfvars -var 'use_secrets_manager_for_env=false'
+```
+
+**Expected:** New task-def revisions inject the values as plaintext `environment` again; services return to steady state. Note (documented behavior): the secret resources remain provisioned (not gated by the flag), and the plaintext values are re-written into the task-def JSON and state. This is the intended break-glass behavior, not a state-clean revert.
 
 ---
 
 ## 5. End-to-End API Tests
 
-These confirm runtime behavior is unbroken - the services actually use the secrets that are now injected via Secrets Manager.
+The migration spans three services but adds no new multi-service workflow. The meaningful E2E checks are (a) the app functions identically after migration, and (b) the security regression guard on the federation-token endpoint.
 
-### 5.1 Registry static-token auth (if `registry_static_token_auth_enabled`)
+### 5.1 Post-migration functional smoke
+
 ```bash
-curl -s -o /dev/null -w "%{http_code}\n" \
-  -H "Authorization: Bearer $REAL_REGISTRY_API_TOKEN" \
-  "https://<domain>/api/<an-authenticated-endpoint>"
+# Registry health and a representative authenticated call still work with Secrets Manager-sourced creds.
+curl -s -o /dev/null -w "%{http_code}\n" "$REGISTRY_URL/health"
 ```
-Expected: `200` with the correct token (proves `REGISTRY_API_TOKEN` injected from Secrets Manager is the live value); `401` with a wrong token.
 
-### 5.2 Federation handshake (if federation enabled)
-- Trigger a federation pull/health-check between two registries that share `FEDERATION_STATIC_TOKEN`.
-- Expected: peer authenticates; stored federation tokens decrypt with `FEDERATION_ENCRYPTION_KEY`. A mismatch (e.g. wrong/placeholder key) surfaces as a decryption failure - which also validates that the real key (not the `"not-configured"` sentinel) is in effect.
+**Expected:** `200`. The registry booted with `SECRET_KEY` and DB creds (first-tier, unchanged) plus the newly-migrated values, and serves requests.
 
-### 5.3 GitHub skill fetch (if `github_pat`/GitHub App configured)
-- Register/refresh a server whose `SKILL.md` lives in a private repo.
-- Expected: fetch succeeds, proving `GITHUB_PAT` / `GITHUB_APP_PRIVATE_KEY` from Secrets Manager work.
+### 5.2 GitHub App JWT signing (PEM fidelity)
 
-### 5.4 Grafana datasource provisioning
-- Already covered in 3.1: the `grafana-config` sidecar creating the AMP datasource is itself an E2E proof that `GF_SECURITY_ADMIN_PASSWORD` injected as a secret is usable by the sidecar's shell command.
+```bash
+# If GitHub App auth is configured, exercise a code path that signs a GitHub App JWT
+# (e.g., a repository verification / installation-token fetch) and confirm no signing error.
+# Inspect registry logs for a successful GitHub App token exchange vs. a PEM parse error.
+aws logs tail "/ecs/${CLUSTER}/registry" --since 10m --format short | grep -iE "github.*(jwt|installation|token)" | tail -20
+```
+
+**Expected:** GitHub App JWT signing succeeds (no `ValueError`/PEM parse error). Confirms `GITHUB_APP_PRIVATE_KEY` survived the `tfvars -> secret_string -> ECS injection -> os.environ -> .replace("\\n","\n")` chain intact (`registry/services/github_auth.py:129-130`).
+
+### 5.3 Negative: `not-configured` must never be a valid token (security regression guard)
+
+```bash
+# Ensure no truthy placeholder was injected: the literal must be rejected.
+curl -s -o /dev/null -w "%{http_code}\n" \
+  -X POST "$REGISTRY_URL/admin/federation-token" \
+  -H "Authorization: Bearer not-configured"
+```
+
+**Expected:** `401` (or `403`), never `200`. This guards against a truthy sentinel being injected for an empty `REGISTRY_API_TOKEN`/`FEDERATION_STATIC_TOKEN` (`auth_server/server.py:2592`). If this returns `200`, a sentinel regression was introduced and must be fixed by count-gating.
+
+### 5.4 Unit tests for the static-token map
+
+```bash
+# Extend the existing auth-server unit tests to assert an empty REGISTRY_API_TOKEN does not
+# populate _STATIC_TOKEN_MAP with a placeholder admin credential.
+uv run pytest tests/auth_server/unit/test_server.py -k "static_token" -v
+```
+
+**Expected:** Tests pass, including a new assertion that with `REGISTRY_API_TOKEN=""` the legacy static token is not registered and `Bearer not-configured` is not accepted.
 
 ---
 
 ## 6. Test Execution Checklist
 
-- [ ] Section 1 (Functional / Terraform): `fmt`, `validate`, `plan` (default + all-features) pass; assertions 1.2.4-1.2.6 all `OK`, zero `FAIL`.
-- [ ] Section 2 (Backwards Compat): env-var name set unchanged (2.1 no diff); empty-optional plan applies (2.2); Mongo paths correct (2.3); extra_env collision still rejected (2.4).
-- [ ] Section 3 (UX): Grafana login works post-apply; OPERATIONS.md runbook is copy-paste complete.
-- [ ] Section 4 (Deployment): SM resources + IAM grants present; rendered task defs have zero plaintext secrets (4.2.3); helm unittests pass (4.3.1); apply reaches steady state; real values set with no resulting drift (4.5); rollback verified (4.6).
-- [ ] Section 5 (E2E): registry token auth, federation, GitHub fetch, Grafana provisioning all functional with secrets injected from Secrets Manager.
-- [ ] No new unit/integration tests are required in `tests/` (no application code changed); if the implementer adds the suggested CI grep gate, place it under `.github/workflows/` or `scripts/`.
-- [ ] `terraform plan` after apply shows no drift (confirms `ignore_changes` on secret versions).
+- [ ] Section 1 (Functional) - marked Not Applicable (no new endpoints/CLI)
+- [ ] Section 2 (Backwards Compat) - flag-off no-change, same env names, empty-var absent (no placeholder), no duplicate env/secret names
+- [ ] Section 3 (UX) - Grafana admin login and provisioning verified; error-message clarity confirmed
+- [ ] Section 4 (Deployment) - `validate` + `plan` (flag on/off), secret creation, IAM coverage, grafana exec-role grant, apply reaches steady state, CloudTrail audit, rollback
+- [ ] Section 5 (E2E) - post-migration smoke, GitHub App JWT signing, `not-configured` rejection, static-token unit test
+- [ ] `terraform validate` passes and `terraform plan` is clean for the representative tfvars (flag on and off)
+- [ ] Unit tests added/updated under `tests/auth_server/unit/` for the static-token regression guard
+- [ ] `uv run pytest tests/` passes with no regressions (application code is unchanged, so this should be a no-op baseline)

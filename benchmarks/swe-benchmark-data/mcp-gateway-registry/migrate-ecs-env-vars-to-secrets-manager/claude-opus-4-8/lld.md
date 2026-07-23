@@ -1,6 +1,6 @@
 # Low-Level Design: Migrate remaining sensitive ECS env vars to AWS Secrets Manager
 
-*Created: 2026-06-25*
+*Created: 2026-07-23*
 *Author: Claude (claude-opus-4-8)*
 *Status: Draft*
 
@@ -20,31 +20,28 @@
 13. [Alternatives Considered](#alternatives-considered)
 14. [Rollout Plan](#rollout-plan)
 15. [Open Questions](#open-questions)
-16. [References](#references)
 
 ## Overview
 
 ### Problem Statement
 
-`terraform/aws-ecs` already integrates AWS Secrets Manager: a dedicated KMS key, ~15 secrets defined in `modules/mcp-gateway/secrets.tf`, an execution-role policy that scopes `secretsmanager:GetSecretValue` to specific ARNs, and task definitions that inject those secrets via the ECS container `secrets` block. However, ~13 genuinely sensitive values are still passed to containers as plaintext via the `environment` block. ECS renders `environment` values directly into the task definition, so these secrets appear in `ecs:DescribeTaskDefinition` output, in task-definition revision history, and in Terraform state. This design migrates those remaining plaintext secrets onto the existing Secrets Manager pathway.
+The ECS Terraform stack (`terraform/aws-ecs/`) still injects a tier of sensitive values into the `auth-server`, `registry`, and `grafana` containers as plaintext `environment` entries. Although the source Terraform variables are `sensitive = true`, anything placed in a container `environment` block is rendered into the task-definition JSON and persisted in Terraform state as cleartext. This defeats encryption at rest, read auditing, and rotation.
 
-The work is deliberately a pattern extension, not a new mechanism. Every new resource mirrors an existing one in `secrets.tf` and every new IAM grant mirrors an existing entry in `iam.tf`.
+The repo has already migrated the first tier of secrets (`SECRET_KEY`, DocumentDB credentials, Keycloak client/admin/M2M secrets, Entra/Okta/Auth0 client secrets, `METRICS_API_KEY`, OTLP headers) to AWS Secrets Manager via the container `secrets` block. This design migrates the remaining plaintext secrets using the identical established pattern, and adds a single feature flag so operators can fall back to the plaintext path during migration.
 
 ### Goals
 
-- Move every remaining secret-bearing `environment` entry into the container `secrets` block, sourced from AWS Secrets Manager.
-- Keep secret material out of rendered task definitions and (as far as practical) out of state.
-- Grant the ECS task execution role least-privilege `secretsmanager:GetSecretValue` on exactly the new secret ARNs.
-- Preserve runtime behavior: containers receive the same env var names with the same values; no application code changes.
-- Handle optional/empty secrets gracefully (no dangling resources, no references to non-existent secrets).
+- Move all remaining plaintext sensitive `environment` values on `auth-server`, `registry`, and `grafana` into AWS Secrets Manager, consumed via the ECS `secrets` block `valueFrom`.
+- Reuse the existing KMS key (`aws_kms_key.secrets`) and the existing IAM policy (`aws_iam_policy.ecs_secrets_access`) rather than creating parallel infrastructure.
+- Provide a `var.use_secrets_manager_for_env` flag (default `true`) that toggles between the Secrets Manager path and the legacy plaintext `environment` path, mutually exclusive per variable.
+- Require zero application code changes; the app already reads every value from a same-named process environment variable.
 
 ### Non-Goals
 
-- No automatic rotation for these externally-managed third-party tokens (follow-up; documented via `#checkov:skip=CKV2_AWS_57`).
-- No change to the Keycloak task definition (already uses SSM + Secrets Manager).
-- No change to application/runtime code.
-- No re-classification of non-secret config (hostnames, ports, flags stay in `environment`).
-- Not addressing RDS IAM auth (issue #1303).
+- No Helm/EKS or non-ECS surface changes.
+- No automatic rotation of these app secrets (they remain non-rotatable, externally managed).
+- No change to how the application reads configuration.
+- No automatic migration of the free-form `*_extra_env` passthrough variables.
 
 ## Codebase Analysis
 
@@ -52,473 +49,554 @@ The work is deliberately a pattern extension, not a new mechanism. Every new res
 
 | File/Directory | Purpose | Relevance to This Change |
 |----------------|---------|--------------------------|
-| `terraform/aws-ecs/modules/mcp-gateway/secrets.tf` | Defines KMS key + all `aws_secretsmanager_secret`/`_version` resources | New secrets are added here, copying existing blocks |
-| `terraform/aws-ecs/modules/mcp-gateway/iam.tf` | `aws_iam_policy.ecs_secrets_access` (execution-role secret access) + ECS exec policies | Extend the `Resource = concat(...)` list with new ARNs |
-| `terraform/aws-ecs/modules/mcp-gateway/ecs-services.tf` | auth-server, registry, mcpgw, demo task definitions; `environment` + `secrets` blocks | Move plaintext entries from `environment` to `secrets` |
-| `terraform/aws-ecs/modules/mcp-gateway/observability.tf` | Grafana service + post-install sidecar; both consume `GF_SECURITY_ADMIN_PASSWORD` | Migrate Grafana admin password; add `secrets` to both containers |
-| `terraform/aws-ecs/modules/mcp-gateway/locals.tf` | `name_prefix`, `common_tags` | Naming/tagging conventions for new resources |
-| `terraform/aws-ecs/modules/mcp-gateway/variables.tf` | Secret-bearing input variables (all already `sensitive = true`) | Inputs that feed the new secret versions |
-| `terraform/aws-ecs/variables.tf` / `terraform.tfvars.example` | Root module variable surface + example | Docs/example updates |
-| `terraform/aws-ecs/ecs.tf` | Cluster execution role + DocumentDB secret policy | Confirms execution-role naming (`*-task-execution`) and the existing per-secret grant pattern |
-| `terraform/aws-ecs/keycloak-ecs.tf` | Keycloak task (SSM + SM) | Out of scope; confirms the established `valueFrom` JSON-key syntax |
+| `terraform/aws-ecs/modules/mcp-gateway/secrets.tf` | Defines `aws_kms_key.secrets`, alias, and all existing `aws_secretsmanager_secret`/`_version` resources | New secrets are added here following the same conventions |
+| `terraform/aws-ecs/modules/mcp-gateway/iam.tf` | Defines `aws_iam_policy.ecs_secrets_access` with the `GetSecretValue` `Resource` concat-list and the `kms:Decrypt` statement | New secret ARNs are appended to the `Resource` concat list |
+| `terraform/aws-ecs/modules/mcp-gateway/ecs-services.tf` | `container_definitions` maps for auth-server and registry, each with `environment = concat(...)` and `secrets = concat(...)` | Move the target vars from `environment` to `secrets` (toggle-gated) |
+| `terraform/aws-ecs/modules/mcp-gateway/observability.tf` | `container_definitions` for metrics-service, grafana, grafana-config | Add a `secrets` block to grafana / grafana-config for the admin password |
+| `terraform/aws-ecs/modules/mcp-gateway/variables.tf` | Declares all `sensitive = true` source variables and service policy attachments | Add `use_secrets_manager_for_env`; source vars already exist |
+| `terraform/aws-ecs/modules/mcp-gateway/locals.tf` | Builds shared locals used by container definitions | Add helper locals for the toggled env/secrets fragments |
+| `terraform/aws-ecs/keycloak-ecs.tf`, `keycloak-database.tf` | Keycloak uses its own raw `aws_ecs_task_definition` + its own exec role | Not in scope (already fully on Secrets Manager/SSM) |
+| `registry/core/config.py` | Pydantic `BaseSettings`, `case_sensitive=False`, env overrides `.env` | Confirms fallback is transparent to the app |
+| `auth_server/server.py` | Direct `os.environ.get(...)` reads at import time | Confirms env injection works identically for both paths |
 
 ### Existing Patterns Identified
 
-1. **Secret resource pattern** (`secrets.tf`): each secret is an `aws_secretsmanager_secret` (with `name_prefix`, `description`, `recovery_window_in_days = 0`, `kms_key_id = aws_kms_key.secrets.id`, `tags = local.common_tags`, and a `#checkov:skip=CKV2_AWS_57` justification) plus an `aws_secretsmanager_secret_version`. Externally-supplied values use `lifecycle { ignore_changes = [secret_string] }`; generated values use `random_password`.
-   - Follow this exactly for every new secret.
+1. **Secrets Manager secret + version pair.** Every secret in `secrets.tf` is an `aws_secretsmanager_secret` (with `name_prefix`, `recovery_window_in_days = 0`, `kms_key_id = aws_kms_key.secrets.id`, `tags = local.common_tags`, and a `#checkov:skip=CKV2_AWS_57` justification) plus an `aws_secretsmanager_secret_version` holding the value. Optional secrets use `count = <condition> ? 1 : 0`. Follow this exactly.
+   - Files: `modules/mcp-gateway/secrets.tf:91-102` (secret_key), `:340-355` (metrics_api_key, count-gated).
 
-2. **Conditional secret pattern**: optional secrets use `count = var.<feature>_enabled ? 1 : 0` and are referenced as `aws_secretsmanager_secret.<name>[0].arn` (see `entra_client_secret`, `okta_*`, `metrics_api_key`).
-   - Use this for secrets that are only meaningful when a feature flag is on.
+2. **Container `secrets = concat(...)` block.** Each service's container object builds `secrets` as a `concat` of a base list and conditional lists. Entries are `{ name = "ENV_NAME", valueFrom = <arn> }`, and for JSON secrets the `valueFrom` uses the `":jsonkey::"` suffix.
+   - Files: `modules/mcp-gateway/ecs-services.tf:413-480` (auth), `:1288-1365` (registry).
 
-3. **Always-present-with-sentinel pattern**: `embeddings_api_key` is created unconditionally and its version uses `var.embeddings_api_key != "" ? var.embeddings_api_key : "not-configured"`, so the secret always exists even when unset.
-   - Use this where the consuming code path is always wired (e.g. `REGISTRY_API_TOKEN`, federation, ANS), so the `secrets` block can reference a stable ARN without per-field `count` gymnastics.
+3. **Single shared GetSecretValue policy.** `aws_iam_policy.ecs_secrets_access` (`iam.tf:4-52`) lists every readable secret ARN in a `concat(...)` `Resource` list and is attached to BOTH the execution and task roles of every module service via the ECS service module's `tasks_iam_role_policies` / `task_exec_iam_role_policies` maps (`ecs-services.tf:51-64`). Add new ARNs here, gated by the same conditions used to create them.
 
-4. **`secrets` block injection** (`ecs-services.tf` lines 413, 1288): `secrets = concat([ {name, valueFrom}, ... ], <conditional lists> )`. Whole-value secrets use `valueFrom = <arn>`; JSON-keyed secrets use `valueFrom = "${arn}:key::"`.
-   - New whole-value secrets use the bare ARN form.
+4. **KMS decrypt via key policy.** `aws_kms_key.secrets` key policy grants `kms:Decrypt`/`kms:DescribeKey` to any in-account role whose ARN matches `role/*task-exec*` (`secrets.tf:34-41`), and the policy also grants `kms:Decrypt` on that key ARN explicitly (`iam.tf:38-47`). Reused as-is.
 
-5. **Execution-role grant pattern** (`iam.tf` lines 15-36): `Resource = concat([ <always> ], var.<flag> ? [ <conditional arn> ] : [], ...)`. KMS decrypt is granted once on `aws_kms_key.secrets.arn` and covers all secrets that use that key.
-   - Append new ARNs to this list with matching conditionality. No KMS change needed because new secrets reuse `aws_kms_key.secrets`.
-
-6. **`environment` vs `secrets` separation**: containers already keep non-secret config in `environment` and secret material in `secrets`. This change moves the misclassified entries to the correct block.
+5. **App reads secrets from env by name.** `registry/core/config.py` uses Pydantic `BaseSettings` with `case_sensitive=False` and env precedence over `.env` (`config.py:56-60`); `auth_server/server.py` reads `os.environ.get("REGISTRY_API_TOKEN", "")` etc. ECS-injected `secrets` appear as normal env vars, so both paths are transparent.
 
 ### Integration Points
 
 | Component | Integration Type | Details |
 |-----------|------------------|---------|
-| `aws_kms_key.secrets` | Uses | All new secrets set `kms_key_id` to this key; execution role already has `kms:Decrypt` on it |
-| `aws_iam_policy.ecs_secrets_access` | Extends | Add new ARNs to the `secretsmanager:GetSecretValue` resource list |
-| ECS task execution role (`${var.name}-task-execution`) | Depends on | The role the ECS agent uses to fetch secrets at container start; `ecs_secrets_access` is attached to it |
-| `terraform-aws-modules/ecs/aws//modules/service` | Uses | Renders `environment` and `secrets` into the container definition |
-| auth-server / registry / grafana containers | Modifies | `environment` entries removed; `secrets` entries added |
+| `aws_kms_key.secrets` | Uses | Encrypts every new secret; no change to the key |
+| `aws_iam_policy.ecs_secrets_access` | Extends | Append new secret ARNs to the `Resource` concat list |
+| auth-server `container_definitions` | Modifies | Move 6 vars from `environment` to `secrets` (toggle-gated) |
+| registry `container_definitions` | Modifies | Move 13 vars from `environment` to `secrets` (toggle-gated) |
+| grafana / grafana-config `container_definitions` | Modifies | Add a new `secrets` block for the admin password |
+| ECS service module role attachments | Confirms | Ensure grafana service attaches `ecs_secrets_access` to its exec + task roles |
 
 ### Constraints and Limitations Discovered
 
-- **`sensitive = true` is not enough.** All target variables are already `sensitive = true`; that only suppresses CLI/plan display. The secret still renders into the task definition and state. Only `secrets`/`valueFrom` removes it from the task definition.
-- **Secret values still touch state.** When Terraform sets `secret_string` from a variable, the value is stored in state. `lifecycle { ignore_changes = [secret_string] }` (existing convention) lets operators set the real value out-of-band (console/CLI/init script) so the long-lived secret need not live in state. This design adopts that convention; the example tfvars keep placeholders.
-- **Grafana password is consumed twice** - by the `grafana` container (`GF_SECURITY_ADMIN_PASSWORD`) and by the `grafana-config` sidecar, which interpolates `$${GF_SECURITY_ADMIN_PASSWORD}` inside a shell command. Secrets injected via the `secrets` block surface as ordinary env vars, so the sidecar's `$${...}` reference keeps working - but **both** container definitions must list the secret in their own `secrets` block.
-- **`MONGODB_CONNECTION_STRING` already has a Secrets Manager path.** Only the plaintext fallback (`var.mongodb_connection_string != "" && var.mongodb_connection_string_secret_arn == ""`) needs removal. To avoid a hard breaking change for existing deployments that set the plaintext var, the design optionally creates a managed secret from `var.mongodb_connection_string` rather than silently dropping support (see Step 6).
-- **`terraform-aws-modules/ecs/aws` rejects duplicate env names.** A name must appear in either `environment` or `secrets`, never both. The migration must delete the `environment` entry in the same change that adds the `secrets` entry.
-- **Reserved-env-name lists exist** (`charts/*/reserved-env-names.txt`, Terraform validation). These cover Docker/Helm/Terraform `*_extra_env` collision checks. Since the migrated names were already chart-managed env vars, they should already be present; verify and add any missing names so `extra_env` cannot shadow a secret.
+- **ECS forbids the same variable name in both `environment` and `secrets`.** The task definition fails registration with `Duplicate environment variable name` if a name appears in both. The toggle must therefore be mutually exclusive per variable, not additive.
+- **Grafana has no `secrets` block today** and its service module attachment must be verified to include `ecs_secrets_access` (the other module services attach it explicitly at `ecs-services.tf:51-64`; grafana in `observability.tf` must do the same).
+- **Grafana-config runs the password inside a shell command** (`GURL="http://admin:$${GF_SECURITY_ADMIN_PASSWORD}@localhost:3000"`, `observability.tf:630`). Injecting the value via `secrets` still exposes it to that container's process as an env var, so the command works unchanged; only the source of the env var changes.
+- **JSON vs raw secrets.** The existing single-value secrets (e.g. `secret_key`, `metrics_api_key`) store a raw string and are referenced by bare ARN. The Keycloak/DocumentDB secrets store JSON and use `":key::"`. New secrets here are single values, so store them as raw strings and reference by bare ARN (simpler, matches `secret_key`).
+- **`GITHUB_APP_PRIVATE_KEY` is a multi-line PEM.** Secrets Manager stores it verbatim; ECS injects it as-is. No encoding change needed. The app reads it via Pydantic and does `settings.github_app_private_key.replace("\\n", "\n")` (`registry/services/github_auth.py:129`), which is a no-op for a real multi-line PEM and expands escaped `\n` in a single-line PEM, so both forms work. This must be confirmed in the smoke test, not assumed.
+- **Grafana admin password defaults to empty.** `var.grafana_admin_password` is declared with `default = ""` (`modules/mcp-gateway/variables.tf:1175-1180`), NOT a non-empty default. Its secret must therefore be gated on `var.enable_observability` (the grafana service itself only exists when observability is enabled, `observability.tf:482`) so a non-observability deployment does not create an orphan secret or fail on an empty `secret_string`. The other vars also default to `""` and their secrets are `count`-gated on non-empty.
+- **`aws_secretsmanager_secret_version` rejects an empty `secret_string`.** Every optional secret must be `count`-gated on its source var being non-empty, or `apply` fails. This applies to the grafana password too: gating only on `enable_observability` is insufficient if the operator enables observability but leaves the password empty. See Step 2 for the grafana handling (generate a `random_password` when empty, mirroring `secret_key`/`metrics_api_key`).
+- **Never inject a truthy placeholder for an empty secret (critical).** A tempting way to satisfy the non-empty `secret_string` rule is a sentinel like `var.x != "" ? var.x : "not-configured"`. This is WRONG for these variables and would be a security regression. The application gates several of these credentials on truthiness (`if REGISTRY_API_TOKEN:` at `auth_server/server.py:380`, `if not REGISTRY_API_TOKEN or not hmac.compare_digest(...)` at `:2592`, `if settings.github_pat:` at `registry/services/github_auth.py:110`, and `Fernet(key.encode())` for `FEDERATION_ENCRYPTION_KEY`). A non-empty sentinel flips these from "feature off / falsy" to "configured with the literal value `not-configured`", which (a) makes `not-configured` a VALID admin bearer token on the federation-token admin endpoint, (b) sends `Authorization: Bearer not-configured` to GitHub/webhook/ANS endpoints, and (c) raises a Fernet error on every federation call. Therefore the design uses `count`-gating so an empty var produces an ABSENT env var (Pydantic falls back to its `""`/`None` field default, `os.getenv(x, "")` returns `""` - both falsy, matching today's behavior). This preserves the app's truthiness semantics exactly.
+- **Empty-value semantic change in the secrets-on path (must smoke-test).** In the default (`use_secrets_manager_for_env = true`) path, an empty optional var yields NO env var at all (secret not created, secrets fragment filtered out), whereas today the container receives `X=""` inline. For every one of the 13 consumers this is benign because they read via Pydantic field defaults (`""`/`None`) or `os.getenv(x, "")`, all of which are falsy and equivalent to `""`. This equivalence must be verified in the smoke test (see `testing.md`), because a consumer that distinguished "set-but-empty" from "unset" would observe a difference. The plaintext fallback path (`false`) still emits `X=""` unconditionally, so it remains byte-for-byte identical to today.
+- **Terraform state confidentiality (out of scope but load-bearing).** Even on the Secrets Manager path, `aws_secretsmanager_secret_version.secret_string = var.<name>` stores the value in Terraform state in cleartext. The root stack currently declares `terraform {}` with no `backend` block (`main.tf`), so state defaults to a local unencrypted file. This means the migration moves secrets out of the task-definition JSON but NOT out of state unless an encrypted remote backend (S3 + SSE-KMS + versioning + TLS-only bucket policy + state locking) is configured. Configuring the backend is out of scope for this issue (it is a repo-wide concern), but it is flagged as a hard prerequisite for the migration's confidentiality claim to hold - see Open Questions.
 
 ## Architecture
 
 ### System Context Diagram
 
 ```
-                         Terraform apply
-                               |
-        +----------------------+-----------------------+
-        |                      |                       |
-        v                      v                       v
- aws_secretsmanager_   aws_iam_policy.        aws_ecs_task_definition
- secret.<new>          ecs_secrets_access     (environment + secrets)
-   (KMS: secrets key)    GetSecretValue on       secrets[].valueFrom = ARN
-        |                 new ARNs                    |
-        |                      |                      |
-        +----------+-----------+----------------------+
-                   |
-                   v
-        ECS task execution role  ---- at container start ---->  AWS Secrets Manager
-        (${var.name}-task-execution)        GetSecretValue + KMS Decrypt
-                   |
-                   v
-        Container env (SECRET injected as env var, NOT in task def JSON)
+                      Terraform apply
+                            |
+        +-------------------+--------------------+
+        |                   |                    |
+        v                   v                    v
+  aws_secretsmanager   aws_iam_policy      aws_ecs_task_definition
+   _secret (+version)  .ecs_secrets_access   (auth / registry / grafana)
+        |                   |                    |
+        | encrypted by      | grants             | secrets[].valueFrom = ARN
+        v                   | GetSecretValue     v
+  aws_kms_key.secrets  <----+--------------  ECS agent (task startup)
+        ^                                         |
+        | kms:Decrypt (task-exec role)            | injects as env vars
+        +-----------------------------------------+
+                                                  v
+                                     Container process env
+                                  (SECRET_KEY, GITHUB_PAT, ...)
+                                                  |
+                                                  v
+                                   App reads os.environ / Pydantic
+                                   (identical for plaintext fallback)
 ```
 
-### Sequence Diagram (container start, after migration)
+### Sequence Diagram (task startup, Secrets Manager path)
 
 ```
-ECS Service        ECS Agent (exec role)     Secrets Manager        KMS            Container
-    |                     |                        |                 |                |
-    | launch task         |                        |                 |                |
-    |-------------------->|                        |                 |                |
-    |                     | GetSecretValue(ARN)    |                 |                |
-    |                     |----------------------->|                 |                |
-    |                     |                        | Decrypt(blob)   |                |
-    |                     |                        |---------------->|                |
-    |                     |                        |<----------------|                |
-    |                     |<-----------------------|                 |                |
-    |                     | inject as env var GF_SECURITY_ADMIN_PASSWORD=...          |
-    |                     |--------------------------------------------------------->|
-    |                     |                        |                 |   app reads os.environ
+ECS control plane        ECS agent (host)         Secrets Manager        Container
+      |                        |                        |                    |
+      |-- run task ----------->|                        |                    |
+      |                        |-- GetSecretValue(ARN)->|                    |
+      |                        |   (task-exec role)     |                    |
+      |                        |<-- secret value -------|                    |
+      |                        |-- kms:Decrypt -------->| (KMS)              |
+      |                        |-- start container, inject env vars -------->|
+      |                        |                        |    process reads   |
+      |                        |                        |    os.environ ---->|
 ```
 
-The only change from today's flow is that more env vars now arrive via this Secrets-Manager path instead of being baked into the task definition.
-
-### Component Diagram
+### Component Diagram (toggle logic in the module)
 
 ```
-modules/mcp-gateway/
-  secrets.tf   --[defines]--> aws_secretsmanager_secret.{registry_api_token, registry_api_keys,
-                                federation_static_token, federation_encryption_key, ans_api_key,
-                                ans_api_secret, registration_webhook_auth_token,
-                                registration_gate_auth_credential, registration_gate_oauth2_client_secret,
-                                github_pat, github_app_private_key, grafana_admin_password,
-                                mongodb_connection_string}
-  iam.tf       --[grants ]--> ecs_secrets_access.Resource += new ARNs
-  ecs-services.tf --[wires]--> auth-server.secrets, registry.secrets (valueFrom)
-  observability.tf --[wires]--> grafana.secrets, grafana-config.secrets (valueFrom)
+var.use_secrets_manager_for_env (bool, default true)
+        |
+        v
+ locals.tf: per-service split
+   local.auth_secret_env       = flag ? [] : [ {name,value}, ... ]   # plaintext fallback list
+   local.auth_secret_secrets   = flag ? [ {name,valueFrom}, ... ] : []
+        |                                   |
+        v                                   v
+ ecs-services.tf                      ecs-services.tf
+   environment = concat(              secrets = concat(
+     [...non-secret...],                [...existing migrated secrets...],
+     local.auth_secret_env)             local.auth_secret_secrets)
 ```
 
 ## Data Models
 
-Terraform/HCL change; there are no application data models. The "models" here are the secret resource shape and the container `secrets` entry shape.
+This change is Terraform infrastructure; there are no Python/Pydantic models. The relevant "data models" are the ECS `secrets` entry shape and the Secrets Manager resource shape.
 
-### New secret resource (template, unconditional + sentinel variant)
+### ECS secrets entry (existing shape, reused)
 
 ```hcl
-# Registry static API token (Bearer token for the Registry API)
-#checkov:skip=CKV2_AWS_57:Operator-managed static API token, rotation requires coordinated client update
-resource "aws_secretsmanager_secret" "registry_api_token" {
-  name_prefix             = "${local.name_prefix}-registry-api-token-"
-  description             = "Static Bearer token for the Registry API"
+# Raw single-value secret: reference the bare ARN
+{ name = "GITHUB_PAT", valueFrom = aws_secretsmanager_secret.github_pat[0].arn }
+
+# JSON secret (not used by new secrets here, shown for contrast):
+{ name = "KC_DB_PASSWORD", valueFrom = "${aws_secretsmanager_secret.keycloak_db_secret.arn}:password::" }
+```
+
+### Secrets Manager resource (new, follows `secret_key` pattern)
+
+```hcl
+#checkov:skip=CKV2_AWS_57:External/app-managed secret, not rotatable via Secrets Manager
+resource "aws_secretsmanager_secret" "github_pat" {
+  count                   = var.github_pat != "" ? 1 : 0
+  name_prefix             = "${local.name_prefix}-github-pat-"
+  description             = "GitHub personal access token for the registry"
   recovery_window_in_days = 0
   kms_key_id              = aws_kms_key.secrets.id
   tags                    = local.common_tags
 }
 
-resource "aws_secretsmanager_secret_version" "registry_api_token" {
-  secret_id     = aws_secretsmanager_secret.registry_api_token.id
-  secret_string = var.registry_api_token != "" ? var.registry_api_token : "not-configured"
-
-  lifecycle {
-    ignore_changes = [secret_string]
-  }
+resource "aws_secretsmanager_secret_version" "github_pat" {
+  count         = var.github_pat != "" ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.github_pat[0].id
+  secret_string = var.github_pat
 }
 ```
-
-### Container `secrets` entry (whole-value)
-
-```hcl
-{
-  name      = "REGISTRY_API_TOKEN"
-  valueFrom = aws_secretsmanager_secret.registry_api_token.arn
-},
-```
-
-### Conditional secret (only when a feature flag gates the consuming code path)
-
-```hcl
-resource "aws_secretsmanager_secret" "github_app_private_key" {
-  count                   = var.github_app_id != "" ? 1 : 0
-  name_prefix             = "${local.name_prefix}-github-app-private-key-"
-  description             = "GitHub App PEM private key"
-  recovery_window_in_days = 0
-  kms_key_id              = aws_kms_key.secrets.id
-  tags                    = local.common_tags
-}
-```
-
-> Decision rule: use the **sentinel** variant for secrets whose env var is always emitted by the container (so the `secrets` block always needs a valid ARN); use the **conditional** variant where the env var itself is only emitted under a feature flag, and append the ARN to both the `secrets` block and the IAM list under the same condition. The default in this design is the sentinel variant, because the audited containers emit these env vars unconditionally today.
 
 ## API / CLI Design
 
-No application API or CLI changes. The operator-facing "interface" is Terraform:
+No new HTTP endpoints or CLI commands. The only operator-facing surface is the new Terraform variable:
 
-**Invocation:**
+```hcl
+# terraform.tfvars
+use_secrets_manager_for_env = true   # false restores the legacy plaintext environment path
+```
+
+Applying is the standard workflow:
+
 ```bash
 cd terraform/aws-ecs
-terraform init
-terraform plan -out=tfplan
-terraform apply tfplan
-```
-
-**Expected plan output (excerpt):**
-```
-# module.mcp_gateway.aws_secretsmanager_secret.registry_api_token will be created
-# module.mcp_gateway.aws_secretsmanager_secret_version.registry_api_token will be created
-# module.mcp_gateway.aws_iam_policy.ecs_secrets_access will be updated in-place
-#   ~ policy = ... (adds registry_api_token ARN)
-# module.mcp_gateway...aws_ecs_task_definition.registry will be updated
-#   - environment { name = "REGISTRY_API_TOKEN" ... }   # removed
-#   + secrets     { name = "REGISTRY_API_TOKEN" valueFrom = "<arn>" }  # added
+terraform plan  -var-file=terraform.tfvars
+terraform apply -var-file=terraform.tfvars
 ```
 
 **Error cases:**
-- Referencing `aws_secretsmanager_secret.x[0].arn` for a secret created with `count` while the flag is off -> index error. Mitigation: gate the `secrets`/IAM reference with the same condition.
-- Same env name in both `environment` and `secrets` -> module/validation error. Mitigation: remove the `environment` entry in the same commit.
+- If a variable name is left in both `environment` and `secrets` (implementation bug), ECS task registration fails with `Duplicate environment variable name`. The toggle design prevents this by construction.
+- If the execution role lacks `GetSecretValue`/`kms:Decrypt` for a referenced ARN, the task fails to start with `ResourceInitializationError: unable to pull secrets`. Mitigated by adding every new ARN to `ecs_secrets_access` under the same conditional used to create it.
 
 ## Configuration Parameters
 
-### New Environment Variables
+### New Terraform Variables
 
-None. No new env vars are introduced. The set of env vars delivered to containers is unchanged; only the delivery channel for the listed names moves from `environment` to `secrets`.
+| Variable Name | Type | Default | Required | Description |
+|---------------|------|---------|----------|-------------|
+| `use_secrets_manager_for_env` | `bool` | `true` | No | When true, sensitive values are injected via the ECS `secrets` block from AWS Secrets Manager. When false, they are injected as plaintext `environment` entries (legacy fallback). |
 
-### New / Changed Input Variables
+All source secret variables (`grafana_admin_password`, `auth0_management_api_token`, `registry_api_token`, `registry_api_keys`, `federation_static_token`, `federation_encryption_key`, `ans_api_key`, `ans_api_secret`, `registration_webhook_auth_token`, `registration_gate_auth_credential`, `registration_gate_oauth2_client_secret`, `github_pat`, `github_app_private_key`) already exist in `modules/mcp-gateway/variables.tf` and are declared `sensitive = true`. No new source variables are needed.
 
-No new Terraform variables are required - every value already has a `sensitive = true` variable. One **optional** convenience variable could be added if operators want a generated default for `registry_api_token` (mirroring `secret_key`), but the default design reuses the existing variable with a `"not-configured"` sentinel and is therefore additive-free.
+### Variable definition (add to `modules/mcp-gateway/variables.tf`)
 
-### Settings / Config Class Updates
+```hcl
+variable "use_secrets_manager_for_env" {
+  description = "Inject sensitive values via the ECS secrets block from AWS Secrets Manager (true) or as plaintext environment entries (false, legacy fallback)."
+  type        = bool
+  default     = true
+}
+```
 
-Not applicable (no application settings class involved).
+The root stack must pass this through to the module. Add a matching root variable in `terraform/aws-ecs/variables.tf` and wire it in `main.tf` (`use_secrets_manager_for_env = var.use_secrets_manager_for_env`).
 
 ### Deployment Surface Checklist
 
-| Surface | File | Action |
-|---------|------|--------|
-| Terraform secret defs | `modules/mcp-gateway/secrets.tf` | Add the new secret + version resources |
-| Terraform IAM | `modules/mcp-gateway/iam.tf` | Add new ARNs to `ecs_secrets_access` |
-| Terraform task defs | `modules/mcp-gateway/ecs-services.tf`, `observability.tf` | Move entries `environment` -> `secrets` |
-| Example tfvars | `terraform/aws-ecs/terraform.tfvars.example` | Update comments: values now stored in Secrets Manager |
-| Operator docs | `terraform/aws-ecs/OPERATIONS.md`, `README.md` | Document secret names + how to set values out-of-band |
-| Reserved env names | `charts/*/reserved-env-names.txt` | Verify migrated names are present (over-rejection preferred) |
+- [ ] `terraform/aws-ecs/modules/mcp-gateway/variables.tf` (new module variable)
+- [ ] `terraform/aws-ecs/variables.tf` (new root variable)
+- [ ] `terraform/aws-ecs/main.tf` (pass-through into the module)
+- [ ] `terraform/aws-ecs/terraform.tfvars.example` (documented default `true`)
+- [ ] `terraform/aws-ecs/README.md` / `OPERATIONS.md` (document the flag and the fallback procedure)
+- [ ] No Docker Compose / Helm surface (out of scope; document as N/A)
 
 ## New Dependencies
 
-This change uses only existing dependencies. No new Terraform providers, modules, or packages. It reuses `aws_kms_key.secrets`, the AWS provider's `aws_secretsmanager_secret`/`aws_secretsmanager_secret_version`, and the existing ECS service module.
+This change uses only existing dependencies (the AWS provider, `terraform-aws-modules/ecs`, and the already-present `aws_kms_key.secrets`). No new providers, modules, or Python packages are required.
 
 ## Implementation Details
 
 ### Step-by-Step Plan (for a future implementer)
 
-#### Step 1: Inventory and freeze the target list
+The 13 target variables split into three groups by scope:
 
-**File:** none (analysis)
+- **Grafana only:** `GF_SECURITY_ADMIN_PASSWORD` (grafana, grafana-config).
+- **auth-server + registry:** `AUTH0_MANAGEMENT_API_TOKEN`, `REGISTRY_API_TOKEN`, `REGISTRY_API_KEYS`, `FEDERATION_STATIC_TOKEN`, `FEDERATION_ENCRYPTION_KEY`, `ANS_API_KEY`, `ANS_API_SECRET`.
+- **registry only:** `REGISTRATION_WEBHOOK_AUTH_TOKEN`, `REGISTRATION_GATE_AUTH_CREDENTIAL`, `REGISTRATION_GATE_OAUTH2_CLIENT_SECRET`, `GITHUB_PAT`, `GITHUB_APP_PRIVATE_KEY`.
 
-Confirm the exact set of secret-bearing `environment` entries (this design's table). Re-grep before editing, since line numbers drift:
+#### Step 1: Add the feature-flag variable
 
-```bash
-cd terraform/aws-ecs/modules/mcp-gateway
-grep -nE 'name *= *"(REGISTRY_API_TOKEN|REGISTRY_API_KEYS|FEDERATION_STATIC_TOKEN|FEDERATION_ENCRYPTION_KEY|ANS_API_KEY|ANS_API_SECRET|REGISTRATION_WEBHOOK_AUTH_TOKEN|REGISTRATION_GATE_AUTH_CREDENTIAL|REGISTRATION_GATE_OAUTH2_CLIENT_SECRET|GITHUB_PAT|GITHUB_APP_PRIVATE_KEY|GF_SECURITY_ADMIN_PASSWORD|MONGODB_CONNECTION_STRING)"' ecs-services.tf observability.tf
-```
+**Files:** `modules/mcp-gateway/variables.tf`, `terraform/aws-ecs/variables.tf`, `terraform/aws-ecs/main.tf`
+See the variable definition above; wire the pass-through in `main.tf`.
 
-#### Step 2: Add new secret resources
+#### Step 2: Create the Secrets Manager secrets
 
-**File:** `modules/mcp-gateway/secrets.tf` (append near related existing secrets)
+**File:** `modules/mcp-gateway/secrets.tf` (append a new section, ~13 secret+version pairs)
 
-For each of the 12 standalone secrets, add an `aws_secretsmanager_secret` + `aws_secretsmanager_secret_version` pair following the template in [Data Models](#data-models). Use the sentinel variant by default. Suggested names (all `name_prefix = "${local.name_prefix}-<slug>-"`):
-
-| Secret resource | slug | secret_string source |
-|-----------------|------|----------------------|
-| `registry_api_token` | `registry-api-token` | `var.registry_api_token` w/ sentinel |
-| `registry_api_keys` | `registry-api-keys` | `var.registry_api_keys` w/ sentinel |
-| `federation_static_token` | `federation-static-token` | `var.federation_static_token` w/ sentinel |
-| `federation_encryption_key` | `federation-encryption-key` | `var.federation_encryption_key` w/ sentinel |
-| `ans_api_key` | `ans-api-key` | `var.ans_api_key` w/ sentinel |
-| `ans_api_secret` | `ans-api-secret` | `var.ans_api_secret` w/ sentinel |
-| `registration_webhook_auth_token` | `registration-webhook-auth-token` | `var.registration_webhook_auth_token` w/ sentinel |
-| `registration_gate_auth_credential` | `registration-gate-auth-credential` | `var.registration_gate_auth_credential` w/ sentinel |
-| `registration_gate_oauth2_client_secret` | `registration-gate-oauth2-client-secret` | `var.registration_gate_oauth2_client_secret` w/ sentinel |
-| `github_pat` | `github-pat` | `var.github_pat` w/ sentinel |
-| `github_app_private_key` | `github-app-private-key` | `var.github_app_private_key` w/ sentinel |
-| `grafana_admin_password` | `grafana-admin-password` | `var.grafana_admin_password` (only when `var.enable_observability`; use `count`) |
-
-Each gets a `#checkov:skip=CKV2_AWS_57:<reason>` line consistent with existing entries. Use `lifecycle { ignore_changes = [secret_string] }` on every version so operators can set the real value out-of-band without state drift.
-
-`grafana_admin_password` should be **conditional** (`count = var.enable_observability ? 1 : 0`) because the Grafana service itself only exists under that flag.
-
-#### Step 3: Handle `MONGODB_CONNECTION_STRING` plaintext fallback
-
-**File:** `modules/mcp-gateway/secrets.tf`, `ecs-services.tf`
-
-Two acceptable options; the design recommends Option A:
-
-- **Option A (recommended, no behavior loss):** When `var.mongodb_connection_string != "" && var.mongodb_connection_string_secret_arn == ""`, create a managed secret `aws_secretsmanager_secret.mongodb_connection_string` (with `count`) holding `var.mongodb_connection_string`, and reference it from the `secrets` block. The plaintext `environment` fallback at `ecs-services.tf` lines 403-407 and 1278-1282 is removed. Operators who already pass `mongodb_connection_string_secret_arn` are unaffected.
-- **Option B (strict):** Drop the plaintext-var path entirely and require `mongodb_connection_string_secret_arn`. Simpler, but a breaking change for deployments using the plaintext var. Document loudly if chosen.
-
-#### Step 4: Move auth-server entries `environment` -> `secrets`
-
-**File:** `modules/mcp-gateway/ecs-services.tf` (auth-server container, `environment` ~lines 97-411, `secrets` concat starting ~line 413)
-
-Delete the `environment` blocks for `REGISTRY_API_TOKEN`, `REGISTRY_API_KEYS`, `FEDERATION_STATIC_TOKEN`, `FEDERATION_ENCRYPTION_KEY`, `ANS_API_KEY`, `ANS_API_SECRET`, and the plaintext `MONGODB_CONNECTION_STRING`. Add matching `{ name, valueFrom }` entries into the first array of the `secrets = concat([...], ...)`:
+For each target variable, add a `count`-gated secret + version. All the auth/registry secrets are `count = var.<name> != "" ? 1 : 0`. Example for the auth0 management token:
 
 ```hcl
-secrets = concat(
-  [
-    { name = "SECRET_KEY",               valueFrom = aws_secretsmanager_secret.secret_key.arn },
-    # ... existing entries ...
-    { name = "REGISTRY_API_TOKEN",       valueFrom = aws_secretsmanager_secret.registry_api_token.arn },
-    { name = "REGISTRY_API_KEYS",        valueFrom = aws_secretsmanager_secret.registry_api_keys.arn },
-    { name = "FEDERATION_STATIC_TOKEN",  valueFrom = aws_secretsmanager_secret.federation_static_token.arn },
-    { name = "FEDERATION_ENCRYPTION_KEY",valueFrom = aws_secretsmanager_secret.federation_encryption_key.arn },
-    { name = "ANS_API_KEY",              valueFrom = aws_secretsmanager_secret.ans_api_key.arn },
-    { name = "ANS_API_SECRET",           valueFrom = aws_secretsmanager_secret.ans_api_secret.arn },
-  ],
-  # existing conditional lists (Entra/Okta/Auth0/Mongo) unchanged ...
-)
+#checkov:skip=CKV2_AWS_57:Auth0 Management API token managed in the Auth0 dashboard, not rotatable via Secrets Manager
+resource "aws_secretsmanager_secret" "auth0_management_api_token" {
+  count                   = var.auth0_management_api_token != "" ? 1 : 0
+  name_prefix             = "${local.name_prefix}-auth0-mgmt-api-token-"
+  description             = "Auth0 Management API token"
+  recovery_window_in_days = 0
+  kms_key_id              = aws_kms_key.secrets.id
+  tags                    = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "auth0_management_api_token" {
+  count         = var.auth0_management_api_token != "" ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.auth0_management_api_token[0].id
+  secret_string = var.auth0_management_api_token
+}
 ```
 
-#### Step 5: Move registry entries `environment` -> `secrets`
+Repeat for: `registry_api_token`, `registry_api_keys`, `federation_static_token`, `federation_encryption_key`, `ans_api_key`, `ans_api_secret`, `registration_webhook_auth_token`, `registration_gate_auth_credential`, `registration_gate_oauth2_client_secret`, `github_pat`, `github_app_private_key`.
 
-**File:** `modules/mcp-gateway/ecs-services.tf` (registry container, `environment` ~lines 698-1286, `secrets` concat ~line 1288)
+**Grafana admin password (special handling).** `var.grafana_admin_password` defaults to `""` (`variables.tf:1175-1180`), and the grafana service only exists when `enable_observability` is true (`observability.tf:482`). Gate the secret on `enable_observability`, and never store an empty `secret_string`: when the operator leaves the password blank, generate one with `random_password` (mirroring `secret_key`/`metrics_api_key` at `secrets.tf:83-102`/`:330-355`) so grafana always gets a strong password and `apply` never fails on an empty value:
 
-Delete the `environment` blocks for `REGISTRY_API_TOKEN`, `REGISTRY_API_KEYS`, `FEDERATION_STATIC_TOKEN`, `FEDERATION_ENCRYPTION_KEY`, `ANS_API_KEY`, `ANS_API_SECRET`, `REGISTRATION_WEBHOOK_AUTH_TOKEN`, `REGISTRATION_GATE_AUTH_CREDENTIAL`, `REGISTRATION_GATE_OAUTH2_CLIENT_SECRET`, `GITHUB_PAT`, `GITHUB_APP_PRIVATE_KEY`, and the plaintext `MONGODB_CONNECTION_STRING`. Add the corresponding `valueFrom` entries to the registry `secrets` concat, mirroring Step 4.
+```hcl
+resource "random_password" "grafana_admin_password" {
+  count   = var.enable_observability && var.grafana_admin_password == "" ? 1 : 0
+  length  = 32
+  special = false
+}
 
-Leave non-secret GitHub config (`GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_API_BASE_URL`, `GITHUB_EXTRA_HOSTS`) and non-secret gate config (URLs, header names, scopes, client_id) in `environment`.
+#checkov:skip=CKV2_AWS_57:Grafana admin password rotation requires coordinated restart
+resource "aws_secretsmanager_secret" "grafana_admin_password" {
+  count                   = var.enable_observability ? 1 : 0
+  name_prefix             = "${local.name_prefix}-grafana-admin-password-"
+  description             = "Grafana admin password"
+  recovery_window_in_days = 0
+  kms_key_id              = aws_kms_key.secrets.id
+  tags                    = local.common_tags
+}
 
-#### Step 6: Migrate Grafana admin password (both containers)
+resource "aws_secretsmanager_secret_version" "grafana_admin_password" {
+  count     = var.enable_observability ? 1 : 0
+  secret_id = aws_secretsmanager_secret.grafana_admin_password[0].id
+  secret_string = var.grafana_admin_password != "" ? var.grafana_admin_password : random_password.grafana_admin_password[0].result
+}
+```
+
+Note: if a random password is generated, operators retrieve it from Secrets Manager (or a Terraform output marked `sensitive`) to log in to Grafana. Document this in `OPERATIONS.md`.
+
+#### Step 3: Build toggle helper locals
+
+**File:** `modules/mcp-gateway/locals.tf` (new locals)
+
+Define, per service, two lists: the plaintext-fallback `environment` fragment and the Secrets Manager `secrets` fragment. Each variable contributes to exactly one of the two, chosen by the flag. Gate each optional entry on the same non-empty condition used to create its secret so a missing secret is never referenced.
+
+```hcl
+locals {
+  use_sm = var.use_secrets_manager_for_env
+
+  # ---- auth-server + registry shared secrets ----
+  shared_secret_specs = {
+    AUTH0_MANAGEMENT_API_TOKEN = { value = var.auth0_management_api_token, arn = try(aws_secretsmanager_secret.auth0_management_api_token[0].arn, "") }
+    REGISTRY_API_TOKEN         = { value = var.registry_api_token,         arn = try(aws_secretsmanager_secret.registry_api_token[0].arn, "") }
+    REGISTRY_API_KEYS          = { value = var.registry_api_keys,          arn = try(aws_secretsmanager_secret.registry_api_keys[0].arn, "") }
+    FEDERATION_STATIC_TOKEN    = { value = var.federation_static_token,    arn = try(aws_secretsmanager_secret.federation_static_token[0].arn, "") }
+    FEDERATION_ENCRYPTION_KEY  = { value = var.federation_encryption_key,  arn = try(aws_secretsmanager_secret.federation_encryption_key[0].arn, "") }
+    ANS_API_KEY                = { value = var.ans_api_key,                arn = try(aws_secretsmanager_secret.ans_api_key[0].arn, "") }
+    ANS_API_SECRET             = { value = var.ans_api_secret,             arn = try(aws_secretsmanager_secret.ans_api_secret[0].arn, "") }
+  }
+
+  # Plaintext fallback: emitted only when the flag is OFF. Preserves prior behavior
+  # (all names were previously always present, even when empty).
+  shared_secret_env = local.use_sm ? [] : [
+    for name, spec in local.shared_secret_specs : { name = name, value = spec.value }
+  ]
+
+  # Secrets Manager path: emitted only when the flag is ON and the secret exists.
+  shared_secret_secrets = local.use_sm ? [
+    for name, spec in local.shared_secret_specs : { name = name, valueFrom = spec.arn }
+    if spec.arn != ""
+  ] : []
+
+  # ---- registry-only secrets (same construction) ----
+  registry_only_specs = {
+    REGISTRATION_WEBHOOK_AUTH_TOKEN        = { value = var.registration_webhook_auth_token,        arn = try(aws_secretsmanager_secret.registration_webhook_auth_token[0].arn, "") }
+    REGISTRATION_GATE_AUTH_CREDENTIAL      = { value = var.registration_gate_auth_credential,      arn = try(aws_secretsmanager_secret.registration_gate_auth_credential[0].arn, "") }
+    REGISTRATION_GATE_OAUTH2_CLIENT_SECRET = { value = var.registration_gate_oauth2_client_secret, arn = try(aws_secretsmanager_secret.registration_gate_oauth2_client_secret[0].arn, "") }
+    GITHUB_PAT                             = { value = var.github_pat,                             arn = try(aws_secretsmanager_secret.github_pat[0].arn, "") }
+    GITHUB_APP_PRIVATE_KEY                 = { value = var.github_app_private_key,                 arn = try(aws_secretsmanager_secret.github_app_private_key[0].arn, "") }
+  }
+  registry_only_env = local.use_sm ? [] : [
+    for name, spec in local.registry_only_specs : { name = name, value = spec.value }
+  ]
+  registry_only_secrets = local.use_sm ? [
+    for name, spec in local.registry_only_specs : { name = name, valueFrom = spec.arn } if spec.arn != ""
+  ] : []
+
+  # ---- grafana (secret is count-gated on enable_observability) ----
+  grafana_secret_env = local.use_sm ? [] : [{ name = "GF_SECURITY_ADMIN_PASSWORD", value = var.grafana_admin_password }]
+  grafana_secret_secrets = (local.use_sm && var.enable_observability) ? [
+    { name = "GF_SECURITY_ADMIN_PASSWORD", valueFrom = aws_secretsmanager_secret.grafana_admin_password[0].arn }
+  ] : []
+}
+```
+
+Note on fallback fidelity: when `use_sm = false`, the plaintext lists reproduce the previous behavior. There is one intentional refinement: optional empty secrets are no longer created (Secrets Manager path), but the plaintext path still emits the (possibly empty) env entry to remain byte-for-byte identical to today. Because the previous code always emitted these names inline, the fallback list emits them unconditionally too.
+
+#### Step 4: Remove the target vars from `environment` and add the fallback + secrets fragments
+
+**File:** `modules/mcp-gateway/ecs-services.tf`
+
+For the auth-server container (`environment = concat(...)` ending near `:410`):
+- Delete the inline `{ name = "AUTH0_MANAGEMENT_API_TOKEN", value = ... }`, `REGISTRY_API_TOKEN`, `REGISTRY_API_KEYS`, `FEDERATION_STATIC_TOKEN`, `FEDERATION_ENCRYPTION_KEY`, `ANS_API_KEY`, `ANS_API_SECRET` blocks.
+- Append `local.shared_secret_env` to the `environment = concat(...)`.
+- Append `local.shared_secret_secrets` to the `secrets = concat(...)` at `:413-480`.
+
+For the registry container (`environment` near `:670-1285`, `secrets` at `:1288-1365`):
+- Delete the inline shared secrets (same 7 names) AND the 5 registry-only names.
+- Append `local.shared_secret_env` and `local.registry_only_env` to `environment = concat(...)`.
+- Append `local.shared_secret_secrets` and `local.registry_only_secrets` to `secrets = concat(...)`.
+
+Example (registry `secrets` tail):
+
+```hcl
+      secrets = concat(
+        [
+          { name = "SECRET_KEY", valueFrom = aws_secretsmanager_secret.secret_key.arn },
+          # ... existing migrated secrets ...
+        ],
+        # ... existing conditional idp/observability lists ...
+        local.shared_secret_secrets,
+        local.registry_only_secrets,
+      )
+```
+
+#### Step 5: Add a `secrets` block to grafana / grafana-config
 
 **File:** `modules/mcp-gateway/observability.tf`
 
-The `grafana` container has an `environment` array (~line 544) and the `grafana-config` sidecar has its own (~line 642), both containing `GF_SECURITY_ADMIN_PASSWORD`. Remove both `environment` entries and add a `secrets` block to **each** container:
+- grafana container (`:528`): remove the inline `{ name = "GF_SECURITY_ADMIN_PASSWORD", value = var.grafana_admin_password }` from `environment`; add `secrets = local.grafana_secret_secrets` and append `local.grafana_secret_env` to `environment`.
+- grafana-config container (`:616`): same treatment. The shell command at `:630` reads `$${GF_SECURITY_ADMIN_PASSWORD}` from the env, which is populated identically whether via `environment` or `secrets`.
 
-```hcl
-secrets = [
-  { name = "GF_SECURITY_ADMIN_PASSWORD", valueFrom = aws_secretsmanager_secret.grafana_admin_password[0].arn },
-]
-```
+#### Step 6: Extend the IAM policy `Resource` list
 
-The sidecar's shell reference `$${GF_SECURITY_ADMIN_PASSWORD}` continues to resolve because injected secrets become normal env vars. Confirm neither container already declares a `secrets` block (the grafana container does not today; if a future change adds one, append rather than overwrite).
+**File:** `modules/mcp-gateway/iam.tf` (`aws_iam_policy.ecs_secrets_access`, `Resource = concat(...)` at `:15-36`)
 
-#### Step 7: Extend the execution-role IAM policy
-
-**File:** `modules/mcp-gateway/iam.tf` (`aws_iam_policy.ecs_secrets_access`, resource list lines 15-36)
-
-Append the new ARNs to the `Resource = concat(...)` list:
+Append the new ARNs, gated by the same non-empty conditions used to create them (and grafana's unconditionally):
 
 ```hcl
 Resource = concat(
   [
     aws_secretsmanager_secret.secret_key.arn,
-    # ... existing always-on ARNs ...
-    aws_secretsmanager_secret.registry_api_token.arn,
-    aws_secretsmanager_secret.registry_api_keys.arn,
-    aws_secretsmanager_secret.federation_static_token.arn,
-    aws_secretsmanager_secret.federation_encryption_key.arn,
-    aws_secretsmanager_secret.ans_api_key.arn,
-    aws_secretsmanager_secret.ans_api_secret.arn,
-    aws_secretsmanager_secret.registration_webhook_auth_token.arn,
-    aws_secretsmanager_secret.registration_gate_auth_credential.arn,
-    aws_secretsmanager_secret.registration_gate_oauth2_client_secret.arn,
-    aws_secretsmanager_secret.github_pat.arn,
-    aws_secretsmanager_secret.github_app_private_key.arn,
+    # ... existing base ARNs ...
   ],
-  var.enable_observability ? [aws_secretsmanager_secret.grafana_admin_password[0].arn] : [],
-  var.mongodb_connection_string != "" && var.mongodb_connection_string_secret_arn == "" ? [aws_secretsmanager_secret.mongodb_connection_string[0].arn] : [],
-  # ... existing conditional lists unchanged ...
+  # ... existing conditional lists ...
+  var.enable_observability                  ? [aws_secretsmanager_secret.grafana_admin_password[0].arn] : [],
+  var.auth0_management_api_token            != "" ? [aws_secretsmanager_secret.auth0_management_api_token[0].arn] : [],
+  var.registry_api_token                    != "" ? [aws_secretsmanager_secret.registry_api_token[0].arn] : [],
+  var.registry_api_keys                     != "" ? [aws_secretsmanager_secret.registry_api_keys[0].arn] : [],
+  var.federation_static_token               != "" ? [aws_secretsmanager_secret.federation_static_token[0].arn] : [],
+  var.federation_encryption_key             != "" ? [aws_secretsmanager_secret.federation_encryption_key[0].arn] : [],
+  var.ans_api_key                           != "" ? [aws_secretsmanager_secret.ans_api_key[0].arn] : [],
+  var.ans_api_secret                        != "" ? [aws_secretsmanager_secret.ans_api_secret[0].arn] : [],
+  var.registration_webhook_auth_token       != "" ? [aws_secretsmanager_secret.registration_webhook_auth_token[0].arn] : [],
+  var.registration_gate_auth_credential     != "" ? [aws_secretsmanager_secret.registration_gate_auth_credential[0].arn] : [],
+  var.registration_gate_oauth2_client_secret != "" ? [aws_secretsmanager_secret.registration_gate_oauth2_client_secret[0].arn] : [],
+  var.github_pat                            != "" ? [aws_secretsmanager_secret.github_pat[0].arn] : [],
+  var.github_app_private_key                != "" ? [aws_secretsmanager_secret.github_app_private_key[0].arn] : [],
 )
 ```
 
-The existing `kms:Decrypt`/`kms:DescribeKey` statement on `aws_kms_key.secrets.arn` already covers the new secrets - **no KMS policy change needed** because every new secret uses that key.
+**Avoiding triplication (recommended refinement).** The non-empty predicate is otherwise written in three places per secret: the secret `count`, the locals filter, and the IAM `Resource` list. To prevent drift (a forgotten IAM line yields a silent `unable to pull secrets` at task start), derive the IAM `Resource` additions from the same `local.*_specs` maps used in Step 3:
 
-> Note: the Grafana service may run under a different task execution role than the main `ecs_secrets_access`-attached role. The implementer must confirm which execution role the Grafana service uses (it is defined in `observability.tf` via the same `terraform-aws-modules/ecs/aws` module) and ensure `ecs_secrets_access` (or an equivalent grant) is attached to it. If Grafana uses a separate role, add an equivalent statement there. This is the single most error-prone point in the change - see review.md.
+```hcl
+# Instead of 13 hand-written conditional lines, one comprehension per group:
+[for name, spec in local.shared_secret_specs   : spec.arn if spec.arn != ""],
+[for name, spec in local.registry_only_specs   : spec.arn if spec.arn != ""],
+var.enable_observability ? [aws_secretsmanager_secret.grafana_admin_password[0].arn] : [],
+```
 
-#### Step 8: Update reserved-env-name lists and docs
+A future implementer may go further and drive the secret resources themselves via `for_each` over a single spec map (see Alternatives), collapsing all three usages to one source of truth. That diverges from the current one-resource-per-secret style in `secrets.tf`, so it is offered as an option, not mandated.
 
-**Files:** `charts/*/reserved-env-names.txt`, `terraform.tfvars.example`, `OPERATIONS.md`, `README.md`
+#### Step 7: Attach the secrets policy to the grafana execution role (REQUIRED, not optional)
 
-Verify the migrated names already appear in the reserved lists (they were chart-managed before). Update the example tfvars comments to say these values are stored in Secrets Manager and may be set out-of-band, and document the new secret names and the "set the real value in the console after first apply" workflow in `OPERATIONS.md`.
+**File:** `modules/mcp-gateway/observability.tf` (grafana `module "ecs_service_grafana"`, `task_exec_iam_role_policies` at `:505-513`)
+
+Confirmed by inspection: the grafana service currently attaches ONLY `EcsExecTaskExecution` to its execution role and does NOT attach `ecs_secrets_access`:
+
+```hcl
+# observability.tf:505-513 (current)
+create_task_exec_iam_role = true
+task_exec_iam_role_policies = {
+  EcsExecTaskExecution = aws_iam_policy.ecs_exec_task_execution.arn
+}
+```
+
+The ECS agent uses the EXECUTION role (not the task role) to resolve `secrets[].valueFrom` at container init. Without the grant, every grafana task launch fails with `ResourceInitializationError: unable to pull secrets ... AccessDeniedException`. Add the attachment (execution role only; the task role does not need it, see the note below):
+
+```hcl
+task_exec_iam_role_policies = {
+  EcsExecTaskExecution = aws_iam_policy.ecs_exec_task_execution.arn
+  SecretsManagerAccess = aws_iam_policy.ecs_secrets_access.arn
+}
+```
+
+Also confirm the grafana execution role name matches the KMS key policy's `role/*task-exec*` pattern (`secrets.tf:39`); the community ECS module names it `${name}-task-exec-*`, which matches (consistent with the already-working metrics-service).
+
+**Least-privilege note (from security review):** the existing module services attach `ecs_secrets_access` to BOTH the execution role and the task role (`ecs-services.tf:51-64`). Only the execution role needs `GetSecretValue`/`kms:Decrypt`; the running application reads injected env vars and never calls the Secrets Manager API directly (confirmed - no boto3 Secrets Manager usage in runtime app code). Attaching the read policy to the task role widens the runtime blast radius (a compromised container could enumerate the whole secret catalog via the task-role credentials on the ECS metadata endpoint). For grafana, attach the policy to the execution role ONLY. Whether to also remove the task-role attachment from auth/registry is tracked as a follow-up hardening item (see Open Questions), since it is a change to an existing pattern rather than part of this migration.
 
 ### Error Handling
 
-- **Count/index mismatches:** any `[0]` reference must be guarded by the same condition used on the resource `count`. Validate with `terraform plan` under both flag states.
-- **Duplicate env name:** removing the `environment` entry and adding the `secrets` entry must happen together; otherwise the ECS module errors on duplicate names.
-- **Empty secret values:** the sentinel (`"not-configured"`) guarantees a non-empty `secret_string` (Secrets Manager rejects empty strings) and a stable ARN for the `secrets` block.
+- **Missing IAM permission:** surfaces as an ECS `ResourceInitializationError` at task start. Prevented by Step 6/7.
+- **Duplicate env name:** prevented by construction (a name is in exactly one of `environment`/`secrets` per the flag).
+- **Empty optional secret:** never created (count-gated) and never referenced (the `secrets` fragment filters `if spec.arn != ""`).
 
 ### Logging
 
-Terraform/infra change - no application logging. The implementer should rely on `terraform plan` diffs and `aws ecs describe-task-definition` output as the verification signal (see testing.md). Application logs must continue to avoid printing these secret values (existing CLAUDE.md rule).
+Terraform `plan`/`apply` output is the primary signal. No application logging changes. Operators should confirm via CloudTrail `GetSecretValue` events that the execution role reads each secret at task start (see Observability).
 
 ## Observability
 
-- **Plan-time:** `terraform plan` is the primary signal - it must show new SM resources, an in-place IAM policy update, and task-definition diffs moving names out of `environment` and into `secrets`.
-- **Post-apply:** `aws ecs describe-task-definition` should show the migrated names only under `secrets` with `valueFrom` ARNs; `aws secretsmanager list-secrets` should show the new secrets; CloudTrail `GetSecretValue` events from the execution role confirm the runtime path.
-- **Drift:** because versions use `ignore_changes = [secret_string]`, operator-set values do not show as drift on subsequent plans.
+### Tracing / Metrics / Logging Points
+
+- **CloudTrail:** every `secretsmanager:GetSecretValue` is logged with the calling role, secret ARN, and timestamp; this is the audit trail the migration is meant to provide.
+- **KMS:** `kms:Decrypt` events on `aws_kms_key.secrets` correlate with secret reads.
+- **ECS:** task `stoppedReason` shows `ResourceInitializationError: unable to pull secrets or registry auth` if a permission or ARN is wrong.
+- **CloudWatch alarms:** existing alarm stack (`cloudwatch-alarms.tf`) covers task health; no new alarms required, though an optional metric filter on failed secret pulls could be added later (out of scope).
 
 ## Scaling Considerations
 
-- **Per-secret quota / API calls:** each container start triggers one `GetSecretValue` per referenced secret. Adding ~12 secrets to two services is well within Secrets Manager rate limits; no batching needed.
-- **Cost:** Secrets Manager bills per secret per month plus per 10k API calls. ~12-14 new secrets is a negligible cost increase. Note it in docs.
-- **Cold start:** marginally more secret fetches at task start; the agent fetches them in parallel and the added latency is sub-second. No horizontal-scaling impact.
-- **Single KMS key:** all secrets share `aws_kms_key.secrets`; KMS decrypt volume rises slightly but stays far below limits.
+- Secret reads occur only at task start/restart, not per request, so there is negligible steady-state load and no bottleneck. Secrets Manager `GetSecretValue` default quota (thousands/sec) far exceeds task-launch frequency.
+- ECS caches the injected values as env vars for the container lifetime; a secret rotation requires a task restart to take effect (acceptable and consistent with the existing migrated secrets, which are marked non-rotatable).
+- No caching layer is added; the existing model is retained.
 
 ## File Changes
 
 ### New Files
 
-| File Path | Description |
-|-----------|-------------|
-| (none) | All changes are additions to existing files |
+None. All changes extend existing files.
 
 ### Modified Files
 
 | File Path | Lines | Change Description |
 |-----------|-------|--------------------|
-| `modules/mcp-gateway/secrets.tf` | ~+140 | Add 12-13 secret + version resource pairs |
-| `modules/mcp-gateway/iam.tf` | ~+15 | Append new ARNs to `ecs_secrets_access` resource list |
-| `modules/mcp-gateway/ecs-services.tf` | ~-60 / +30 | Remove plaintext `environment` entries (auth-server + registry); add `secrets` entries; remove Mongo plaintext fallback |
-| `modules/mcp-gateway/observability.tf` | ~-4 / +8 | Remove 2 plaintext entries; add `secrets` block to grafana + grafana-config |
-| `terraform/aws-ecs/terraform.tfvars.example` | ~+15 | Update comments: values stored in Secrets Manager |
-| `terraform/aws-ecs/OPERATIONS.md` | ~+30 | Document new secret names + out-of-band set workflow |
-| `terraform/aws-ecs/README.md` | ~+10 | Note expanded Secrets Manager coverage |
-| `charts/*/reserved-env-names.txt` | ~0-+5 | Verify/add migrated names |
+| `terraform/aws-ecs/modules/mcp-gateway/secrets.tf` | ~+90 | 13 secret + version resource pairs (12 count-gated, grafana unconditional) |
+| `terraform/aws-ecs/modules/mcp-gateway/iam.tf` | ~+15 | Append 13 ARNs to `ecs_secrets_access` `Resource` concat list |
+| `terraform/aws-ecs/modules/mcp-gateway/locals.tf` | ~+45 | Toggle helper locals for env/secrets fragments |
+| `terraform/aws-ecs/modules/mcp-gateway/ecs-services.tf` | ~-40 / +8 | Remove inline plaintext entries; append fallback + secrets fragments (auth + registry) |
+| `terraform/aws-ecs/modules/mcp-gateway/observability.tf` | ~-6 / +8 | grafana/grafana-config secrets block; confirm policy attachment |
+| `terraform/aws-ecs/modules/mcp-gateway/variables.tf` | ~+6 | New `use_secrets_manager_for_env` variable |
+| `terraform/aws-ecs/variables.tf` | ~+6 | Root pass-through variable |
+| `terraform/aws-ecs/main.tf` | ~+1 | Pass flag into module |
+| `terraform/aws-ecs/terraform.tfvars.example` | ~+2 | Document the flag |
+| `terraform/aws-ecs/README.md` (or `OPERATIONS.md`) | ~+15 | Document the migration and fallback procedure |
 
 ### Estimated Lines of Code
 
 | Category | Lines |
 |----------|-------|
-| New Terraform (secrets) | ~140 |
-| New Terraform (IAM) | ~15 |
-| Modified Terraform (task defs) | ~70 net |
-| Docs | ~55 |
-| **Total** | **~280** |
+| New Terraform (secrets + locals + IAM + vars) | ~160 |
+| Modified/removed Terraform (task defs, pass-through) | ~60 |
+| Docs | ~20 |
+| Tests (terraform validate/plan checks, no app tests) | ~0 app / manual |
+| **Total** | **~240** |
 
 ## Testing Strategy
 
-See `./testing.md`. In summary: `terraform validate` + `terraform plan` under default and all-features-enabled configs; grep the rendered plan/task-definition JSON to prove zero secret literals remain in `environment`; backwards-compat checks for deployments leaving optional secrets empty; a deploy-and-verify pass via `aws ecs describe-task-definition` and a smoke test that the services still authenticate.
+See `./testing.md` for the full plan. Summary: `terraform validate` + `terraform plan` with the flag on and off (fallback fidelity), a task-definition inspection to confirm each var appears in exactly one block, an IAM policy check that every referenced ARN is granted, a live task-start smoke test verifying the app boots and reads each value, and backwards-compatibility verification that `use_secrets_manager_for_env = false` produces no net change from the pre-migration plan.
 
 ## Alternatives Considered
 
-### Alternative 1: SSM Parameter Store (SecureString) instead of Secrets Manager
+### Alternative 1: One combined JSON secret for all app secrets
 
-**Description:** Store these secrets as SSM SecureString parameters, as the Keycloak task already does for some values.
+**Description:** Store all 13 values as keys in a single `aws_secretsmanager_secret` and reference each with `":key::"`.
+**Pros:** One resource, one ARN in IAM, fewer Terraform objects.
+**Cons:** Coarse-grained access (any reader gets all values); a change to one value rewrites the whole secret version; diverges from the existing one-secret-per-value pattern already used for `secret_key`, `metrics_api_key`, etc.
+**Why Rejected:** Breaks the established least-privilege, per-secret convention and reduces auditability granularity.
 
-**Pros:** Cheaper (no per-secret monthly charge); already used by Keycloak.
+### Alternative 2: SSM Parameter Store (SecureString) instead of Secrets Manager
 
-**Cons:** The dominant pattern in the module under change is Secrets Manager (one KMS key, one IAM policy, ~15 existing secrets). Splitting these secrets into SSM would fork the pattern, complicate the IAM policy (different actions/ARNs), and reduce consistency.
+**Description:** Use SSM SecureString parameters, as Keycloak partially does.
+**Pros:** Lower cost (no per-secret monthly charge).
+**Cons:** The clarifying answers explicitly require AWS Secrets Manager (rotation support and cross-account access). Secrets Manager is already the module's standard for app secrets.
+**Why Rejected:** Contradicts the stated requirement and fragments the pattern.
 
-**Why Rejected:** Consistency with the established module pattern outweighs the small cost saving. Issue #1134 is explicitly about Secrets Manager.
+### Alternative 3: No fallback flag (hard cutover)
 
-### Alternative 2: One consolidated JSON secret with many keys
+**Description:** Move everything to `secrets` unconditionally.
+**Pros:** Simpler code, no toggle locals.
+**Cons:** No safe rollback during migration; a Secrets Manager or IAM misconfiguration blocks all task starts with no quick escape.
+**Why Rejected:** The requirements explicitly ask to keep the plaintext path as a fallback during migration.
 
-**Description:** Put all migrated secrets into a single `aws_secretsmanager_secret` as a JSON blob and reference fields via `valueFrom = "${arn}:KEY::"`.
+### Alternative 4: `for_each` over a single secret-spec map
 
-**Pros:** Fewer resources; one ARN in IAM.
-
-**Cons:** Coarser access control (any consumer gets all keys); harder to rotate individually; mixes unrelated secrets (GitHub PAT next to Grafana password); diverges from the existing one-secret-per-concern convention. Conditional creation of subsets becomes awkward.
-
-**Why Rejected:** Per-secret resources match the existing convention and give finer-grained IAM and rotation control.
-
-### Alternative 3: Application reads from Secrets Manager directly at runtime (the literal task-table wording)
-
-**Description:** Change application code to call Secrets Manager via the AWS SDK at startup instead of reading env vars.
-
-**Pros:** Secrets never appear as env vars at all (defends against `/proc/<pid>/environ` reads inside the container).
-
-**Cons:** Requires application code changes across multiple services, new task-**role** (not execution-role) permissions, error handling, caching, and a larger blast radius. Higher risk for the same primary benefit (keeping secrets out of the task definition and state).
-
-**Why Rejected:** The ECS `secrets` block achieves the issue's security goal (no plaintext in task def / state / describe output) with zero code change and lower risk. The in-app SDK approach is a reasonable future hardening step but is out of scope here. This is the deliberate divergence from the benchmark table's "update application code" phrasing, called out in the issue.
+**Description:** Define one `local` map of `{ name_prefix, description, value, condition }` and drive `aws_secretsmanager_secret`/`_version`, the ECS `secrets` list, the plaintext fallback list, and the IAM `Resource` list all via comprehensions over that map.
+**Pros:** One source of truth; adding a secret is a one-line map entry; no triplication of the non-empty predicate; IAM can never drift from what the containers reference.
+**Cons:** Diverges from the current one-resource-per-secret style in `secrets.tf`; `for_each` keys must be known at plan time (fine here, keys are static var names); a slightly higher bar for an entry-level maintainer to read.
+**Why not chosen as the primary path:** To stay consistent with the existing hand-written pattern and keep the diff reviewable against the established convention. Offered as the recommended refactor once the team is comfortable with 13 homogeneous secrets (this is the point where `for_each` earns its keep). The IAM-from-specs comprehension in Step 6 is a lighter-weight subset of this that is recommended regardless.
 
 ### Comparison Matrix
 
-| Criteria | Chosen (`secrets` block, per-secret) | Alt 1 (SSM) | Alt 2 (one JSON secret) | Alt 3 (in-app SDK) |
-|----------|--------------------------------------|-------------|-------------------------|--------------------|
-| Consistency w/ existing module | High | Low | Medium | Low |
-| Code change required | None | None | None | High |
-| IAM granularity | High | Medium | Low | High |
-| Rotation flexibility | High | Medium | Low | High |
-| Cost | Medium | Low | Low | Medium |
-| Risk | Low | Medium | Medium | High |
+| Criteria | Chosen (per-secret + flag) | Alt 1 (combined JSON) | Alt 2 (SSM) | Alt 3 (no flag) |
+|----------|----------------------------|-----------------------|-------------|-----------------|
+| Complexity | Medium | Low | Medium | Low |
+| Least privilege | High | Low | High | High |
+| Matches existing pattern | Yes | No | Partial | Yes |
+| Safe rollback | Yes | Yes | Yes | No |
+| Meets stated requirement | Yes | Yes | No | Partial |
 
 ## Rollout Plan
 
-- **Phase 0 (pre-work):** Inventory confirmation; decide Option A vs B for Mongo.
-- **Phase 1 (implementation, out of scope for this skill):** Add secrets, wire `secrets` blocks, extend IAM, remove plaintext entries.
-- **Phase 2 (validation):** `terraform validate` + `terraform plan` (default + all-features); grep task-def JSON; helm reserved-name check. See testing.md.
-- **Phase 3 (staged apply):** Apply to a non-prod stack first. After apply, set the real secret values in the Secrets Manager console (because versions use `ignore_changes`), then force a new deployment so tasks pick up the values. Smoke-test auth, federation, GitHub skill fetch, Grafana login.
-- **Phase 4 (prod):** Apply during a maintenance window; the task-definition revision changes, so services roll. Keep the prior revision for fast rollback (`aws ecs update-service --task-definition <prev-revision>`).
-- **Rollback:** revert the Terraform change and re-apply, or roll the ECS service back to the previous task-definition revision. Secrets can remain (harmless) or be deleted.
+- Phase 1: Implementation (out of scope for this skill) - add secrets, locals, IAM, toggle, task-def edits.
+- Phase 2: Validation - `terraform validate`, `plan` with flag on/off, review the diff to confirm fallback fidelity.
+- Phase 3: Staged deploy - apply with `use_secrets_manager_for_env = true` in a non-prod environment; verify tasks start and the app reads each value; check CloudTrail `GetSecretValue`.
+- Phase 4: Production apply; keep `false` fallback documented for emergency rollback (flip flag, re-apply).
+- Phase 5: After a bake period, consider removing the plaintext fallback in a later issue.
 
 ## Open Questions
 
-1. **Grafana execution role:** does the Grafana service share the `ecs_secrets_access`-attached execution role, or a distinct one created inside `observability.tf`? This determines whether Step 7 needs a second IAM grant. (Implementer must confirm before apply.)
-2. **Mongo fallback:** Option A (managed secret from the plaintext var) vs Option B (drop plaintext support)? Recommend A to avoid breaking existing deployments; confirm with maintainers.
-3. **Generated defaults:** should `registry_api_token`/`federation_static_token` get a `random_password` default (like `secret_key`) instead of a `"not-configured"` sentinel, so a fresh stack is secure-by-default? Out of scope but worth a follow-up.
-4. **State hygiene:** do maintainers want the long-lived values kept entirely out of state (set only via console) or is variable-driven seeding acceptable? The design supports both via `ignore_changes`.
+- **Encrypted remote state backend.** The root stack has no `backend` block, so state (which holds `secret_string` in cleartext) defaults to a local file. Should configuring an S3 + SSE-KMS backend be a hard prerequisite PR before this migration, or handled separately? Recommendation: block the migration apply on encrypted state, since otherwise secrets merely move from the task-def JSON to the state file.
+- **Task-role least privilege.** The existing `ecs_secrets_access` policy is attached to both the execution and task roles of auth/registry (`ecs-services.tf:51-64`). The running app never calls the Secrets Manager API directly, so the task-role attachment is unnecessary and widens blast radius. Should this migration also remove the task-role attachment (a change to an existing pattern), or is that a separate hardening issue? For the NEW grafana attachment, this design uses the execution role only.
+- **KMS key-policy wildcard.** `aws_kms_key.secrets` grants `kms:Decrypt` to `Principal AWS "*"` gated on `aws:PrincipalArn` `StringLike` `role/*task-exec*` and `aws:PrincipalAccount` (`secrets.tf:26-41`). Any future in-account role whose name contains `task-exec` inherits decrypt. Should the key policy be tightened to explicit execution-role ARNs? (Pre-existing; flagged for follow-up.)
+- **Insecure `SECRET_KEY` default.** `auth_server/providers/{okta,auth0,keycloak}.py` fall back to `os.environ.get("SECRET_KEY", "development-secret-key")`, a source-committed HS256 signing key (auth-bypass primitive if `SECRET_KEY` is ever unset). `SECRET_KEY` is already a first-tier Secrets Manager secret and always non-empty, so this migration does not activate the fallback, but it should be removed (fail-closed) as adjacent hardening. In scope to fix here or separate?
+- `GITHUB_APP_PRIVATE_KEY` PEM newline fidelity: the app does `.replace("\\n", "\n")` (`github_auth.py:129`), so both multi-line and escaped forms work; still must be confirmed by an explicit smoke test that signs a GitHub App JWT (RS256) with the injected value.
+- Should the `*_extra_env` passthrough variables (which can carry arbitrary user secrets) be linted/warned about, or left entirely to operator discretion? (Current design leaves them out of scope with a documented caveat.)
+- Should the fallback flag be a single global boolean or per-service/per-group? A global flag means a rollback re-exposes all 13 values in state; per-group flags allow rolling back one misconfigured secret without re-exposing the rest.
+- Should the fallback plaintext path be retained long-term or removed once migration is confirmed? Recommendation: file a tracked follow-up issue with a removal date, and add a Terraform precondition/warning when `use_secrets_manager_for_env = false`.
 
 ## References
 
-- AWS docs: [Specifying sensitive data using Secrets Manager (ECS)](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/specifying-sensitive-data-secrets.html)
-- Existing pattern: `terraform/aws-ecs/modules/mcp-gateway/secrets.tf`, `iam.tf`
-- Existing JSON-key `valueFrom` usage: `terraform/aws-ecs/keycloak-ecs.tf`
-- Issue #1134 (this task); related #1303, #1026
+- Existing migrated pattern: `terraform/aws-ecs/modules/mcp-gateway/secrets.tf`, `iam.tf`, `ecs-services.tf:413-480`.
+- AWS docs: "Passing sensitive data to a container" (ECS `secrets`/`valueFrom`), "Retrieve secrets through environment variables" (`GetSecretValue` on the task execution role).
+- Prior related PRs: #947 (MongoDB connection string secret), #1026 (Keycloak DB creds to Secrets Manager).

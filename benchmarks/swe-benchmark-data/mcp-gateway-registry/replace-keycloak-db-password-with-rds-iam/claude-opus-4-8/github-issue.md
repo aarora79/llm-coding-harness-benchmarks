@@ -1,7 +1,7 @@
-# GitHub Issue: Replace Keycloak Database Password with RDS IAM Authentication
+# GitHub Issue: Replace Keycloak database password with RDS IAM authentication
 
 ## Title
-Replace Keycloak static database password with RDS IAM authentication
+Replace Keycloak Aurora MySQL static password with RDS IAM database authentication (feature-flagged, password fallback retained)
 
 ## Labels
 - enhancement
@@ -9,132 +9,68 @@ Replace Keycloak static database password with RDS IAM authentication
 - infra
 - terraform
 
+(Confirm against `gh label list` before filing upstream; apply only labels that already exist and suggest new ones in a comment rather than creating them during issue creation.)
+
 ## Description
 
 ### Problem Statement
 
-The Keycloak ECS deployment authenticates to its Aurora database using a static
-username/password pair. The credentials live in an AWS Secrets Manager secret
-(`keycloak/database`), are injected into the Keycloak container as the
-`KC_DB_USERNAME` and `KC_DB_PASSWORD` environment variables, and are rotated
-every 30 days by a Lambda function.
+The Keycloak service on AWS ECS authenticates to its Aurora MySQL Serverless v2 cluster with a static username and password. The password is supplied as a plaintext Terraform variable (`keycloak_database_password`), stored in AWS Secrets Manager (`keycloak/database`), rotated every 30 days by a dedicated Lambda, and injected into the Keycloak ECS task as the `KC_DB_PASSWORD` container secret.
 
-A long-lived static password, even one stored in Secrets Manager and rotated
-monthly, has several drawbacks:
+A long-lived static database password is a standing credential that:
 
-1. The password is materialized in the container environment for the lifetime of
-   the task, where it can be read by anything that can inspect the process
-   environment or an ECS Exec session.
-2. Rotation is coarse (every 30 days) and has historically caused outages when
-   the credential copy in one store drifted from the database (see the
-   `keycloak-database.tf` comment referencing issue #1026, where stale SSM copies
-   forced Keycloak to crash on every restart).
-3. The secret is a standing target: anyone who exfiltrates it has database access
-   until the next rotation.
+- Must be created, distributed, and rotated (the repo carries an entire rotation stack: `secret-rotation.tf`, `secret-rotation-config.tf`, `lambda/rotate-rds/index.py`).
+- Lives in plaintext in `terraform.tfvars` on operator machines and in Terraform state.
+- Has repeatedly caused outages when the stored copy drifts from the value in Aurora (see the extensive Issue #1026 comments in `keycloak-database.tf` and `keycloak-ecs.tf`, where Keycloak crash-looped with "Access denied for user keycloak" after each rotation).
 
-RDS IAM database authentication removes the standing password. The database user
-is marked as IAM-authenticated, and clients present a short-lived (15 minute)
-signed token generated from their IAM identity instead of a password. Access is
-then governed by the `rds-db:connect` IAM permission attached to the Keycloak ECS
-task role, and can be revoked instantly by changing the IAM policy.
-
-### Important Scope Clarification (Engine Discrepancy)
-
-The originating request (issue #1303) describes the database as **PostgreSQL** and
-asks to "configure RDS IAM auth on the PostgreSQL instance." The **production**
-infrastructure under `terraform/aws-ecs/` does not use PostgreSQL. It provisions:
-
-- An **Aurora MySQL 8.0** cluster (`aws_rds_cluster.keycloak`, engine
-  `aurora-mysql`, version `8.0.mysql_aurora.3.10.3`).
-- An **RDS Proxy** (`aws_db_proxy.keycloak`, `engine_family = "MYSQL"`) in front of
-  the cluster, with `iam_auth = "DISABLED"` and `auth_scheme = "SECRETS"`.
-
-PostgreSQL (`jdbc:postgresql://keycloak-db:5432/keycloak`) only appears in the
-local `docker-compose*.yml` developer stack, which uses a plain `postgres`
-container and is out of scope for IAM auth (IAM auth is an RDS feature; there is no
-RDS in local Docker).
-
-This issue therefore targets the **Aurora MySQL** production stack. RDS IAM
-authentication works identically for Aurora MySQL and Aurora PostgreSQL; only the
-JDBC driver, port (3306 vs 5432), and token plumbing differ. The design will call
-out every place this engine difference matters so the implementer is not surprised.
+RDS IAM database authentication removes the standing password entirely: the ECS task presents a short-lived (15-minute) IAM authentication token generated from its task role, so there is no password to store, rotate, or leak.
 
 ### Proposed Solution
 
-1. **Enable IAM database authentication** on the Aurora MySQL cluster
-   (`iam_database_authentication_enabled = true`) and remove the
-   checkov skip that documents the prior decision not to use it.
-2. **Create an IAM-authenticated database user** (`keycloak_iam`) in the Aurora
-   cluster mapped to the AWS authentication plugin, distinct from the master user.
-3. **Grant `rds-db:connect`** to the Keycloak ECS **task role** scoped to the
-   `dbuser` ARN built from the cluster `resource_id` and the IAM database user.
-4. **Generate a short-lived IAM auth token at container start** via a small
-   entrypoint wrapper that calls the AWS SDK / CLI to mint the token, exports it as
-   `KC_DB_PASSWORD`, and then execs the normal Keycloak start command. The token is
-   refreshed by recycling JDBC connections faster than the 15-minute token TTL.
-5. **Remove the static DB password** from Terraform inputs, the Secrets Manager
-   secret used for application auth, the ECS task `secrets` block, and the rotation
-   Lambda wiring (subject to the migration sequencing in the LLD).
-6. **Update IAM roles/policies, security groups, and the RDS Proxy auth path**
-   accordingly, and require TLS for the database connection (IAM auth mandates TLS).
+Introduce RDS IAM database authentication for the Keycloak Aurora MySQL cluster, gated behind a new Terraform feature flag (`keycloak_db_iam_auth_enabled`, default `false`). When enabled:
+
+1. Enable IAM database authentication on the Aurora MySQL cluster (`iam_database_authentication_enabled = true`).
+2. Grant the Keycloak ECS task role the `rds-db:connect` action, scoped to the cluster resource id and the specific database user.
+3. Configure the Keycloak container to connect using the AWS Advanced JDBC Wrapper's IAM authentication plugin, which generates and caches short-lived IAM auth tokens (equivalent to `rds:GenerateDBAuthToken`) on each new physical connection. This removes `KC_DB_PASSWORD` from the task definition.
+4. Bootstrap an IAM-enabled MySQL database user (`IDENTIFIED WITH AWSAuthenticationPlugin`) that Keycloak logs in as.
+
+When the flag is `false` (the default), behavior is byte-for-byte unchanged: password auth via Secrets Manager, the rotation stack, and `KC_DB_PASSWORD` all remain exactly as they are today. This preserves a fully supported fallback path with no Keycloak version change.
 
 ### User Stories
 
-- As a security engineer, I want Keycloak to authenticate to its database with a
-  short-lived IAM token instead of a static password, so that a leaked credential
-  is useless within 15 minutes and access can be revoked via IAM.
-- As an SRE, I want database access governed by IAM policy rather than a rotating
-  secret, so that I no longer risk credential-drift outages during rotation.
-- As a platform operator, I want no plaintext database password present in the
-  container environment, Terraform state inputs, or long-lived secrets.
+- As an operator deploying on AWS ECS + Aurora MySQL, I want Keycloak to authenticate to its database with a short-lived IAM token so that there is no static database password to store, rotate, or leak.
+- As a security engineer, I want to eliminate the standing Keycloak DB credential and its plaintext presence in tfvars and Terraform state.
+- As an operator on an existing deployment, I want to keep password authentication working unchanged until I explicitly opt in, so that upgrading carries no forced migration risk.
+- As an SRE, I want to flip a single Terraform flag to switch a Keycloak environment between password auth and IAM auth (and back) so that I can roll forward or roll back safely.
 
 ### Acceptance Criteria
 
-- [ ] `iam_database_authentication_enabled = true` is set on the Aurora cluster and
-      the corresponding checkov skip comment is removed.
-- [ ] An IAM-authenticated database user exists in the Keycloak database and is
-      used by the Keycloak ECS task.
-- [ ] The Keycloak ECS **task role** has an `rds-db:connect` permission scoped to
-      the specific `dbuser` resource ARN (not `*`).
-- [ ] The Keycloak container obtains its DB password as a freshly generated IAM
-      auth token at startup; no static `KC_DB_PASSWORD` is read from Secrets Manager
-      for application login.
-- [ ] The static database password variable
-      (`var.keycloak_database_password`) and the application-auth Secrets Manager
-      secret/version (`keycloak/database`) are removed or reduced to only what the
-      master user genuinely still needs, with the rationale documented.
-- [ ] The DB connection uses TLS (`require_tls`/`sslmode`) as required by IAM auth.
-- [ ] JDBC connection max-lifetime is configured below the 15-minute token TTL so
-      connections never outlive their token.
-- [ ] The RDS Proxy auth path is reconciled: either IAM auth is enabled on the
-      proxy or the proxy is bypassed/removed for the IAM-auth connection, with the
-      decision documented.
-- [ ] `terraform validate` passes and a `terraform plan` shows the intended
-      changes with no static password in the planned task definition.
-- [ ] Documentation (`terraform/aws-ecs/README.md`, `OPERATIONS.md`) is updated to
-      describe IAM auth, token generation, and the new operational model.
+- [ ] A new Terraform variable `keycloak_db_iam_auth_enabled` (bool, default `false`) is added to `terraform/aws-ecs/variables.tf` and documented in `terraform.tfvars.example`.
+- [ ] When `keycloak_db_iam_auth_enabled = true`, `aws_rds_cluster.keycloak` sets `iam_database_authentication_enabled = true`.
+- [ ] When the flag is `true`, the Keycloak task role (`aws_iam_role.keycloak_task_role`) is granted `rds-db:connect` scoped to `arn:aws:rds-db:<region>:<account>:dbuser:<cluster-resource-id>/<db-user>`.
+- [ ] When the flag is `true`, the Keycloak ECS task definition no longer includes the `KC_DB_PASSWORD` secret, and Keycloak connects using the AWS Advanced JDBC Wrapper IAM plugin over TLS.
+- [ ] When the flag is `true`, IAM auth tokens are generated at runtime (short-lived, auto-refreshed per connection) rather than a static password being read from Secrets Manager.
+- [ ] A documented, repeatable bootstrap step creates the IAM-enabled MySQL user with the `AWSAuthenticationPlugin`.
+- [ ] When `keycloak_db_iam_auth_enabled = false` (default), the deployment is identical to today: `KC_DB_PASSWORD` from Secrets Manager, rotation Lambda active, `master_password` set. No regression.
+- [ ] The `checkov:skip=CKV_AWS_162` comment on the cluster is removed or made conditional to reflect that IAM auth is now supported.
+- [ ] Terraform README / OPERATIONS docs describe how to enable IAM auth, the bootstrap step, and how to roll back to password auth.
+- [ ] TLS is required for IAM-authenticated connections, and the RDS CA bundle is trusted by the Keycloak container.
 
 ### Out of Scope
 
-- The local `docker-compose*.yml` developer stack (plain PostgreSQL container, no
-  RDS). It keeps password auth; no IAM auth applies.
-- Migrating the database engine between MySQL and PostgreSQL.
-- Changing Keycloak's admin credentials (`KEYCLOAK_ADMIN` / `KEYCLOAK_ADMIN_PASSWORD`)
-  or the realm bootstrap flow.
-- Application-level Keycloak feature changes (realms, clients, token exchange).
-- IAM auth for any other datastore in the stack (e.g. DocumentDB).
+- Local development via docker-compose (which runs Keycloak on a PostgreSQL container, not Aurora MySQL). IAM auth applies only to the AWS ECS + Aurora path.
+- Helm / EKS deployment surfaces (no Helm chart is used for Keycloak in this repo).
+- Upgrading or changing the Keycloak version (remains `quay.io/keycloak/keycloak:25.0`).
+- Migrating any other service (registry, auth-server, DocumentDB) to IAM auth.
+- Removing the RDS password-rotation stack. It stays intact to support the fallback path; decommissioning it is a follow-up once IAM auth is the default.
 
 ### Dependencies
 
-- AWS Aurora MySQL support for IAM database authentication (available on Aurora
-  MySQL 8.0).
-- The Keycloak container image must contain a tool capable of minting an RDS auth
-  token (AWS CLI v2 or an SDK). This may require extending
-  `docker/keycloak/Dockerfile`.
-- The Amazon RDS root/intermediate CA bundle must be available to the JDBC driver
-  for TLS verification.
+- The AWS Advanced JDBC Wrapper JAR (`aws-advanced-jdbc-wrapper`) must be bundled into the Keycloak container image (`docker/keycloak/Dockerfile`). This requires operators enabling IAM auth to deploy the custom-built image rather than the stock public image run non-optimized.
+- Aurora MySQL 8.0 (already in use: `8.0.mysql_aurora.3.10.3`) supports IAM authentication.
+- The ECS task must run in a subnet with network egress to the STS/RDS token-signing path (already satisfied: tasks run in private subnets with the necessary routing).
 
 ### Related Issues
 
-- #1303 (originating request; describes the DB as PostgreSQL - see scope note above)
-- #1026 (prior credential-drift outage caused by stale SSM copies of the DB password)
+- Reference issue: agentic-community/mcp-gateway-registry#1303
+- Related context: Issue #1026 (DB password drift after rotation), Issue #1122 (Keycloak 25 hostname/proxy config).

@@ -76,8 +76,15 @@ grep -rn 'efs_id\|efs_arn\|efs_access_points\|mcp_gateway_efs' "$TF_DIR" --inclu
 ```bash
 grep -n 'SCOPES_CONFIG_PATH' "$MODULE_DIR/ecs-services.tf"
 ```
-**Expected:** Every `SCOPES_CONFIG_PATH` value is `/app/auth_server/scopes.yml`. No
-occurrence of `/efs/...` remains.
+**Expected:** No `SCOPES_CONFIG_PATH` value references any `/efs/...` path. Per review
+finding C2b (verified against the Dockerfiles), the correct in-image path differs by
+service: the AUTH image bakes `scopes.yml` at `/app/scopes.yml` (`Dockerfile.auth`:
+`WORKDIR /app` + `COPY auth_server/ /app/`), while the REGISTRY image has it at
+`/app/auth_server/scopes.yml`. So the auth-server value should be `/app/scopes.yml`
+(unless a Dockerfile.auth packaging change is added). Assert the auth value matches
+whichever path the implementer chose AND that the corresponding image actually ships the
+file there. Note: under the default `documentdb` backend this env var is not read, so a
+mismatch does not fail the shipped config - but it is validated here for the `file` backend.
 
 #### 1.2.5 Static: services match the registry EFS-free pattern
 ```bash
@@ -289,9 +296,10 @@ curl -s -o /dev/null -w '%{http_code}\n' \
   "$REGISTRY_URL/api/<scope-protected-route>"
 ```
 **Expected:** The scope-protected route returns 200 (or the correct authorized
-status), confirming the auth-server loaded scopes from `/app/auth_server/scopes.yml`.
+status), confirming the auth-server loaded scopes (from DocumentDB under the default
+backend, or from the chosen in-image path under the `file` backend - see C2b).
 A 403 due to "no scopes loaded" is a FAIL and indicates the scopes-provenance
-pre-condition (review C2) was not satisfied.
+pre-condition (review C2/C2b) was not satisfied.
 
 ### 5.3 mcpgw service functions without its EFS data mount
 ```bash

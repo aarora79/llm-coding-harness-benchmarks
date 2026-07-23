@@ -66,7 +66,31 @@ focus on real risks, not praise.
 - **C4 (low):** The auth-server previously wrote logs to `/app/logs` on EFS. The app
   must tolerate a non-shared, ephemeral `/app/logs`. Almost certainly fine (it is a
   writable path either way), but worth an explicit check that nothing reads logs back
-  across tasks.
+  across tasks. (Grounded: app logs default to `APP_LOG_DIR` = `/var/log/containers/ai-registry`,
+  not `/app/logs`; audit logs are DocumentDB-backed with only 1-hour local retention,
+  so the shared `/app/logs` copy was already ephemeral-by-policy.)
+- **C2b (high) - path decision needs resolving (verified against the Dockerfiles):**
+  The design repoints auth `SCOPES_CONFIG_PATH` to `/app/auth_server/scopes.yml`, but
+  `docker/Dockerfile.auth` does `WORKDIR /app` + `COPY auth_server/ /app/`, so in the
+  AUTH image the file actually lands at `/app/scopes.yml`. `/app/auth_server/scopes.yml`
+  is the REGISTRY image's path (`Dockerfile.registry` copies to `/app/auth_server/`).
+  Both confirmed by reading the two Dockerfiles. The issue's Out-of-Scope section already
+  tracks "ship scopes.yml at `/app/auth_server/scopes.yml`" as a packaging dependency -
+  but that requires an auth-image Dockerfile change. The LOWER-RISK alternative is to
+  point auth at its existing baked path `/app/scopes.yml` and make NO image change.
+  Additionally, in `file` mode `reload_scopes_config()` also invokes
+  `FileScopeRepository.load_all()`, which hardcodes `/app/auth_server/scopes.yml`
+  (+ an `auth_config/` fallback); on the auth image that hardcoded path does not exist,
+  so `get_ui_scopes()` returns empty regardless of `SCOPES_CONFIG_PATH`. Implementer MUST
+  pick one path, and for the `file` backend also reconcile the loader's hardcoded path.
+  In the shipped `documentdb` backend this is a no-op (scopes load from the DB), so it is
+  not a blocker for the recommended config - but it is the one item the artifacts leave
+  under-specified.
+- **C2c (medium):** `run-documentdb-init.sh` seeds only the admin scope
+  (`registry-admins.json`); its `load-scopes.py` step is commented out. So a fresh
+  DocumentDB cluster gets the admin bootstrap only - non-admin group definitions in
+  `scopes.yml` are NOT propagated automatically. Confirm this is the intended seed, or
+  re-enable a scopes-load step, else fresh clusters silently lack non-admin groups.
 
 ### New libraries / infra dependencies required
 - None. Confirms removal of `terraform-aws-modules/efs/aws`.
@@ -118,6 +142,17 @@ focus on real risks, not praise.
 - **C7 (low):** Orphaned external runbooks/CI calling `run-scopes-init-task.sh` or
   reading `mcp_gateway_efs_*` outputs will break (Open Question 3). Need a repo-wide
   and org-wide grep before deletion.
+- **C7b (high):** Destroy-ordering race in a single apply. The ECS service uses
+  `terraform-aws-modules/ecs/aws//modules/service ~> 6.0` with no
+  `wait_for_steady_state` (module default is `false`), so `UpdateService` returns
+  before new tasks are RUNNING or old tasks drain. Once the `volume`/`mountPoints`
+  blocks are removed, the service resource no longer references `module.efs.*`, so
+  Terraform's graph loses the edge that would force the service update to finish
+  before the EFS destroy. Terraform can therefore delete mount targets (and the file
+  system) while old task-def revisions are still draining with NFS mounted, and a task
+  that scales/restarts against the old revision in that window fails to launch against
+  a destroyed EFS id. `terraform validate`/`plan` stay green - the break surfaces only
+  at apply/runtime. This is the strongest argument for the phased rollout below.
 
 ### New libraries / infra dependencies required
 - None.
@@ -158,7 +193,20 @@ focus on real risks, not praise.
   so the threat model is clear.
 - **C9 (low):** Ensure no EFS data being destroyed contains secrets that were only
   ever stored there. The pre-apply export step should include a check that nothing
-  sensitive is uniquely on EFS.
+  sensitive is uniquely on EFS. (Grounded: no AWS Backup plans or EFS snapshots exist
+  in the module, so disposal is clean - but make it an explicit teardown checklist item.)
+- **C9b (medium) - stale-authz tradeoff in `file` mode:** Baking `scopes.yml` into the
+  image means it can no longer be hot-patched. In `file` mode an urgent authz
+  correction (revoking a compromised group, closing an over-broad mapping) now needs an
+  image rebuild + redeploy instead of an EFS edit + `/reload`. A lagging image = stale
+  mappings, which is either an escalation (revocation not yet applied) or a lockout.
+  Document this operational-security tradeoff; the `documentdb` backend (with a live
+  `/reload` path) avoids it entirely and should be the recommended production backend.
+- **C9c (low) - runtime-writable authz file:** The auth container does not set
+  `readonlyRootFilesystem` and `/app` is owned by `appuser`, so a process compromise in
+  `file` mode could rewrite `/app/scopes.yml` and self-escalate. Not a regression (the
+  EFS mount was `readOnly = false` too), but since the config is now immutable-by-intent,
+  this is the moment to harden it (read-only root FS + tmpfs scratch, or read-only mount).
 
 ### New libraries / infra dependencies required
 - None.
@@ -200,6 +248,24 @@ focus on real risks, not praise.
 - **C12 (low):** Consider whether `storage.tf` should be deleted vs emptied. Deleting
   is cleaner; the design recommends deletion, which is correct. Just ensure no
   `*.tf` include/glob assumptions break (none expected).
+- **C13 (medium) - missed dangling references:** Beyond `terraform/README.md` and
+  `post-deployment-setup.sh`, two live consumers of the retired script are not in the
+  design's change set: (1) `docs/deployment-modes.md` (lines ~211, ~218) instructs
+  users to run `./scripts/run-scopes-init-task.sh --skip-build` and mentions scopes
+  "initialized on EFS"; (2) `terraform/aws-ecs/README.md` (~line 402) "Running scopes
+  initialization". Deleting the script without fixing these leaves broken instructions.
+  Add both to scope.
+- **C14 (low) - orphaned build target:** `codebuild.tf` (lines ~33, ~219, ~270) still
+  builds/pushes the `mcp-gateway-scopes-init` image, and `docker/Dockerfile.scopes-init`
+  copies `scopes.yml` to an EFS mount (`/mnt`). Once `run-scopes-init-task.sh` is gone
+  this image has no consumer. `codebuild.tf` is in `terraform/aws-ecs/` (in scope);
+  either remove the scopes-init build target or add an explicit LLD note that it is
+  knowingly retained as dead with a follow-up ticket. (`Dockerfile.scopes-init` sits
+  outside `terraform/aws-ecs/`, so deferring that file is defensible.)
+- **C15 (low) - required_outputs list:** `post-deployment-setup.sh` lists
+  `mcp_gateway_efs_id` in its `required_outputs` validation array (~line 218). Removing
+  only the fallback branch is insufficient - the array entry must also go, or
+  post-deployment validation hard-fails on a now-nonexistent output.
 
 ### Better alternatives considered
 - The phased "detach then destroy" rollout (raised by Circuit) is the main
@@ -219,25 +285,57 @@ focus on real risks, not praise.
 | Reviewer | Verdict | Blockers | Key Recommendations |
 |----------|---------|----------|---------------------|
 | Frontend (Pixel) | APPROVED | 0 | Add login + scoped-action post-deploy smoke test |
-| Backend (Byte) | APPROVED WITH CHANGES | 2 | Verify scopes provenance (C2) and mcpgw_data durability (C3) before apply |
-| SRE (Circuit) | APPROVED WITH CHANGES | 2 | Phased detach-then-destroy rollout; answer `file`-backend scopes path; gate on data export |
-| Security (Cipher) | APPROVED WITH CHANGES | 0 (1 to document) | Document authz source-of-truth and write-access model |
-| SMTS (Sage) | APPROVED WITH CHANGES | 1 | Promote Open Questions 1-2 to blocking pre-conditions; phased rollout |
+| Backend (Byte) | APPROVED WITH CHANGES | 3 | Fix auth scopes path to `/app/scopes.yml` (C2b); verify scopes provenance (C2) and mcpgw_data durability (C3) before apply |
+| SRE (Circuit) | APPROVED WITH CHANGES | 3 | Two-phase (or `wait_for_steady_state`) apply to avoid the destroy-ordering race (C7b); phased detach-then-destroy; gate on data export |
+| Security (Cipher) | APPROVED WITH CHANGES | 0 (3 to document) | Document authz source-of-truth, stale-authz tradeoff, and runtime-writable-file hardening |
+| SMTS (Sage) | APPROVED WITH CHANGES | 1 | Promote Open Questions 1-2 to blocking pre-conditions; add missed doc refs (C13) and codebuild target (C14) to scope; phased rollout |
 
 **Consensus:** The approach is correct and low-complexity (net deletion, follows the
-registry precedent). It is NOT safe to apply until two pre-conditions are confirmed:
-(1) `scopes.yml` has a non-EFS source of truth for auth-server, and (2) `mcpgw_data`
-holds no durable state that is not already in DocumentDB. For production, adopt a
-two-phase rollout (detach mounts, bake, then destroy EFS).
+registry precedent), but it is NOT safe to apply as written. Blocking items, in order
+of severity:
+
+1. **Auth scopes path needs resolving (C2b, verified).** The artifacts repoint auth to
+   `/app/auth_server/scopes.yml`, but the auth image bakes the file at `/app/scopes.yml`
+   (`/app/auth_server/scopes.yml` is the registry image's path). Either point auth at
+   `/app/scopes.yml` (no image change, lower risk) or add the tracked Dockerfile
+   packaging change; for the `file` backend also reconcile `FileScopeRepository`'s
+   hardcoded path. No-op under the shipped `documentdb` backend, but resolve it before
+   implementation.
+2. **Pre-conditions must be confirmed:** (a) `scopes.yml` has a non-EFS source of truth
+   for auth-server (C2), and (b) `mcpgw_data` holds no durable state absent from
+   DocumentDB (C3).
+3. **Destroy-ordering race (C7b).** No `wait_for_steady_state` on the ECS service module
+   means a single apply can destroy mount targets under still-draining tasks. Adopt a
+   two-phase detach-then-destroy rollout (or set `wait_for_steady_state = true` for the
+   detach apply).
+4. **Scope expansion:** the change set must also cover the missed doc references
+   (`docs/deployment-modes.md`, `terraform/aws-ecs/README.md` - C13), the
+   `required_outputs` array entry (C15), and a decision on the orphaned
+   `mcp-gateway-scopes-init` codebuild target (C14).
+
+`documentdb` (or another `MONGODB_BACKENDS` value) is the only durable ECS backend after
+this change; `storage_backend = "file"` on ECS becomes a data-loss configuration and
+should be documented as unsupported (ideally fail-fast).
 
 ## Next Steps
 
-1. Resolve blocking pre-conditions C2/C3 (scopes provenance, mcpgw_data durability)
+1. Fix the auth `SCOPES_CONFIG_PATH` repoint to `/app/scopes.yml` (the auth image's
+   actual baked location) and reconcile `FileScopeRepository`'s hardcoded
+   `/app/auth_server/scopes.yml` (C2b). This is a concrete correctness fix, not just a
+   pre-condition.
+2. Resolve blocking pre-conditions C2/C3 (scopes provenance, mcpgw_data durability)
    with concrete evidence from the auth-server Dockerfile and mcpgw owner.
-2. Decide the scopes bootstrap story for the `file` storage backend (C6).
-3. Adopt the phased detach-then-destroy rollout for production (Circuit/Sage).
-4. Document the post-change authorization-policy source of truth (Cipher C8).
-5. Repo-wide and org-wide grep for `run-scopes-init-task` and `mcp_gateway_efs_*`
+3. Adopt the phased detach-then-destroy rollout (or `wait_for_steady_state = true` on
+   the detach apply) to eliminate the destroy-ordering race (C7b / Circuit / Sage).
+4. Expand the change set: `docs/deployment-modes.md` and `terraform/aws-ecs/README.md`
+   run-scopes-init references (C13), the `mcp_gateway_efs_id` entry in
+   `post-deployment-setup.sh` `required_outputs` (C15), and a decision on the orphaned
+   `mcp-gateway-scopes-init` codebuild target (C14).
+5. Decide and document the scopes bootstrap story for the `file` storage backend (C6),
+   and confirm `run-documentdb-init.sh` seeds only the admin scope by intent (C2c).
+6. Document the post-change authorization-policy source of truth, the stale-authz
+   image-rebuild tradeoff, and runtime-writable-file hardening (Cipher C8/C9b/C9c).
+7. Repo-wide and org-wide grep for `run-scopes-init-task` and `mcp_gateway_efs_*`
    consumers before deletion (C7 / Open Question 3).
-6. Proceed to implementation only after 1-2 are confirmed; then run the validation
+8. Proceed to implementation only after 1-2 are confirmed; then run the validation
    steps in `testing.md`.

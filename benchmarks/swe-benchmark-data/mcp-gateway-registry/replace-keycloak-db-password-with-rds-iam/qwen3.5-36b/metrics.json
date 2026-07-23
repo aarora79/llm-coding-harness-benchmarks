@@ -1,0 +1,190 @@
+{
+  "task": "replace-keycloak-db-password-with-rds-iam",
+  "repo": "https://github.com/agentic-community/mcp-gateway-registry",
+  "ref": "1.24.4",
+  "complexity": "high",
+  "tags": [
+    "security",
+    "aws",
+    "rds",
+    "iam",
+    "keycloak",
+    "terraform"
+  ],
+  "model": "qwen3.5-36b",
+  "provider": "endpoint",
+  "endpoint": "http://127.0.0.1:8000",
+  "aws_region": null,
+  "artifacts_produced": 0,
+  "artifacts_expected": 4,
+  "generation_tokens_per_sec": 0.0,
+  "metrics_that_matter": {
+    "note": "Headline metrics resolved to the best available source for each; see 'sources'. Values drawn from vllm_prometheus carry its single-tenant, server-wide caveat.",
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "latency_seconds": 0.2,
+    "num_turns": 1,
+    "generation_tokens_per_sec": 0.0,
+    "prefix_cache_hit_rate": null,
+    "sources": {
+      "input_tokens": "claude_api.usage.input_tokens",
+      "output_tokens": "claude_api.usage.output_tokens",
+      "cache_read_tokens": "claude_api.usage.cache_read_input_tokens",
+      "cache_write_tokens": "claude_api.usage.cache_creation_input_tokens",
+      "latency_seconds": "harness wall-clock (or claude_api.duration_ms)",
+      "num_turns": "claude_api.num_turns",
+      "generation_tokens_per_sec": "derived: output_tokens / latency_seconds",
+      "prefix_cache_hit_rate": "vllm_prometheus.derived.prefix_cache_hit_rate"
+    }
+  },
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "latency_seconds": 0.2,
+  "num_turns": 1,
+  "total_cost_usd": 0,
+  "is_error": true,
+  "session_id": "dd20d3a6-00e7-4447-bb50-81013219e211",
+  "cache_read_tokens": 0,
+  "cache_creation_tokens": 0,
+  "error": "There's an issue with the selected model (qwen3.5-36b). It may not exist or you may not have access to it. Run --model to pick a different model.",
+  "api_error_status": 404,
+  "run_started_at": "2026-07-23T02:01:16.134744Z",
+  "run_ended_at": "2026-07-23T02:01:17.083846Z",
+  "vllm_prometheus": {
+    "available": true,
+    "source": "vllm_prometheus_window",
+    "note": "Window delta of server-wide vLLM metrics; accurate only if this run was the sole traffic on the endpoint during its execution. Gauges are an instantaneous post-run reading and typically read idle between tasks.",
+    "derived": {
+      "prefix_cache_hit_rate": null,
+      "prompt_tokens_cached_rate": null
+    },
+    "counters": {
+      "vllm:estimated_flops_per_gpu_total": 0,
+      "vllm:estimated_read_bytes_per_gpu_total": 0,
+      "vllm:estimated_write_bytes_per_gpu_total": 0,
+      "vllm:external_prefix_cache_hits_total": 0,
+      "vllm:external_prefix_cache_queries_total": 0,
+      "vllm:generation_tokens_total": 0,
+      "vllm:mm_cache_hits_total": 0,
+      "vllm:mm_cache_queries_total": 0,
+      "vllm:num_preemptions_total": 0,
+      "vllm:prefix_cache_hits_total": 0,
+      "vllm:prefix_cache_queries_total": 0,
+      "vllm:prompt_tokens_by_source_total": 0,
+      "vllm:prompt_tokens_cached_total": 0,
+      "vllm:prompt_tokens_total": 0,
+      "vllm:request_success_total": 0,
+      "vllm:tool_call_parser_invocations_total": 0
+    },
+    "histograms": {
+      "vllm:e2e_request_latency_seconds": {
+        "count": 0,
+        "sum": 0,
+        "mean": null
+      },
+      "vllm:inter_token_latency_seconds": {
+        "count": 0,
+        "sum": 0,
+        "mean": null
+      },
+      "vllm:iteration_tokens_total": {
+        "count": 0,
+        "sum": 0,
+        "mean": null
+      },
+      "vllm:request_decode_time_seconds": {
+        "count": 0,
+        "sum": 0,
+        "mean": null
+      },
+      "vllm:request_generation_tokens": {
+        "count": 0,
+        "sum": 0,
+        "mean": null
+      },
+      "vllm:request_inference_time_seconds": {
+        "count": 0,
+        "sum": 0,
+        "mean": null
+      },
+      "vllm:request_max_num_generation_tokens": {
+        "count": 0,
+        "sum": 0,
+        "mean": null
+      },
+      "vllm:request_params_max_tokens": {
+        "count": 0,
+        "sum": 0,
+        "mean": null
+      },
+      "vllm:request_params_n": {
+        "count": 0,
+        "sum": 0,
+        "mean": null
+      },
+      "vllm:request_prefill_kv_computed_tokens": {
+        "count": 0,
+        "sum": 0,
+        "mean": null
+      },
+      "vllm:request_prefill_time_seconds": {
+        "count": 0,
+        "sum": 0,
+        "mean": null
+      },
+      "vllm:request_prompt_tokens": {
+        "count": 0,
+        "sum": 0,
+        "mean": null
+      },
+      "vllm:request_queue_time_seconds": {
+        "count": 0,
+        "sum": 0,
+        "mean": null
+      },
+      "vllm:request_time_per_output_token_seconds": {
+        "count": 0,
+        "sum": 0,
+        "mean": null
+      },
+      "vllm:time_to_first_token_seconds": {
+        "count": 0,
+        "sum": 0,
+        "mean": null
+      }
+    },
+    "gauges": {
+      "vllm:cache_config_info": 1,
+      "vllm:engine_sleep_state": 1,
+      "vllm:kv_cache_usage_perc": 0,
+      "vllm:num_requests_running": 0,
+      "vllm:num_requests_waiting": 0,
+      "vllm:num_requests_waiting_by_reason": 0
+    },
+    "gauges_sampled": {
+      "available": true,
+      "source": "vllm_prometheus_poll",
+      "note": "Peak/mean of gauges sampled every 1.0s while the run was in flight. Peak still reflects total server load under the single-tenant assumption, not this run in isolation.",
+      "interval_seconds": 1.0,
+      "gauges": {
+        "vllm:kv_cache_usage_perc": {
+          "peak": 0.0,
+          "mean": 0.0,
+          "samples": 1
+        },
+        "vllm:num_requests_running": {
+          "peak": 0.0,
+          "mean": 0.0,
+          "samples": 1
+        },
+        "vllm:num_requests_waiting": {
+          "peak": 0.0,
+          "mean": 0.0,
+          "samples": 1
+        }
+      }
+    }
+  }
+}
