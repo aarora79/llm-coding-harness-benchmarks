@@ -38,6 +38,8 @@ security-review-findings.xlsx
 # HuggingFace token for gated/faster model downloads — never commit; consumed by vllm-serve.sh
 .hf_token
 **/.hf_token
+.hftoken
+**/.hftoken
 .DS_Store
 .venv/
 tmp/

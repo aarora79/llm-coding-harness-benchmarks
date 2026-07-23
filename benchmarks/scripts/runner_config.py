@@ -66,11 +66,19 @@ class RunnerConfig(BaseModel):
         description="Base URL of the OpenAI/Anthropic-compatible endpoint "
         "(e.g. http://127.0.0.1:8000)."
     )
-    model: str = Field(description="Model name/id to pass to claude --model.")
+    model: str | None = Field(
+        default=None,
+        description="Model name/id to pass to claude --model. Left unset in the "
+        "committed config so one file serves every model; supply it with --model.",
+    )
     api_key: str = Field(default="local", description="API key sent to the endpoint.")
 
     # What to run and where outputs go.
-    dataset: str = Field(description="Path to the benchmark dataset YAML file.")
+    dataset: str | None = Field(
+        default=None,
+        description="Path to the benchmark dataset YAML file. Left unset in the "
+        "committed config so one file serves every dataset; supply it with --dataset.",
+    )
     output_dir: str = Field(
         default="swe-benchmark-data",
         description="Directory (relative to repo root) where artifacts land.",
@@ -108,6 +116,16 @@ class RunnerConfig(BaseModel):
         Raises:
             RunnerConfigError: If a value is present but invalid.
         """
+        if not self.model:
+            raise RunnerConfigError(
+                "model is required. Set it in the config file or pass --model "
+                "(e.g. --model qwen3-coder-30b)."
+            )
+        if not self.dataset:
+            raise RunnerConfigError(
+                "dataset is required. Set it in the config file or pass --dataset "
+                "(e.g. --dataset dataset/mcp-gateway-registry.yaml)."
+            )
         if self.permission_mode not in VALID_PERMISSION_MODES:
             raise RunnerConfigError(
                 f"permission_mode '{self.permission_mode}' not in "
@@ -207,14 +225,17 @@ def _parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("config", help="Path to the runner config YAML file")
+    parser.add_argument("--model", help="Override: model name (as with the harness)")
+    parser.add_argument("--dataset", help="Override: dataset YAML path")
     return parser.parse_args()
 
 
 def main() -> None:
     """Validate the given runner config file and print a summary."""
     args = _parse_args()
+    overrides = {"model": args.model, "dataset": args.dataset}
     try:
-        config = load_runner_config(args.config)
+        config = load_runner_config(args.config, overrides)
     except RunnerConfigError as exc:
         logger.error("Invalid runner config: %s", exc)
         sys.exit(1)

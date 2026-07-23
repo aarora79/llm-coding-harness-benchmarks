@@ -4,37 +4,55 @@
   "scores": {
     "github_issue": {
       "completeness": 16,
-      "correctness": 15,
-      "specificity": 16,
-      "risk_awareness": 15,
-      "total": 62,
-      "notes": "Weak artifact: under-specified or technically shaky on Terraform EFS resources, ECS volumes/mounts, scripts, outputs, docs, and destroy/rollback handling, with missing files/patterns or insufficient risk/test coverage."
+      "correctness": 11,
+      "specificity": 17,
+      "risk_awareness": 9,
+      "total": 53,
+      "notes": "Provides clear motivation, scope, exclusions, and concrete acceptance criteria. However, all named files, variables, outputs, application storage choices, and cost claims are unverifiable without repository evidence; declaring no dependencies overlooks data-retention and consumer-compatibility checks, and a pre-apply plan should normally show tracked EFS resources being destroyed rather than no EFS resources."
     },
     "lld": {
       "completeness": 16,
-      "correctness": 16,
-      "specificity": 16,
-      "risk_awareness": 16,
-      "total": 64,
-      "notes": "Weak artifact: under-specified or technically shaky on Terraform EFS resources, ECS volumes/mounts, scripts, outputs, docs, and destroy/rollback handling, with missing files/patterns or insufficient risk/test coverage."
+      "correctness": 8,
+      "specificity": 17,
+      "risk_awareness": 13,
+      "total": 54,
+      "notes": "Offers a coherent file-by-file design, rollout outline, and relevant storage risks. Its exact paths, symbols, line counts, architecture, and claim that no EFS data needs migration are unsupported; it does not clearly remove associated volume and mount-point definitions, expects EFS-free output from a destruction plan, and incorrectly treats reverting Terraform state from version control as a rollback strategy."
     },
     "review": {
       "completeness": 16,
-      "correctness": 17,
-      "specificity": 16,
+      "correctness": 8,
+      "specificity": 15,
       "risk_awareness": 17,
-      "total": 66,
-      "notes": "Mixed artifact: has some useful Terraform EFS resources, ECS volumes/mounts, scripts, outputs, docs, and destroy/rollback handling detail, but important omissions, weak specificity, or questionable technical assumptions reduce confidence."
+      "total": 56,
+      "notes": "Identifies meaningful concerns around persistent data, hard-coded paths, ephemeral capacity, deployment disruption, output consumers, and monitoring. The final approval is not defensible while those issues remain unresolved, and recommendations such as targeting EFS destruction before task updates, using state moves for unspecified drift, or preventing recreation through a lifecycle rule are unsafe, irrelevant, or technically unsupported."
     },
     "testing": {
       "completeness": 16,
-      "correctness": 16,
+      "correctness": 8,
       "specificity": 17,
-      "risk_awareness": 16,
-      "total": 65,
-      "notes": "Mixed artifact: has some useful Terraform EFS resources, ECS volumes/mounts, scripts, outputs, docs, and destroy/rollback handling detail, but important omissions, weak specificity, or questionable technical assumptions reduce confidence."
+      "risk_awareness": 13,
+      "total": 54,
+      "notes": "Covers static-reference checks, Terraform validation, planning, documentation, and post-deployment ECS checks with concrete commands. Several oracles conflict: a removal plan should mention EFS destruction and need not contain only deletions because task definitions may update; grep checks are brittle, environment names are unsupported, and functional storage, mount-path, data-retention, log, and rollback validation are insufficient."
     }
   },
-  "task_score": 64.25,
-  "verdict": "Low-confidence design set that would require substantial rework before implementation."
+  "task_score": 54.25,
+  "verdict": "The artifacts form a useful and concrete foundation, but absent repository evidence and multiple unsafe or contradictory Terraform migration assumptions prevent them from being implementation-ready.",
+  "judge": {
+    "model": "openai.gpt-5.6-sol",
+    "provider": "amazon-bedrock-mantle",
+    "evaluated_at": "2026-07-22T22:11:12.668742Z",
+    "response_id": "resp_qgn2trr4uk44jhrfcvyhzlk5x3wj6x47omov5wostwgnofknef6q",
+    "usage": {
+      "input_tokens": 8231,
+      "input_tokens_details": {
+        "cache_write_tokens": 8229,
+        "cached_tokens": 0
+      },
+      "output_tokens": 1496,
+      "output_tokens_details": {
+        "reasoning_tokens": 1001
+      },
+      "total_tokens": 9727
+    }
+  }
 }

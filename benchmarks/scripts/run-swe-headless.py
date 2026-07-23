@@ -35,6 +35,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -270,6 +271,15 @@ def _build_claude_cmd(config: RunnerConfig, prompt: str, stream: bool = False) -
         # stream-json in -p mode requires --verbose to emit per-event objects.
         cmd.append("--verbose")
     return cmd
+
+
+def _utc_now_iso() -> str:
+    """Return the current UTC time as an ISO 8601 string with a trailing Z.
+
+    Returns:
+        The timestamp, e.g. ``2026-07-22T20:41:03.512874Z``.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _metrics_from_result(result: dict[str, Any], elapsed: float) -> dict[str, Any]:
@@ -919,10 +929,12 @@ def _save_metrics(
 ) -> Path:
     """Write the run metrics to metrics.json in the artifact directory.
 
-    The top-level fields report only what the model API returned for the run
-    (tokens, latency, turns, cost). Cache utilization measured out-of-band from
-    vLLM's Prometheus /metrics is kept in its own ``vllm_prometheus`` block, so
-    the two sources -- and their different accuracy assumptions -- never mix.
+    The top-level fields report what the model API returned for the run
+    (tokens, latency, turns, cost) plus the harness-observed UTC wall-clock
+    bounds (``run_started_at`` / ``run_ended_at``). Cache utilization measured
+    out-of-band from vLLM's Prometheus /metrics is kept in its own
+    ``vllm_prometheus`` block, so the two sources -- and their different
+    accuracy assumptions -- never mix.
 
     Args:
         config: The runner config.
@@ -1011,13 +1023,19 @@ def _run_task(
         # moment a request finishes, so a before/after snapshot always reads them
         # at ~0. Sample them in a background thread WHILE claude -p runs to capture
         # the in-flight peak/mean instead.
+        # Wall-clock UTC bounds of the run, captured as tightly around the
+        # claude -p call as the metric snapshots. ISO 8601 with a trailing Z.
+        run_started_at = _utc_now_iso()
         with _GaugePoller(config.endpoint) as poller:
             if stream:
                 result = _run_claude_streaming(cmd, env, config.timeout_seconds)
             else:
                 result = _run_claude(cmd, env, config.timeout_seconds)
+        run_ended_at = _utc_now_iso()
         vllm_after = _snapshot_vllm_metrics(config.endpoint)
         metrics = _metrics_from_result(result, result.get("_elapsed_seconds", 0))
+        metrics["run_started_at"] = run_started_at
+        metrics["run_ended_at"] = run_ended_at
         vllm_block = _vllm_metrics(vllm_before, vllm_after)
         vllm_block["gauges_sampled"] = poller.summary()
         if concurrent:

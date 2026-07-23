@@ -344,17 +344,17 @@ vLLM's OpenTelemetry integration emits traces; its `/metrics` endpoint exposes t
 The per-run benchmark snapshots are deliberately bounded. For an independent time series that stays active while coding assistants and other clients send requests, start the DuckDB collector:
 
 ```bash
-# Default: scrape every five seconds
+# Default: scrape every second
 ./scripts/vllm-metrics.sh start
 
-# Or start at one-second resolution for short experiments:
-METRICS_INTERVAL=1 ./scripts/vllm-metrics.sh start
+# Or lower the resolution for a long-running series:
+METRICS_INTERVAL=5 ./scripts/vllm-metrics.sh start
 
 ./scripts/vllm-metrics.sh status
 ./scripts/vllm-metrics.sh stop
 ```
 
-The default five-second interval stores every `vllm:*` Prometheus sample in `benchmark-output/vllm-metrics.duckdb`. DuckDB compresses repeated metric names and labels and is much more practical than an unbounded CSV. Collection sessions, scrape health, timestamps, durations, and failures are retained alongside metric values.
+The default one-second interval stores every `vllm:*` Prometheus sample in `benchmark-output/vllm-metrics.duckdb`. DuckDB compresses repeated metric names and labels and is much more practical than an unbounded CSV. Collection sessions, scrape health, timestamps, durations, and failures are retained alongside metric values.
 
 | DuckDB object | Purpose |
 |---------------|---------|

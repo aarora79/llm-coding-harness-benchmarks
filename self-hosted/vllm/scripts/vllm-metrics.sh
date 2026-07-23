@@ -12,7 +12,7 @@ set -euo pipefail
 # Environment variables:
 #   BASE_URL          vLLM OpenAI base URL      (default: http://127.0.0.1:8000/v1)
 #   METRICS_URL       explicit /metrics URL     (default: derived from BASE_URL)
-#   METRICS_INTERVAL  seconds between scrapes   (default: 5)
+#   METRICS_INTERVAL  seconds between scrapes   (default: 1)
 #   METRICS_DB        DuckDB output path         (default: benchmark-output/vllm-metrics.duckdb)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,7 +22,7 @@ LOG_DIR="$VLLM_DIR/logs"
 PID_FILE="${METRICS_PID_FILE:-/tmp/vllm-metrics.pid}"
 LOG_FILE="${METRICS_LOG_FILE:-$LOG_DIR/vllm-metrics.log}"
 DATABASE="${METRICS_DB:-$OUTPUT_DIR/vllm-metrics.duckdb}"
-INTERVAL="${METRICS_INTERVAL:-5}"
+INTERVAL="${METRICS_INTERVAL:-1}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:8000/v1}"
 UV_BIN="${UV_BIN:-$(command -v uv || true)}"
 

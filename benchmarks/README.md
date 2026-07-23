@@ -4,7 +4,7 @@ A software-engineering benchmark that drives a coding assistant (Claude Code, or
 
 Each task points the agent at a GitHub repository and a problem to solve. The agent works the task through the `/swe` skill, which lands four design artifacts on disk (`github-issue.md`, `lld.md`, `review.md`, `testing.md`). A separate review pass then scores those artifacts, while the harness records per-run instrumentation: token usage, latency, and the number of LLM turns (calls to the model) the agent took.
 
-This README covers the pieces that exist today: the **dataset format**, the **dataset loader**, the **runner config**, and the **headless run harness** that drives `claude -p` through the `/swe` skill for each task. The reviewer (the separate pass that scores the artifacts) is built on top of these and is documented as it lands.
+This README covers the pieces that exist today: the **dataset format**, the **dataset loader**, the **runner config**, the **headless run harness** that drives `claude -p` through the `/swe` skill for each task, and the **judge** that scores the resulting artifacts (see [Scoring the artifacts (the judge)](#scoring-the-artifacts-the-judge)).
 
 ## Prerequisites
 
@@ -125,22 +125,31 @@ Every field can be overridden on the command line, and **CLI flags always win ov
 
 ### Setup: create your own config
 
-`config/runner.example.yaml` is a template, not a config you run directly. Before your first run, copy it to `config/runner.yaml` and edit it for your endpoint and model:
+`config/runner.example.yaml` is a template, not a config you run directly. Before your first run, copy it to `config/runner.yaml` and edit it for your endpoint:
 
 ```bash
 cd benchmarks
 cp config/runner.example.yaml config/runner.yaml
-# then edit config/runner.yaml: set endpoint, model, and dataset
+# then edit config/runner.yaml: set your endpoint (and api_key if needed)
 ```
 
-`config/runner.yaml` is gitignored, so your local endpoint, key, and model choices never get committed. Keep `config/runner.example.yaml` as the checked-in, documented template; point the harness at your copy with `--config config/runner.yaml`. Leave `settings_file` commented out unless you specifically need the options in the vLLM settings file -- the harness synthesizes routing from `endpoint` and `api_key` on its own (see [How routing to the endpoint works](#how-routing-to-the-endpoint-works)).
+`config/runner.yaml` is gitignored, so your local endpoint and key never get committed. Keep `config/runner.example.yaml` as the checked-in, documented template; point the harness at your copy with `--config config/runner.yaml`. Leave `settings_file` commented out unless you specifically need the options in the vLLM settings file -- the harness synthesizes routing from `endpoint` and `api_key` on its own (see [How routing to the endpoint works](#how-routing-to-the-endpoint-works)).
+
+The two values that change from run to run -- **`model`** and **`dataset`** -- are deliberately left unset in the template. Pass them on the command line so one config file serves every model and dataset instead of maintaining a file per combination:
+
+```bash
+uv run scripts/run-swe-headless.py --config config/runner.yaml \
+    --model qwen3-coder-30b --dataset dataset/mcp-gateway-registry.yaml
+```
+
+CLI flags always win, so you can still pin `model`/`dataset` in the file if you prefer a fixed default. If neither the file nor the CLI supplies them, the run fails fast with a clear error.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `endpoint` | str | -- | Base URL of the OpenAI/Anthropic-compatible endpoint the model is served on. |
-| `model` | str | -- | Model name/id passed to `claude --model`; also the `{model-name}` artifact subfolder. |
+| `model` | str | -- | Model name/id passed to `claude --model`; also the `{model-name}` artifact subfolder. Usually supplied with `--model` rather than pinned in the file; required from one source or the other. |
 | `api_key` | str | `local` | API key sent to the endpoint (local servers ignore the value). |
-| `dataset` | str | -- | Path to the dataset YAML (relative to `benchmarks/`). |
+| `dataset` | str | -- | Path to the dataset YAML (relative to `benchmarks/`). Usually supplied with `--dataset` rather than pinned in the file; required from one source or the other. |
 | `output_dir` | str | `swe-benchmark-data` | Directory (under `benchmarks/`) where the `/swe` skill writes artifacts. |
 | `clone_dir` | str | `/tmp` | Parent directory for per-task temporary repo clones. |
 | `tasks` | list | `[]` | Task ids to run; empty runs every task in the dataset. |
@@ -152,11 +161,12 @@ cp config/runner.example.yaml config/runner.yaml
 | `timeout_seconds` | int | `1800` | Wall-clock timeout for a single task's run. |
 | `settings_file` | str | none | Optional `claude --settings` JSON (e.g. the vLLM Claude Code config). |
 
-Validate a config the same way as a dataset:
+Validate a config the same way as a dataset. Since the template leaves `model` and `dataset` unset, pass them (the validator takes the same `--model`/`--dataset` overrides as the harness):
 
 ```bash
 cd benchmarks
-uv run scripts/runner_config.py config/runner.example.yaml
+uv run scripts/runner_config.py config/runner.example.yaml \
+    --model qwen3-coder-30b --dataset dataset/mcp-gateway-registry.yaml
 ```
 
 ## Running the benchmark
@@ -345,7 +355,97 @@ A metric present in neither snapshot is reported as `null` (distinct from `0`, w
 
 Because the file records the task, model, and endpoint next to the token, latency, throughput, and turn-count numbers, the same task can be run against many models and the resulting `metrics.json` files compared side by side -- so you can see how each model differs in cost, speed, and how many turns it took to produce the artifacts. On a failed run the file also carries an `error` string and `api_error_status`, so a failure is diagnosable without re-running the task.
 
-These metrics measure the *cost* of a run, not the *quality* of what it produced. A forthcoming eval skill will score the generated artifacts (against the dataset's `ground_truth`) and add those scoring results to this same `metrics.json`, so a single file will hold both what a run cost and how good its output was -- the basis for ranking models on the benchmark.
+These metrics measure the *cost* of a run, not the *quality* of what it produced. The judge (next section) scores the four artifacts and adds those results to this same `metrics.json` under an `evaluation` key, so a single file holds both what a run cost and how good its output was -- the basis for ranking models on the benchmark.
+
+## Scoring the artifacts (the judge)
+
+The harness measures cost; the judge measures quality. It reads the four artifacts a run produced (`github-issue.md`, `lld.md`, `review.md`, `testing.md`), scores each against a fixed rubric, and writes an `eval.json` next to them (and mirrors the same object into `metrics.json` under `evaluation`). A model never judges its own work in-band: judging is a separate pass over the artifacts on disk.
+
+There are two judge backends that share one scoring core:
+
+- **[scripts/codex_judge.py](scripts/codex_judge.py) -- the agentic judge (recommended).** Runs `codex exec` non-interactively with the candidate's repository checked out as a **read-only working root**, so the judge can open the real source with its own file tools and verify the factual claims in `lld.md`/`testing.md` (paths, symbols, APIs, commands) before scoring. This grounding is the point: an artifact that cites a file or function that does not exist is caught.
+- **[scripts/llm_as_judge.py](scripts/llm_as_judge.py) -- the direct judge.** Makes one stateless Amazon Bedrock (Mantle Responses API) request with the four artifacts embedded in the prompt and scores them in isolation, with no repository access. Faster and cheaper, but it can only judge internal consistency, not whether the artifacts match the real code.
+
+Both share [scripts/judge_common.py](scripts/judge_common.py): the rubric prompt ([scripts/judge_prompt.txt](scripts/judge_prompt.txt)), the strict score schema, reply validation, and the atomic `eval.json` writer. So the two backends produce identically-shaped, identically-validated output and stay directly comparable.
+
+### The rubric
+
+Every artifact is scored on four criteria, each an integer from 0 to 25: **completeness**, **correctness**, **specificity**, and **risk_awareness**. An artifact's `total` is the sum of its four criteria (0-100). A task's `task_score` is the arithmetic mean of the four artifact totals (0-100), rounded to two places. The wrapper -- not the model -- recomputes and validates every total and the mean, and rejects a reply whose arithmetic or echoed identifiers do not match, so a malformed or inconsistent score never lands on disk.
+
+### The eval path through the codex judge
+
+Running [scripts/codex_judge.py](scripts/codex_judge.py) against one artifact folder walks these steps:
+
+1. **Render the prompt.** Load the four artifacts and render [scripts/judge_prompt.txt](scripts/judge_prompt.txt) with them, plus the task and repository context. The folder's `metrics.json` supplies the task/candidate identifiers and the default context.
+2. **Resolve and clone the repository.** Read `repo` and `ref` from the folder's `metrics.json` and clone that repository at that ref into a reusable, content-addressed checkout under the clone root (default `/tmp/swe-judge-repos`). A checkout that already resolves to the ref is reused as-is, so repeated runs do not re-clone; a partial or mismatched one is removed and re-cloned. Passing `--repo <path>` uses an existing local checkout instead. **A missing `metrics.json`, or one without a `repo`/`ref`, fails loudly before codex runs** -- repo grounding is not silently skipped.
+3. **Run codex.** Invoke `codex exec --json --sandbox read-only --cd <checkout>` with the rendered prompt on stdin. Read-only is enforced by the sandbox; the judge can inspect the repository but cannot modify it.
+4. **Validate.** Parse codex's final message against the shared Pydantic schema, re-check every total and the mean, and confirm the echoed task/candidate ids match the submission. Codex never writes `eval.json` itself -- the wrapper does, after validation -- so the arithmetic and identifier guarantees hold regardless of what the model emits.
+5. **Write outputs.** Atomically write `eval.json` into the folder and mirror the same object into `metrics.json` under `evaluation`.
+
+### Running the codex judge
+
+The judge defaults to the `openai.gpt-5.6-sol` model at `high` reasoning effort, so a scoring run needs only the artifact folder:
+
+```bash
+cd benchmarks/scripts
+uv run python codex_judge.py \
+    --folder ../swe-benchmark-data/mcp-gateway-registry/remove-efs-from-terraform-aws-ecs/claude-opus-4-8
+```
+
+`codex exec` streams nothing to the terminal until it finishes (it buffers and prints only the final message), so a multi-minute run at `high` effort on a real repository looks idle when it is really working -- give it a few minutes.
+
+Common overrides:
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--folder` | -- | Artifact folder to score (required). Must contain the four artifacts and a `metrics.json` with `repo`/`ref`. |
+| `--repo` | (clone from `metrics.json`) | Use this local repository checkout as-is instead of cloning. |
+| `--model` | `openai.gpt-5.6-sol` | Codex model id. Also settable via `JUDGE_MODEL`. |
+| `--reasoning-effort` | `high` | One of `none`, `low`, `medium`, `high`, `xhigh`, `max`. Also settable via `JUDGE_REASONING_EFFORT`. |
+| `--clone-root` | `/tmp/swe-judge-repos` | Parent directory for reusable judge checkouts. Also settable via `JUDGE_CLONE_ROOT`. |
+| `--sandbox` | `read-only` | Codex sandbox policy. Leave `read-only` for judging. |
+| `--timeout-seconds` | `900` | Wall-clock cap for the codex run. |
+| `--no-overwrite` | (overwrite) | Fail instead of replacing an existing `eval.json`. |
+
+Scoring a folder that the harness did not create (so it has no `metrics.json`) needs one file with just the two fields the clone requires -- the judge fills in the task and candidate identifiers from the folder names:
+
+```json
+{
+  "repo": "https://github.com/agentic-community/mcp-gateway-registry",
+  "ref": "1.24.4"
+}
+```
+
+### What the judge records
+
+The `eval.json` (and the mirrored `metrics.json.evaluation`) holds the per-artifact criteria, each artifact `total`, the `task_score`, a one-sentence `verdict`, and a `judge` metadata block. The `judge` block records the model, provider (`codex-exec`), the checkout it grounded against (`repo_root`, `repo_ref`), `reasoning_effort`, and the run's cost -- `token_usage` (input/output/cached/reasoning tokens, parsed from codex's `--json` stream) and `duration_ms` (wall-clock latency):
+
+```json
+{
+  "task": "remove-efs-from-terraform-aws-ecs",
+  "model": "claude-opus-4-8",
+  "scores": {
+    "github_issue": { "completeness": 19, "correctness": 14, "specificity": 22, "risk_awareness": 20, "total": 75, "notes": "..." },
+    "lld":          { "completeness": 19, "correctness": 14, "specificity": 23, "risk_awareness": 20, "total": 76, "notes": "..." },
+    "review":       { "completeness": 20, "correctness": 19, "specificity": 21, "risk_awareness": 23, "total": 83, "notes": "..." },
+    "testing":      { "completeness": 17, "correctness": 9,  "specificity": 16, "risk_awareness": 18, "total": 60, "notes": "..." }
+  },
+  "task_score": 73.5,
+  "verdict": "The artifacts are detailed and repository-aware, but ...",
+  "judge": {
+    "model": "openai.gpt-5.6-sol",
+    "provider": "codex-exec",
+    "repo_grounded": true,
+    "repo_root": "/tmp/swe-judge-repos/mcp-gateway-registry-d67f0fcba86dda58",
+    "repo_ref": "1.24.4",
+    "reasoning_effort": "high",
+    "token_usage": { "input_tokens": 1329307, "cached_input_tokens": 1221569, "output_tokens": 10962, "reasoning_output_tokens": 5375 },
+    "duration_ms": 222629
+  }
+}
+```
+
+Because `eval.json` records the task, candidate model, and judge next to the scores, the same task scored across many candidate models can be compared side by side -- the basis for the model leaderboard.
 
 ## Development workflow
 
@@ -364,7 +464,7 @@ uv run python -m unittest discover -s tests
 benchmarks/
 ├── config/             # Runner config YAML files (runner.example.yaml)
 ├── dataset/            # Benchmark dataset YAML files
-├── scripts/            # Loaders, the run harness, and its shell wrapper
+├── scripts/            # Loaders, the run harness, the judges, and shell wrappers
 ├── tests/              # Unit tests
 ├── pyproject.toml      # Dependencies and tooling config
 └── README.md

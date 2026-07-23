@@ -6,7 +6,7 @@ endpoint, stores every vllm:* sample, and records failed scrapes so monitoring
 gaps remain visible.
 
 Usage:
-    uv run python -m clients.collect_metrics --interval 5
+    uv run python -m clients.collect_metrics --interval 1
     uv run python -m clients.collect_metrics --duration 60 --session-name smoke
 """
 
@@ -118,8 +118,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--interval",
         type=float,
-        default=float(os.environ.get("METRICS_INTERVAL", "5")),
-        help="seconds between scrape starts (env: METRICS_INTERVAL; default: 5)",
+        default=float(os.environ.get("METRICS_INTERVAL", "1")),
+        help="seconds between scrape starts (env: METRICS_INTERVAL; default: 1)",
     )
     parser.add_argument(
         "--duration",

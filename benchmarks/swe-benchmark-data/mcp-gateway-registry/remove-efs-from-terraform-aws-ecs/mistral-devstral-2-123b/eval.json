@@ -3,38 +3,56 @@
   "model": "mistral-devstral-2-123b",
   "scores": {
     "github_issue": {
-      "completeness": 19,
-      "correctness": 19,
-      "specificity": 19,
-      "risk_awareness": 18,
-      "total": 75,
-      "notes": "Adequate artifact: identifies the main Terraform EFS resources, ECS volumes/mounts, scripts, outputs, docs, and destroy/rollback handling surfaces but misses some touchpoints, edge cases, or rollout detail."
+      "completeness": 18,
+      "correctness": 11,
+      "specificity": 18,
+      "risk_awareness": 13,
+      "total": 60,
+      "notes": "Provides clear motivation, scope, exclusions, dependencies, and testable outcomes. However, all repository-specific paths, service storage behavior, issue references, and claims about DocumentDB, S3, and prior migration work are unverifiable because no repository evidence was supplied; the production-backend exclusion also conflicts with the proposed service migration."
     },
     "lld": {
-      "completeness": 19,
-      "correctness": 19,
-      "specificity": 20,
-      "risk_awareness": 19,
-      "total": 77,
-      "notes": "Adequate artifact: identifies the main Terraform EFS resources, ECS volumes/mounts, scripts, outputs, docs, and destroy/rollback handling surfaces but misses some touchpoints, edge cases, or rollout detail."
+      "completeness": 17,
+      "correctness": 7,
+      "specificity": 15,
+      "risk_awareness": 14,
+      "total": 53,
+      "notes": "Offers a structured change inventory, rollout outline, alternatives, and service-level design. Its core SSM retrieval mechanism, paths, symbols, existing AWS dependencies, and wholesale deletion of storage.tf are unsupported; it leaves major application retrieval, IAM, migration, and rollback decisions unresolved and includes invalid or dubious Terraform/AWS details such as ECS service health-check fields and taint-based recovery."
     },
     "review": {
-      "completeness": 20,
-      "correctness": 20,
-      "specificity": 20,
-      "risk_awareness": 20,
-      "total": 80,
-      "notes": "Strong artifact: covers most of Terraform EFS resources, ECS volumes/mounts, scripts, outputs, docs, and destroy/rollback handling; minor gaps or unresolved assumptions keep it below top tier."
+      "completeness": 16,
+      "correctness": 7,
+      "specificity": 13,
+      "risk_awareness": 17,
+      "total": 53,
+      "notes": "Identifies valuable risks around SSM limits, bootstrapping, IAM, restarts, compatibility, and staged rollout. The approval verdict conflicts with its own critical blockers, several strengths are unsupported, and recommendations include erroneous or unsafe guidance such as GraphQL via grep, sts decrypt, archiving deleted code, and terraform state rm without reconciliation."
     },
     "testing": {
-      "completeness": 20,
-      "correctness": 19,
-      "specificity": 20,
-      "risk_awareness": 19,
-      "total": 78,
-      "notes": "Adequate artifact: identifies the main Terraform EFS resources, ECS volumes/mounts, scripts, outputs, docs, and destroy/rollback handling surfaces but misses some touchpoints, edge cases, or rollout detail."
+      "completeness": 17,
+      "correctness": 4,
+      "specificity": 13,
+      "risk_awareness": 11,
+      "total": 45,
+      "notes": "Attempts static, apply, deployment, service, E2E, cleanup, and migration coverage with explicit checks. Many paths and commands are unverified or inconsistent, several oracles are ineffective (ACTIVE is not service stability, grep guards can always succeed, parameter names differ), the Docker test lacks port and credential wiring, and the plan reports 22 passing tests despite no execution evidence."
     }
   },
-  "task_score": 77.5,
-  "verdict": "Usable but uneven design set; implementation would need senior review to fill gaps and correct weak spots."
+  "task_score": 52.75,
+  "verdict": "The artifacts provide broad, concrete planning, but their repository-specific assumptions and numerous technically invalid or ineffective implementation and test details prevent them from being implementation-ready.",
+  "judge": {
+    "model": "openai.gpt-5.6-sol",
+    "provider": "amazon-bedrock-mantle",
+    "evaluated_at": "2026-07-22T22:10:34.418740Z",
+    "response_id": "resp_7glyf3ydwl73noqux2g2tzuuys3woq35gzpdgmh2icwtzcejj3dq",
+    "usage": {
+      "input_tokens": 14478,
+      "input_tokens_details": {
+        "cache_write_tokens": 14476,
+        "cached_tokens": 0
+      },
+      "output_tokens": 1379,
+      "output_tokens_details": {
+        "reasoning_tokens": 890
+      },
+      "total_tokens": 15857
+    }
+  }
 }

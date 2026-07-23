@@ -33,11 +33,25 @@ def _write(text: str) -> Path:
 
 
 class LoadRunnerConfigTest(unittest.TestCase):
-    def test_shipped_config_loads(self) -> None:
-        config = load_runner_config(_SHIPPED_CONFIG)
-        self.assertEqual(config.model, "qwen3.6-35b")
+    def test_shipped_config_needs_model_and_dataset(self) -> None:
+        # The shipped template intentionally leaves model and dataset unset so
+        # one file serves every run; they must come from --model / --dataset.
+        with self.assertRaisesRegex(RunnerConfigError, "model is required"):
+            load_runner_config(_SHIPPED_CONFIG)
+
+    def test_shipped_config_loads_with_cli_model_and_dataset(self) -> None:
+        config = load_runner_config(
+            _SHIPPED_CONFIG,
+            {"model": "qwen3-coder-30b", "dataset": "dataset/example.yaml"},
+        )
+        self.assertEqual(config.model, "qwen3-coder-30b")
         self.assertEqual(config.permission_mode, "acceptEdits")
         self.assertIn("Read", config.allowed_tools)
+
+    def test_missing_dataset_raises(self) -> None:
+        text = "endpoint: http://127.0.0.1:8000\nmodel: m\n"
+        with self.assertRaisesRegex(RunnerConfigError, "dataset is required"):
+            load_runner_config(_write(text))
 
     def test_defaults_applied(self) -> None:
         config = load_runner_config(_write(_MINIMAL))
