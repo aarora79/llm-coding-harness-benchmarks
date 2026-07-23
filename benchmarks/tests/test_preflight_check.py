@@ -56,13 +56,13 @@ class TargetDirsTest(unittest.TestCase):
     def test_one_dir_per_task_with_slug(self) -> None:
         dirs = pf._target_dirs(str(self.ds), "us.anthropic.claude-opus-4-8")
         self.assertEqual(len(dirs), 2)
-        # Bedrock prefix stripped for the folder slug; repo basename used.
-        self.assertTrue(str(dirs[0]).endswith("my-repo/task-one/claude-opus-4-8"))
-        self.assertTrue(str(dirs[1]).endswith("my-repo/task-two/claude-opus-4-8"))
+        # Layout is <model-slug>/<repo>/<task>; Bedrock prefix stripped for slug.
+        self.assertTrue(str(dirs[0]).endswith("claude-opus-4-8/my-repo/task-one"))
+        self.assertTrue(str(dirs[1]).endswith("claude-opus-4-8/my-repo/task-two"))
 
     def test_plain_model_slug_unchanged(self) -> None:
         dirs = pf._target_dirs(str(self.ds), "qwen3-coder-30b")
-        self.assertTrue(str(dirs[0]).endswith("my-repo/task-one/qwen3-coder-30b"))
+        self.assertTrue(str(dirs[0]).endswith("qwen3-coder-30b/my-repo/task-one"))
 
 
 class ExistingTest(unittest.TestCase):

@@ -225,9 +225,10 @@ BENCH_ARGS=(--config "$CONFIG" --provider "$HARNESS_PROVIDER" --model "$MODEL" -
 [[ "$HARNESS_PROVIDER" == "endpoint" ]] && BENCH_ARGS+=(--endpoint "$ENDPOINT")
 [[ "$PROVIDER" == "bedrock" ]] && BENCH_ARGS+=(--aws-region "$AWS_REGION_ARG")
 
+SLUG="$(uv run python -c "import sys; sys.path.insert(0,'scripts'); from runner_config import model_to_slug; print(model_to_slug('$MODEL'))")"
 info "Command:"
 info "  uv run scripts/run-swe-headless.py ${BENCH_ARGS[*]}"
-info "Artifacts will land under: swe-benchmark-data/<repo>/<task>/$(uv run python -c "import sys; sys.path.insert(0,'scripts'); from runner_config import model_to_slug; print(model_to_slug('$MODEL'))")/"
+info "Artifacts will land under: swe-benchmark-data/$SLUG/<repo>/<task>/"
 info "Watch GPU metrics (vllm path):  cd $VLLM_DIR && uv run python -m clients.build_dashboard && open benchmark-output/dashboard.html"
 echo
 uv run scripts/run-swe-headless.py "${BENCH_ARGS[@]}" \
@@ -242,10 +243,10 @@ if [[ "$SKIP_JUDGE" -eq 1 ]]; then
     warn "  (cd $BENCHMARKS_DIR/scripts && uv run python codex_judge.py --recursive --no-overwrite --folder ../swe-benchmark-data)"
 else
     command -v codex >/dev/null 2>&1 || die "codex CLI not found on PATH (the judge runs 'codex exec'). Install codex, or re-run with --skip-judge."
-    # Judge only the folders this dataset+model just produced: point at the
-    # dataset's repo tree and let --recursive + --no-overwrite handle the rest.
+    # Judge only the folders this model+dataset just produced: point at the
+    # <model-slug>/<repo> subtree and let --recursive + --no-overwrite handle it.
     REPO_SUBDIR="$(uv run python -c "import sys; sys.path.insert(0,'scripts'); from dataset_loader import load_dataset; d=load_dataset('$DATASET_PATH'); import importlib.util,pathlib; s=importlib.util.spec_from_file_location('h','scripts/run-swe-headless.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m._repo_name(d.tasks[0].repo))")"
-    JUDGE_TARGET="swe-benchmark-data/$REPO_SUBDIR"
+    JUDGE_TARGET="swe-benchmark-data/$SLUG/$REPO_SUBDIR"
     info "Command:"
     info "  (cd scripts && uv run python codex_judge.py --recursive --no-overwrite --folder ../$JUDGE_TARGET)"
     info "codex exec buffers output and prints only its final message per folder -- a few minutes each at high effort is normal."
@@ -258,7 +259,6 @@ fi
 # =============================================================================
 step "Done"
 # =============================================================================
-SLUG="$(uv run python -c "import sys; sys.path.insert(0,'scripts'); from runner_config import model_to_slug; print(model_to_slug('$MODEL'))")"
 ok "End-to-end benchmark finished for provider=$PROVIDER model=$MODEL dataset=$DATASET"
 info "Per-task results (metrics.json cost + eval.json quality) are under:"
-info "  $BENCHMARKS_DIR/swe-benchmark-data/*/*/$SLUG/"
+info "  $BENCHMARKS_DIR/swe-benchmark-data/$SLUG/*/*/"

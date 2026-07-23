@@ -152,7 +152,7 @@ CLI flags always win, so you can still pin `model`/`dataset` in the file if you 
 | --- | --- | --- | --- |
 | `provider` | str | `endpoint` | How `claude -p` reaches the model: `endpoint` (a base URL) or `bedrock` (native Amazon Bedrock). |
 | `endpoint` | str | -- | Base URL of the OpenAI/Anthropic-compatible endpoint the model is served on. Required for `provider: endpoint`; ignored for `provider: bedrock`. |
-| `model` | str | -- | Model name/id passed to `claude --model`. For `provider: bedrock` this is a Bedrock model id or inference profile (e.g. `us.anthropic.claude-opus-4-8`); the harness strips the vendor/region prefix and any `[...]` suffix to derive the `{model-name}` artifact subfolder (so `us.anthropic.claude-opus-4-8` writes to `claude-opus-4-8/`). Usually supplied with `--model` rather than pinned in the file; required from one source or the other. |
+| `model` | str | -- | Model name/id passed to `claude --model`. For `provider: bedrock` this is a Bedrock model id or inference profile (e.g. `us.anthropic.claude-opus-4-8`); the harness strips the vendor/region prefix and any `[...]` suffix to derive the `{model-name}` artifact top-level folder (so `us.anthropic.claude-opus-4-8` writes under `claude-opus-4-8/`). Usually supplied with `--model` rather than pinned in the file; required from one source or the other. |
 | `api_key` | str | `local` | API key sent to the endpoint (local servers ignore the value). `provider: endpoint` only. |
 | `aws_region` | str | -- | AWS region for `provider: bedrock` (e.g. `us-east-1`). Falls back to `AWS_REGION` / `AWS_DEFAULT_REGION` from the environment when unset. |
 | `dataset` | str | -- | Path to the dataset YAML (relative to `benchmarks/`). Usually supplied with `--dataset` rather than pinned in the file; required from one source or the other. |
@@ -180,7 +180,7 @@ uv run scripts/runner_config.py config/runner.example.yaml \
 [scripts/run-swe-headless.py](../scripts/run-swe-headless.py) is the harness. For each selected task it:
 
 1. Clones the task's repo at its pinned ref into a temporary directory under `clone_dir`.
-2. Invokes `claude -p "/swe repo: ... problem: ... model: ... answers: ..."` non-interactively, letting the `/swe` skill produce the four artifacts under `swe-benchmark-data/{repo-name}/{task-id}/{model-name}/`.
+2. Invokes `claude -p "/swe repo: ... problem: ... model: ... answers: ..."` non-interactively, letting the `/swe` skill produce the four artifacts under `swe-benchmark-data/{model-name}/{repo-name}/{task-id}/`.
 3. Parses the run's JSON result (`--output-format json`) for the benchmark metrics -- token usage, latency, and `num_turns` -- and writes them to `metrics.json` beside the artifacts. The top-level metrics report only what the model API returned; vLLM's full Prometheus `/metrics` surface (scraped before and after the run) is kept in a separate nested block (see [The metrics file](#the-metrics-file)).
 4. Removes the temporary clone.
 
@@ -392,7 +392,7 @@ The judge defaults to the `openai.gpt-5.6-sol` model at `high` reasoning effort,
 ```bash
 cd benchmarks/scripts
 uv run python codex_judge.py \
-    --folder ../swe-benchmark-data/mcp-gateway-registry/remove-efs-from-terraform-aws-ecs/claude-opus-4-8
+    --folder ../swe-benchmark-data/claude-opus-4-8/mcp-gateway-registry/remove-efs-from-terraform-aws-ecs
 ```
 
 `codex exec` streams nothing to the terminal until it finishes (it buffers and prints only the final message), so a multi-minute run at `high` effort on a real repository looks idle when it is really working -- give it a few minutes.

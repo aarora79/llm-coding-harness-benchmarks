@@ -41,7 +41,8 @@ def _valid_result(task: str = "task-a", model: str = "candidate-a") -> dict[str,
 
 
 def _artifact_folder(root: Path, *, with_metrics: bool = True) -> Path:
-    folder = root / "task-a" / "candidate-a"
+    # Layout is <model>/<repo>/<task>: leaf is the task, grandparent the model.
+    folder = root / "candidate-a" / "repo-a" / "task-a"
     folder.mkdir(parents=True)
     for filename in ("github-issue.md", "lld.md", "review.md", "testing.md"):
         (folder / filename).write_text(
@@ -238,7 +239,7 @@ class EvaluateWithCodexTest(unittest.TestCase):
 
 def _extra_folder(root: Path, task: str, model: str) -> Path:
     """Create a second artifact folder with its own metrics.json under root."""
-    folder = root / task / model
+    folder = root / model / "repo-a" / task
     folder.mkdir(parents=True)
     for filename in ("github-issue.md", "lld.md", "review.md", "testing.md"):
         (folder / filename).write_text(f"# {filename}\n\nBody.\n", encoding="utf-8")

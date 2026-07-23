@@ -210,8 +210,11 @@ def render_judge_prompt(
         else None
     )
     metadata = metrics or {}
-    task_id = metadata.get("task") or artifact_dir.parent.name
-    candidate_id = metadata.get("model") or artifact_dir.name
+    # Prefer identifiers recorded in metrics.json. Fall back to the folder
+    # layout, which is <model>/<repo>/<task>/: the leaf is the task and the
+    # grandparent is the model.
+    task_id = metadata.get("task") or artifact_dir.name
+    candidate_id = metadata.get("model") or artifact_dir.parent.parent.name
     if not isinstance(task_id, str) or not task_id.strip():
         raise JudgeError("task identifier must be a non-empty string")
     if not isinstance(candidate_id, str) or not candidate_id.strip():

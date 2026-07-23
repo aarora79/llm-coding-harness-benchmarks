@@ -6,37 +6,33 @@ This directory holds the inputs and outputs of an LLM software-engineering bench
 
 ```
 benchmarks/swe-benchmark-data/
-├── README.md                       # This file
-└── {repo-name}/
-    ├── repo/                       # Cloned source (gitignored - cloned by contributor, never committed)
-    ├── {problem-name}/
-    │   ├── {model-name-A}/         # Artifacts produced by model A on this problem
-    │   │   ├── github-issue.md    # GitHub issue specification
-    │   │   ├── lld.md             # Low-level design
-    │   │   ├── review.md          # Multi-persona expert review
-    │   │   ├── testing.md         # Testing plan
-    │   │   ├── eval.json          # Evaluation scores (from independent judge)
-    │   │   └── metrics.json       # Token/cost/throughput metrics (if collected)
-    │   └── {model-name-B}/
-    │       └── ...
-    └── {next-problem-name}/
-        └── ...
+├── README.md                           # This file
+└── {model-name}/
+    └── {repo-name}/
+        ├── {problem-name}/
+        │   ├── github-issue.md        # GitHub issue specification
+        │   ├── lld.md                 # Low-level design
+        │   ├── review.md              # Multi-persona expert review
+        │   ├── testing.md             # Testing plan
+        │   ├── eval.json              # Evaluation scores (from independent judge)
+        │   └── metrics.json           # Token/cost/throughput metrics (if collected)
+        └── {next-problem-name}/
+            └── ...
 ```
 
-The `repo/` checkout under each `{repo-name}/` is **not** stored in this repository. It is added to `.gitignore` so contributors clone their own copy at the right tag before invoking `/swe`. This avoids carrying large third-party trees and keeps the per-tag history pinned by the contributor, not by this repo.
+Results are grouped by model first, so each model's full set of runs lives together; the same `{repo-name}/{problem-name}` under different `{model-name}/` folders lets models be compared on one problem.
 
-**Generated artifacts are local, not committed.** The whole `swe-benchmark-data/` tree is gitignored; the only exception force-committed into this repo is the trivial `Hello-World/` example. Your own runs -- including any against `mcp-gateway-registry/` -- stay on your machine, so you can benchmark freely without risking an accidental commit. Publish results yourself if you want them shared.
+**Generated artifacts are local, not committed.** The whole `swe-benchmark-data/` tree is gitignored; the only exception force-committed into this repo is the trivial `Hello-World/` example (under each model that has attempted it). Your own runs -- including any against `mcp-gateway-registry` -- stay on your machine, so you can benchmark freely without risking an accidental commit. Publish results yourself if you want them shared.
 
 ## How to Set Up a Benchmark Repository Locally
 
-Clone each target repository at the documented tag inside its `{repo-name}/` folder. Clone into a `repo/` subdirectory so artifacts and source never collide:
+The target repository's source is **not** stored here; the harness (and the `/swe` skill) clone it at the documented tag into a temporary directory (e.g. under `/tmp`) at run time. To clone one by hand for local exploration:
 
 ```bash
-cd benchmarks/swe-benchmark-data/{repo-name}
-git clone --branch <tag> --depth 1 https://github.com/<owner>/<name>.git repo
+git clone --branch <tag> --depth 1 https://github.com/<owner>/<name>.git /tmp/<repo-name>
 ```
 
-Use `--depth 1` to keep the checkout small. If you later need full history, run `git fetch --unshallow` from inside `repo/`.
+Use `--depth 1` to keep the checkout small. If you later need full history, run `git fetch --unshallow` from inside the clone.
 
 ---
 
@@ -50,19 +46,18 @@ Each section below documents one target repository. To benchmark a model on one 
 |-------|-------|
 | Source | https://github.com/agentic-community/mcp-gateway-registry |
 | Tag | `1.24.4` |
-| Local path | `benchmarks/swe-benchmark-data/mcp-gateway-registry/repo/` |
-| Artifact path | `benchmarks/swe-benchmark-data/mcp-gateway-registry/{problem-name}/{model-name}/` |
+| Clone (at run time) | temporary, e.g. `/tmp/mcp-gateway-registry` |
+| Artifact path | `benchmarks/swe-benchmark-data/{model-name}/mcp-gateway-registry/{problem-name}/` |
 
 #### Setup
 
 ```bash
-cd benchmarks/swe-benchmark-data/mcp-gateway-registry
-git clone --branch 1.24.4 --depth 1 https://github.com/agentic-community/mcp-gateway-registry.git repo
+git clone --branch 1.24.4 --depth 1 https://github.com/agentic-community/mcp-gateway-registry.git /tmp/mcp-gateway-registry
 ```
 
 #### Tasks
 
-The tasks below are run with multiple models via the `/swe` skill. For each `{model-name}`, the resulting artifacts land at `benchmarks/swe-benchmark-data/mcp-gateway-registry/{problem-name}/{model-name}/`.
+The tasks below are run with multiple models via the `/swe` skill. For each `{model-name}`, the resulting artifacts land at `benchmarks/swe-benchmark-data/{model-name}/mcp-gateway-registry/{problem-name}/`.
 
 | # | Problem name (folder) | Issue | Difficulty | Description |
 |---|-----------------------|-------|-----------|-------------|
@@ -83,7 +78,7 @@ The tasks below are run with multiple models via the `/swe` skill. For each `{mo
 # - model-name  : claude-opus-4-8           (or whichever model is being benchmarked)
 ```
 
-The skill will create `benchmarks/swe-benchmark-data/mcp-gateway-registry/remove-faiss/claude-opus-4-8/` and populate it with `github-issue.md`, `lld.md`, `review.md`, and `testing.md`. Re-run with a different `model-name` to add a sibling folder for direct comparison. The skill does not implement the change - that is a separate step the user can take with the design package as input.
+The skill will create `benchmarks/swe-benchmark-data/claude-opus-4-8/mcp-gateway-registry/remove-faiss/` and populate it with `github-issue.md`, `lld.md`, `review.md`, and `testing.md`. Re-run with a different `model-name` to add a sibling model folder for direct comparison. The skill does not implement the change - that is a separate step the user can take with the design package as input.
 
 #### Scoring
 
@@ -104,5 +99,5 @@ artifact:
 
 Results are reported in a 5×6 matrix (rows = tasks, columns = models). Per-cell
 JSON with criterion breakdowns and judge notes lives at
-`{task}/{model}/eval.json`. The published matrix and per-model leaderboard for
-this repo are in the [top-level README](../../README.md#results-a-worked-example).
+`{model}/{repo}/{task}/eval.json`. The published matrix and per-model leaderboard
+for this repo are in the [top-level README](../../README.md#results-a-worked-example).

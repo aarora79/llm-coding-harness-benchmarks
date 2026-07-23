@@ -31,7 +31,7 @@ The example serves **Qwen3.6-35B-A3B**; swap in any model from [self-hosted/vllm
 
 Run these before serving anything. The most important one is the **artifact-folder check**: the harness drives the `/swe` skill non-interactively, and the skill **stops and asks what to do if the target `{model}/` folder already contains any of the four artifacts** (see [SKILL.md](../../.claude/skills/swe/SKILL.md), "Handle an existing benchmark folder"). In a headless run there is nobody to answer that prompt, so a pre-existing folder makes the run stall or the model improvise. Clear (or move) any prior run for this exact `{model}` before starting.
 
-**Check whether target folders already exist.** The harness writes to `swe-benchmark-data/mcp-gateway-registry/{task}/{model-slug}/`, one folder per task. For the example (`--model qwen3.6-35b`, so the slug is `qwen3.6-35b`):
+**Check whether target folders already exist.** The harness writes to `swe-benchmark-data/{model-slug}/mcp-gateway-registry/{task}/`, one folder per task. For the example (`--model qwen3.6-35b`, so the slug is `qwen3.6-35b`):
 
 ```bash
 cd benchmarks
@@ -42,7 +42,7 @@ for task in remove-faiss remove-efs-from-terraform-aws-ecs \
             ssrf-hardening-outbound-url-validation \
             migrate-ecs-env-vars-to-secrets-manager \
             replace-keycloak-db-password-with-rds-iam; do
-    dir="swe-benchmark-data/$DATASET_REPO/$task/$MODEL_SLUG"
+    dir="swe-benchmark-data/$MODEL_SLUG/$DATASET_REPO/$task"
     if [ -d "$dir" ] && [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
         echo "EXISTS (needs clearing): $dir"
         found=1
@@ -63,7 +63,7 @@ for task in remove-faiss remove-efs-from-terraform-aws-ecs \
             ssrf-hardening-outbound-url-validation \
             migrate-ecs-env-vars-to-secrets-manager \
             replace-keycloak-db-password-with-rds-iam; do
-    rm -rf "swe-benchmark-data/$DATASET_REPO/$task/$MODEL_SLUG"
+    rm -rf "swe-benchmark-data/$MODEL_SLUG/$DATASET_REPO/$task"
 done
 echo "cleared any prior $MODEL_SLUG folders"
 ```
@@ -189,7 +189,7 @@ uv run scripts/run-swe-headless.py --config config/runner.yaml \
     --dataset dataset/mcp-gateway-registry.yaml
 ```
 
-Each task lands its four artifacts plus `metrics.json` under `swe-benchmark-data/mcp-gateway-registry/{task}/qwen3.6-35b/`. Because this is the `endpoint` path against vLLM, `metrics.json` also carries the populated `vllm_prometheus` block (prefix-cache hit rate, per-run token/latency deltas, in-flight KV-cache peak). Keep `concurrency: 1` (the default) if you want trustworthy per-run vLLM cache numbers; see [Running tasks concurrently](harness-reference.md#running-tasks-concurrently) for the trade-off. Full flag reference: [Common invocations](harness-reference.md#common-invocations).
+Each task lands its four artifacts plus `metrics.json` under `swe-benchmark-data/qwen3.6-35b/mcp-gateway-registry/{task}/`. Because this is the `endpoint` path against vLLM, `metrics.json` also carries the populated `vllm_prometheus` block (prefix-cache hit rate, per-run token/latency deltas, in-flight KV-cache peak). Keep `concurrency: 1` (the default) if you want trustworthy per-run vLLM cache numbers; see [Running tasks concurrently](harness-reference.md#running-tasks-concurrently) for the trade-off. Full flag reference: [Common invocations](harness-reference.md#common-invocations).
 
 ## Step 4 - Score the artifacts with the codex judge (LLM-as-judge)
 
@@ -198,9 +198,9 @@ The judge reads the four artifacts a run produced, checks their factual claims a
 ```bash
 cd benchmarks/scripts
 
-# Score every model/task folder under the run tree; skip any that already have an eval.json
+# Score every task this model just produced; skip any that already have an eval.json
 uv run python codex_judge.py --recursive --no-overwrite \
-    --folder ../swe-benchmark-data/mcp-gateway-registry
+    --folder ../swe-benchmark-data/qwen3.6-35b
 ```
 
 To score a single task folder instead:
@@ -208,7 +208,7 @@ To score a single task folder instead:
 ```bash
 cd benchmarks/scripts
 uv run python codex_judge.py \
-    --folder ../swe-benchmark-data/mcp-gateway-registry/remove-faiss/qwen3.6-35b
+    --folder ../swe-benchmark-data/qwen3.6-35b/mcp-gateway-registry/remove-faiss
 ```
 
 `codex exec` buffers and prints only its final message, so a multi-minute run at the default `high` reasoning effort looks idle while it is really working - give it a few minutes per folder. Flags, model overrides, and the eval schema are documented in [Running the codex judge](harness-reference.md#running-the-codex-judge).
@@ -231,4 +231,4 @@ uv run python -m clients.build_dashboard \
     --output benchmark-output/dashboard.html
 ```
 
-At this point each `swe-benchmark-data/mcp-gateway-registry/{task}/qwen3.6-35b/` folder holds the artifacts, a `metrics.json` (cost + vLLM server metrics + the mirrored evaluation), and an `eval.json` (quality scores) - directly comparable to the same task run by any other model on any of the three paths.
+At this point each `swe-benchmark-data/qwen3.6-35b/mcp-gateway-registry/{task}/` folder holds the artifacts, a `metrics.json` (cost + vLLM server metrics + the mirrored evaluation), and an `eval.json` (quality scores) - directly comparable to the same task run by any other model on any of the three paths.

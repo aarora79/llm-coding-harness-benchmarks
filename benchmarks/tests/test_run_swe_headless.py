@@ -124,9 +124,9 @@ class ArtifactDirTest(unittest.TestCase):
             path.parts[-4:],
             (
                 "swe-benchmark-data",
+                "qwen3.6-35b",
                 "mcp-gateway-registry",
                 "remove-faiss",
-                "qwen3.6-35b",
             ),
         )
 

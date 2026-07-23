@@ -1,6 +1,6 @@
 ---
 name: swe
-description: "End-to-end Software Engineering skill that benchmarks how well a given LLM can take a problem from idea to a complete design package. Creates structured documentation under benchmarks/swe-benchmark-data/{repo-name}/{problem-name}/{model-name}/ with a GitHub issue spec, low-level design (LLD), expert review, and testing plan, so multiple models can be compared on the same problem within the same repository. The skill stops at design and review - it does NOT implement the change."
+description: "End-to-end Software Engineering skill that benchmarks how well a given LLM can take a problem from idea to a complete design package. Creates structured documentation under benchmarks/swe-benchmark-data/{model-name}/{repo-name}/{problem-name}/ with a GitHub issue spec, low-level design (LLD), expert review, and testing plan, so multiple models can be compared on the same problem within the same repository. The skill stops at design and review - it does NOT implement the change."
 license: Apache-2.0
 metadata:
   author: Amit Arora
@@ -47,7 +47,7 @@ The `repo:` path may be a checkout the caller already cloned (including a tempor
 
 1. **Gather Requirements** - Detect the active model and confirm it; ask for the GitHub URL; ask for tag-vs-main; confirm the task; locate or clone the target repo with user approval
 2. **Quick Codebase Review** - Explore the codebase to understand structure
-3. **Create Benchmark Folder** - Create `benchmarks/swe-benchmark-data/{repo-name}/{problem-name}/{model-name}/` directory
+3. **Create Benchmark Folder** - Create `benchmarks/swe-benchmark-data/{model-name}/{repo-name}/{problem-name}/` directory
 4. **Write GitHub Issue** - Create `github-issue.md` with the issue specification
 5. **Deep Codebase Analysis** - Thoroughly explore relevant code
 6. **Write Low-Level Design** - Create `lld.md` with technical details
@@ -143,15 +143,15 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 BENCH_DIR="$REPO_ROOT/benchmarks/swe-benchmark-data"
 ```
 
-1. **Check for an existing local checkout first.** Look for cloned source at `$BENCH_DIR/{repo-name}/repo/`. If it exists and is a valid git checkout, confirm the ref:
+1. **Check for an existing local checkout first.** If the user already pointed you at a checkout (e.g. a `/tmp` clone the harness made, recorded as `{repo-path}`), confirm the ref:
 
    ```bash
-   git -C "$BENCH_DIR/{repo-name}/repo" describe --tags --exact-match  # for tags
+   git -C "{repo-path}" describe --tags --exact-match  # for tags
    # or
-   git -C "$BENCH_DIR/{repo-name}/repo" rev-parse --abbrev-ref HEAD     # for main
+   git -C "{repo-path}" rev-parse --abbrev-ref HEAD     # for main
    ```
 
-   If the local checkout is at the wrong ref, tell the user and ask whether to re-clone (Option A: delete `repo/` and re-clone at `{ref}`) or keep the existing checkout.
+   If the local checkout is at the wrong ref, tell the user and ask whether to re-clone at `{ref}` or keep the existing checkout.
 
 2. **If no checkout exists, clone the repo yourself at `{ref}`.** The source is read-only input, so clone it wherever is convenient - you do NOT need to place it inside the benchmark tree, and you may clone into a temporary directory such as `/tmp`. A shallow clone at the exact ref is sufficient:
 
@@ -162,7 +162,7 @@ BENCH_DIR="$REPO_ROOT/benchmarks/swe-benchmark-data"
 
    In **interactive** mode, announce the clone command and wait for approval before running it. In **non-interactive mode** (see "Non-Interactive Mode (Headless)" above), clone directly without asking - a shallow read-only clone into a temp dir needs no confirmation. Record the resulting checkout path as `{repo-path}` and use it as the sole code source for the rest of the run.
 
-   A `/tmp` clone is disposable and never committed; you do not need to clean it up, but you may. When you clone into `$BENCH_DIR/{repo-name}/repo/` instead, that path is gitignored so it is never committed either. Do not modify the checkout in any location.
+   A `/tmp` clone is disposable and never committed; you do not need to clean it up, but you may. Do not modify the checkout in any location.
 
 ### 1.5 Remaining Clarifying Questions
 
@@ -185,35 +185,34 @@ This quick review takes 5-10 minutes and helps you ask better clarifying questio
 
 ## Step 3: Create Benchmark Folder
 
-All artifacts live under a top-level `benchmarks/` directory. Within it, every run gets its own `{repo-name}/{problem-name}/{model-name}/` subfolder so multiple models can be benchmarked on the same problem within a given repository and compared side-by-side.
+All artifacts live under a top-level `benchmarks/` directory. Within it, every run gets its own `{model-name}/{repo-name}/{problem-name}/` subfolder. Grouping by model first keeps each model's full set of results together, while still letting multiple models be compared on the same `{repo-name}/{problem-name}` across sibling model folders.
 
-The target repository's source code is **not** stored here. It is cloned locally at a specific tag by each contributor following the instructions in `benchmarks/swe-benchmark-data/README.md`, into a `repo/` subdirectory under `{repo-name}/`. The `repo/` checkout is gitignored so it is never committed.
+The target repository's source code is **not** stored here. It is cloned locally at a specific tag by each contributor following the instructions in `benchmarks/swe-benchmark-data/README.md`, into a `repo/` subdirectory, or into a temporary clone (e.g. under `/tmp`, as the harness does). The `repo/` checkout is gitignored so it is never committed.
 
 ### Folder Structure
 
 ```
 benchmarks/
 └── swe-benchmark-data/
-    ├── README.md                   # Lists target repos, tags, and tasks to benchmark
-    └── {repo-name}/
-        ├── repo/                   # Cloned source (gitignored - cloned by contributor)
-        ├── {problem-name}/
-        │   └── {model-name}/
-        │       ├── github-issue.md      # GitHub issue specification
-        │       ├── lld.md               # Low-level design document
-        │       ├── review.md            # Expert review document
-        │       └── testing.md           # Testing plan (functional, backwards-compat, UX, deployment, E2E)
-        └── {next-problem-name}/
-            └── ...
+    ├── README.md                       # Lists target repos, tags, and tasks to benchmark
+    └── {model-name}/
+        └── {repo-name}/
+            ├── {problem-name}/
+            │   ├── github-issue.md      # GitHub issue specification
+            │   ├── lld.md               # Low-level design document
+            │   ├── review.md            # Expert review document
+            │   └── testing.md           # Testing plan (functional, backwards-compat, UX, deployment, E2E)
+            └── {next-problem-name}/
+                └── ...
 ```
 
 Conventions:
 
+- Use kebab-case for `{model-name}` and prefer the canonical model id (e.g. `claude-opus-4-8`, `claude-sonnet-5`, `qwen3.6-35b`, `gpt-5`).
 - Use kebab-case for `{repo-name}` and match the upstream repository name (e.g. `mcp-gateway-registry`). The list of supported `{repo-name}` values, their upstream URLs, and the tag to clone are all defined in `benchmarks/swe-benchmark-data/README.md`.
-- Source code for the target lives at the checkout resolved in Step 1.4 (`{repo-path}`): either `benchmarks/swe-benchmark-data/{repo-name}/repo/` or a temporary clone such as one under `/tmp`. If no checkout exists yet, clone it at `{ref}` per Step 1.4 rather than stopping.
+- Source code for the target lives at the checkout resolved in Step 1.4 (`{repo-path}`): a temporary clone such as one under `/tmp`. If no checkout exists yet, clone it at `{ref}` per Step 1.4 rather than stopping.
 - Use kebab-case for `{problem-name}` (e.g. `remove-faiss`, `remove-efs-from-terraform-aws-ecs`). Prefer the exact name listed in the benchmark README's task table.
-- Use kebab-case for `{model-name}` and prefer the canonical model id (e.g. `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`, `gpt-5`).
-- The same `{repo-name}/{problem-name}` folder will accumulate one subfolder per model that has attempted it - do not delete sibling model folders.
+- The same `{repo-name}/{problem-name}` under different `{model-name}/` folders lets models be compared on one problem - do not delete sibling model folders.
 
 ### Pre-existing Artifacts: Confirm Before Overwriting
 
@@ -224,7 +223,7 @@ Concretely:
 1. List which of the four files already exist (with size and last-modified time, so the user can see they're real prior work).
 2. Present the choices clearly and wait for the user's answer:
 
-   > The following artifacts already exist at `benchmarks/swe-benchmark-data/{repo}/{problem}/{model}/`:
+   > The following artifacts already exist at `benchmarks/swe-benchmark-data/{model}/{repo}/{problem}/`:
    > - `lld.md` (12.6 KB, modified 2026-06-04)
    > - `review.md` (4.1 KB, modified 2026-06-04)
    >
@@ -242,22 +241,26 @@ Concretely:
 
 Even if all four files are present and the user picks option 2, do not "merge" with prior content - each new step writes the new artifact end-to-end. The prior file is replaced, not edited in place.
 
-If `benchmarks/swe-benchmark-data/{repo-name}/{problem-name}/{model-name}/` exists but is **empty**, no confirmation is needed; proceed normally.
+If `benchmarks/swe-benchmark-data/{model-name}/{repo-name}/{problem-name}/` exists but is **empty**, no confirmation is needed; proceed normally.
 
-Example for the same problem solved by two models inside the same repository:
+Example for the same problem solved by two models (each under its own model folder):
 
 ```
-benchmarks/swe-benchmark-data/mcp-gateway-registry/remove-faiss/
-├── claude-opus-4-7/
-│   ├── github-issue.md
-│   ├── lld.md
-│   ├── review.md
-│   └── testing.md
-└── claude-sonnet-4-6/
-    ├── github-issue.md
-    ├── lld.md
-    ├── review.md
-    └── testing.md
+benchmarks/swe-benchmark-data/
+├── claude-opus-4-8/
+│   └── mcp-gateway-registry/
+│       └── remove-faiss/
+│           ├── github-issue.md
+│           ├── lld.md
+│           ├── review.md
+│           └── testing.md
+└── claude-sonnet-5/
+    └── mcp-gateway-registry/
+        └── remove-faiss/
+            ├── github-issue.md
+            ├── lld.md
+            ├── review.md
+            └── testing.md
 ```
 
 ## Step 4: Write GitHub Issue (github-issue.md)
@@ -669,10 +672,10 @@ After producing the four artifacts, present a clear summary to the user. **Do no
 
 | Document | Location | Description |
 |----------|----------|-------------|
-| GitHub Issue | `benchmarks/swe-benchmark-data/{repo}/{problem}/{model}/github-issue.md` | Issue specification |
-| Low-Level Design | `benchmarks/swe-benchmark-data/{repo}/{problem}/{model}/lld.md` | Technical design |
-| Expert Review | `benchmarks/swe-benchmark-data/{repo}/{problem}/{model}/review.md` | Multi-persona review |
-| Testing Plan | `benchmarks/swe-benchmark-data/{repo}/{problem}/{model}/testing.md` | All test categories |
+| GitHub Issue | `benchmarks/swe-benchmark-data/{model}/{repo}/{problem}/github-issue.md` | Issue specification |
+| Low-Level Design | `benchmarks/swe-benchmark-data/{model}/{repo}/{problem}/lld.md` | Technical design |
+| Expert Review | `benchmarks/swe-benchmark-data/{model}/{repo}/{problem}/review.md` | Multi-persona review |
+| Testing Plan | `benchmarks/swe-benchmark-data/{model}/{repo}/{problem}/testing.md` | All test categories |
 
 ### Review Verdicts
 
@@ -744,9 +747,9 @@ Do not implement code, run tests, push, commit, or open a PR until the user expl
 
 User: "Run task 1 for mcp-gateway-registry with claude-opus-4-7."
 
-1. Look up task 1 in `benchmarks/swe-benchmark-data/README.md` (`remove-faiss`). Confirm `repo-name = mcp-gateway-registry`, `problem-name = remove-faiss`, `model-name = claude-opus-4-7`. Check that `benchmarks/swe-benchmark-data/mcp-gateway-registry/repo/` exists; if it does not, ask the user for the GitHub URL and tag, announce the clone command, and wait for approval.
-2. Quick codebase review of `repo/` to find every FAISS reference (imports, dependencies, configs, docs)
-3. Create `benchmarks/swe-benchmark-data/mcp-gateway-registry/remove-faiss/claude-opus-4-7/`
+1. Look up task 1 in `benchmarks/swe-benchmark-data/README.md` (`remove-faiss`). Confirm `repo-name = mcp-gateway-registry`, `problem-name = remove-faiss`, `model-name = claude-opus-4-8`. Resolve a local checkout of the target repo at the listed tag (a temp clone under `/tmp` is fine); if none exists, ask the user for the GitHub URL and tag, announce the clone command, and wait for approval.
+2. Quick codebase review of the checkout to find every FAISS reference (imports, dependencies, configs, docs)
+3. Create `benchmarks/swe-benchmark-data/claude-opus-4-8/mcp-gateway-registry/remove-faiss/`
 4. Write `github-issue.md` describing the FAISS removal task (problem, scope, acceptance criteria, out-of-scope)
 5. Deep code analysis of FAISS usage and the maintained replacement
 6. Write `lld.md` covering: files to edit, dependency removals, doc updates, fallback path
@@ -754,7 +757,7 @@ User: "Run task 1 for mcp-gateway-registry with claude-opus-4-7."
 8. Write `testing.md` with import-removal greps, backwards-compat tests, and a build/test pass plan
 9. Present the four-artifact summary and ask whether to refine anything or open the GitHub issue upstream
 
-When the same problem is later run with a different model (e.g. `claude-sonnet-4-6`), repeat the workflow into `benchmarks/swe-benchmark-data/mcp-gateway-registry/remove-faiss/claude-sonnet-4-6/`. The two folders make per-model artifacts directly comparable inside the same repository.
+When the same problem is later run with a different model (e.g. `claude-sonnet-5`), repeat the workflow into `benchmarks/swe-benchmark-data/claude-sonnet-5/mcp-gateway-registry/remove-faiss/`. The two model folders make per-model artifacts directly comparable on the same problem.
 
 ---
 
@@ -770,10 +773,10 @@ When the same problem is later run with a different model (e.g. `claude-sonnet-4
 
 This skill is a benchmark. Each model run must be completely independent so artifacts are directly comparable. Read the cloned source repo only; do not read sibling model artifacts or communicate with other sessions. Specifically:
 
-- **Do NOT read any files under `benchmarks/swe-benchmark-data/{repo-name}/{problem-name}/`** other than the model's own target folder. Sibling model folders (e.g. `claude-opus-4-8/`, `kimi-k2-thinking/`, etc.) contain artifacts from other benchmark runs — reading them contaminates the benchmark.
+- **Do NOT read any files under `benchmarks/swe-benchmark-data/`** other than the model's own target folder (`{model-name}/{repo-name}/{problem-name}/`). Sibling model folders (e.g. `claude-opus-4-8/`, `kimi-k2-thinking/`, etc.) contain artifacts from other benchmark runs — reading them contaminates the benchmark.
 - **Do NOT read `benchmarks/swe-benchmark-data/README.md`** during analysis. The task description in this `/swe` invocation is the only allowed input from the benchmark directory.
 - **Do NOT use the `claude-peers` MCP tool** (`mcp__claude-peers__*`) to message, list, or coordinate with other Claude Code sessions during a `/swe` run. Each session must produce its design independently.
-- **The only allowed code source** is the cloned target repo at `{repo-path}` (either `benchmarks/swe-benchmark-data/{repo-name}/repo/` or a temp clone such as one under `/tmp`, as resolved in Step 1.4). Read that thoroughly; ignore everything else under `benchmarks/`.
+- **The only allowed code source** is the cloned target repo at `{repo-path}` (a temp clone such as one under `/tmp`, as resolved in Step 1.4). Read that thoroughly; ignore everything else under `benchmarks/`.
 
 If the user explicitly asks you to compare with prior runs after artifacts are written, that is a separate request — done after the four artifacts are saved, not during their production.
 

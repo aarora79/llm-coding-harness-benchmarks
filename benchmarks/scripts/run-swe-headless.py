@@ -946,7 +946,7 @@ def _artifact_dir(config: RunnerConfig, task: Task) -> Path:
     """Return the directory where /swe writes a task's artifacts.
 
     Mirrors the skill's convention:
-    ``benchmarks/<output_dir>/<repo-name>/<task-id>/<model>/``.
+    ``benchmarks/<output_dir>/<model>/<repo-name>/<task-id>/``.
 
     Args:
         config: The runner config.
@@ -959,9 +959,9 @@ def _artifact_dir(config: RunnerConfig, task: Task) -> Path:
         REPO_ROOT
         / "benchmarks"
         / config.output_dir
+        / config.model_slug
         / _repo_name(task.repo)
         / task.id
-        / config.model_slug
     )
 
 

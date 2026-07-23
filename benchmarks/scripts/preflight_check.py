@@ -92,7 +92,7 @@ def _target_dirs(dataset_path: str, model: str) -> list[Path]:
     repo_name = _repo_name_from_harness()
     slug = model_to_slug(model)
     root = benchmarks_dir / _OUTPUT_DIR
-    return [root / repo_name(task.repo) / task.id / slug for task in dataset.tasks]
+    return [root / slug / repo_name(task.repo) / task.id for task in dataset.tasks]
 
 
 def _existing(dirs: list[Path]) -> list[Path]:
