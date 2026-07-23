@@ -9,7 +9,6 @@ benchmarks/swe-benchmark-data/
 ├── README.md                       # This file
 └── {repo-name}/
     ├── repo/                       # Cloned source (gitignored - cloned by contributor, never committed)
-    ├── JUDGE_RESULTS.md            # Aggregated score matrix + leaderboard + synthesis
     ├── reports/                    # Generated charts (run generate-report.py)
     ├── {problem-name}/
     │   ├── implementations/        # Shared spec + per-model code implementations
@@ -29,6 +28,8 @@ benchmarks/swe-benchmark-data/
 ```
 
 The `repo/` checkout under each `{repo-name}/` is **not** stored in this repository. It is added to `.gitignore` so contributors clone their own copy at the right tag before invoking `/swe`. This avoids carrying large third-party trees and keeps the per-tag history pinned by the contributor, not by this repo.
+
+**Generated artifacts are local, not committed.** The whole `swe-benchmark-data/` tree is gitignored; the only exception force-committed into this repo is the trivial `Hello-World/` example. Your own runs -- including any against `mcp-gateway-registry/` -- stay on your machine, so you can benchmark freely without risking an accidental commit. Publish results yourself if you want them shared.
 
 ## How to Set Up a Benchmark Repository Locally
 
@@ -107,5 +108,5 @@ artifact:
 
 Results are reported in a 5×6 matrix (rows = tasks, columns = models). Per-cell
 JSON with criterion breakdowns and judge notes lives at
-`{task}/{model}/eval.json`. The aggregated matrix + synthesis is in
-[`mcp-gateway-registry/JUDGE_RESULTS.md`](mcp-gateway-registry/JUDGE_RESULTS.md).
+`{task}/{model}/eval.json`. The published matrix and per-model leaderboard for
+this repo are in the [top-level README](../../README.md#results-a-worked-example).

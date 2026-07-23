@@ -97,7 +97,7 @@ A dataset is a single YAML file: a metadata header plus a list of tasks, each po
 
 ## Results: a worked example
 
-The repo ships a fully-populated worked example so you can see the harness producing real, scored artifacts before pointing it at your own code. The target is [agentic-community/mcp-gateway-registry](https://github.com/agentic-community/mcp-gateway-registry) at tag `1.24.4`, with **5 tasks x 6 models = 30 artifact bundles** on disk under [benchmarks/swe-benchmark-data/](benchmarks/swe-benchmark-data/).
+To show what the harness produces, we ran it against [agentic-community/mcp-gateway-registry](https://github.com/agentic-community/mcp-gateway-registry) at tag `1.24.4` -- **5 tasks x 6 models = 30 artifact bundles**, each scored by the judge. The published numbers are below. (The `mcp-gateway-registry` dataset ships in [benchmarks/dataset/](benchmarks/dataset/mcp-gateway-registry.yaml) so you can reproduce the run; the generated artifacts themselves are not committed, so a customer's own runs never risk landing in version control. The only committed worked example under [benchmarks/swe-benchmark-data/](benchmarks/swe-benchmark-data/) is the trivial `Hello-World` sanity run.)
 
 | # | Problem | Difficulty | Source |
 |---|---------|-----------|--------|
@@ -212,7 +212,7 @@ claude-code-multi-model/
 │   ├── dataset/               Benchmark dataset YAML files
 │   ├── scripts/               Run harness, dataset/config loaders, judges, proxy launcher
 │   ├── tests/                 Unit tests
-│   └── swe-benchmark-data/    Populated worked example (5 tasks × 6 models), each with eval.json
+│   └── swe-benchmark-data/    Committed example: Hello-World only; all other runs are gitignored
 └── self-hosted/               ← Path 3: EC2 self-hosted serving (vLLM)
     └── vllm/
         ├── README.md          Full EC2 + vLLM setup guide

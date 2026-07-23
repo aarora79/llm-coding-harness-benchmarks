@@ -21,6 +21,12 @@ self-hosted/vllm/benchmark-output/
 # catches nested copies a tool/cwd mistake might create.
 benchmarks/swe-benchmark-data/
 **/benchmarks/swe-benchmark-data/
+# We commit ONLY the Hello-World example and the README under swe-benchmark-data
+# (force-added despite the ignore above, as a worked example). Everything else a
+# customer generates -- including their own runs against mcp-gateway-registry --
+# stays local so it can never be committed by accident.
+benchmarks/swe-benchmark-data/mcp-gateway-registry/
+**/benchmarks/swe-benchmark-data/mcp-gateway-registry/
 __pycache__/
 *.pyc
 credentials.json
