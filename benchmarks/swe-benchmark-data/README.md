@@ -9,11 +9,7 @@ benchmarks/swe-benchmark-data/
 ├── README.md                       # This file
 └── {repo-name}/
     ├── repo/                       # Cloned source (gitignored - cloned by contributor, never committed)
-    ├── reports/                    # Generated charts (run generate-report.py)
     ├── {problem-name}/
-    │   ├── implementations/        # Shared spec + per-model code implementations
-    │   │   ├── spec.md            # Best LLD used as input for /implement runs
-    │   │   └── {model-name}/      # Code output from /implement
     │   ├── {model-name-A}/         # Artifacts produced by model A on this problem
     │   │   ├── github-issue.md    # GitHub issue specification
     │   │   ├── lld.md             # Low-level design
