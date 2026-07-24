@@ -149,9 +149,29 @@ if [[ ! -f "$CONFIG" ]]; then
 fi
 ok "runner config: $CONFIG"
 
-# claude CLI must be available (the harness shells out to it).
+# The two coding-agent CLIs this benchmark drives must be installed:
+#   - claude : the harness runs 'claude -p' to produce the artifacts (always).
+#   - codex  : the judge runs 'codex exec' to score them (unless --skip-judge).
+# Check both here, up front, so a missing codex fails fast instead of after the
+# entire (long) harness run has already completed.
 command -v claude >/dev/null 2>&1 || die "claude CLI not found on PATH (the harness runs 'claude -p'). Install Claude Code."
 ok "claude CLI found: $(command -v claude)"
+if [[ "$SKIP_JUDGE" -eq 1 ]]; then
+    command -v codex >/dev/null 2>&1 && ok "codex CLI found: $(command -v codex)" \
+        || warn "codex CLI not found, but --skip-judge is set, so scoring is skipped."
+else
+    command -v codex >/dev/null 2>&1 || die "codex CLI not found on PATH (the judge runs 'codex exec'). Install codex, or re-run with --skip-judge."
+    ok "codex CLI found: $(command -v codex)"
+fi
+
+# LOUD EXPECTATION: both CLIs must be wired to Amazon Bedrock. The harness points
+# claude at the model under test (Bedrock, the LiteLLM proxy, or local vLLM), but
+# the codex JUDGE always calls Amazon Bedrock for its scoring model, and on the
+# bedrock path claude does too. This benchmark assumes both 'claude' and 'codex'
+# are already configured to reach Amazon Bedrock (credentials/region/base URL) on
+# THIS machine. It does not configure them for you -- if either is pointed
+# elsewhere or unauthenticated, the run or the scoring will fail.
+warn "EXPECTATION: 'claude' and 'codex' on this machine are assumed to be wired to Amazon Bedrock (the judge always calls Bedrock; on --provider bedrock, claude does too). This script does not configure them."
 
 # Per-path readiness.
 case "$PROVIDER" in
