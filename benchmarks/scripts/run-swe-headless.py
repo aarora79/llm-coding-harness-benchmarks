@@ -1537,6 +1537,13 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-turns", type=int, help="Override: cap on the agent loop")
     parser.add_argument(
+        "--max-output-tokens",
+        type=int,
+        help="Override: per-response output-token cap (CLAUDE_CODE_MAX_OUTPUT_TOKENS). "
+        "Lower it on a small-window model so the prompt has usable input room "
+        "(usable input ~= context_window - max_output_tokens).",
+    )
+    parser.add_argument(
         "--context-window",
         type=int,
         help="Override: the model's true context window in tokens. Calibrates "
@@ -1576,6 +1583,7 @@ def main() -> None:
         "aws_region": args.aws_region,
         "dataset": args.dataset,
         "max_turns": args.max_turns,
+        "max_output_tokens": args.max_output_tokens,
         "context_window": args.context_window,
         "concurrency": args.concurrency,
     }

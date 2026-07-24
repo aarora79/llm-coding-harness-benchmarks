@@ -27,7 +27,7 @@ Collect these three, in order. Do not guess -- ask if any is missing.
 ## Workflow
 
 1. **Gather the three inputs** -- provider, model, dataset. Confirm them back to the user.
-2. **Bring up / confirm the backing service** for the chosen path. For **vllm**: check the HF token, then (re)start the vLLM server on the requested model -- stopping any other model first -- using the model guide's serve command at its largest context window, and start the DuckDB collector. For litellm/bedrock: confirm the proxy/credentials.
+2. **Bring up / confirm the backing service** for the chosen path. For **vllm**: check the HF token, then (re)start the vLLM server on the requested model -- stopping any other model first -- using the model guide's serve command at its largest context window; **require the served window to be at least 200K or STOP** (a smaller window is unsuited to agentic coding and fails on turn 1); then start the DuckDB collector. For litellm/bedrock: confirm the proxy/credentials.
 3. **Dry-run the pre-flight** so the user sees what will happen before anything runs.
 4. **Run the orchestrator**, streaming its output, and tell the user what to tail.
 5. **Wrap up and report**: (vllm) stop the collector and archive its DuckDB snapshot tagged with model/scope/timestamp; write a `RUN-SUMMARY.md` (results table + notes) into the run's `{model-slug}/{scope}/` folder; then report where the results landed.
@@ -106,7 +106,24 @@ TOOL_PARSER="<parser from the guide>" \
 
 If there is no guide for `{model}` under `self-hosted/vllm/models/`, tell the user and ask for the HF repo id, tool-call parser, and desired context window rather than guessing.
 
-**2d. Start the DuckDB metrics collector** so a GPU time series is captured for the whole run (it is stopped and the snapshot archived in Step 5):
+**2d. Context-window gate -- REQUIRE at least 200K, or STOP.** Agentic coding tasks on real repositories routinely need 100K-250K input tokens in a single request (the `/swe` skill prompt alone is ~12K, and reading repo files pushes far higher). A context window below **200000** is not suited for these tasks: the model overflows the window on turn 1 (before auto-compaction can help, since the first prompt already does not fit) and every task fails. This is a node/VRAM limitation, not a model-quality signal.
+
+After the server reports ready, read the window it actually booted with and hard-stop if it is under 200000:
+
+```bash
+WINDOW="$(curl -s -m 5 http://127.0.0.1:8000/v1/models \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin).get("data",[]); print(next((m.get("max_model_len") for m in d if m.get("max_model_len")), 0))' 2>/dev/null || echo 0)"
+echo "served context window: $WINDOW"
+if [ "$WINDOW" -lt 200000 ]; then echo "WINDOW TOO SMALL -- STOP"; fi
+```
+
+If it prints `WINDOW TOO SMALL -- STOP`, **do not run the benchmark.** Stop here and tell the user the model cannot be served at a usable window on this node, e.g.:
+
+> `{model}` booted at a {WINDOW}-token context window on this node, but agentic coding tasks need at least 200K. A window this small overflows on the first prompt and every task fails, so I am not starting the run. This is a VRAM limitation of the current machine, not the model. Options: benchmark a model that fits a >=200K window on this node (e.g. `qwen3.6-35b` or `qwen3-coder-30b`), or serve `{model}` on a larger-VRAM node (see its model guide for the required instance) where a 200K-256K window fits.
+
+Stop the collector if it was already started, leave the notes for the user, and do not proceed to Step 3. (This gate is why Step 2c picks the *largest* window the guide endorses -- if even that is under 200K, the model is not benchmarkable here.)
+
+**2e. Start the DuckDB metrics collector** so a GPU time series is captured for the whole run (it is stopped and the snapshot archived in Step 5):
 
 ```bash
 cd self-hosted/vllm/scripts && ./vllm-metrics.sh start && ./vllm-metrics.sh status

@@ -12,6 +12,9 @@
 | **Tool-call parser** | `qwen3_coder` |
 | **Native context** | **262144 (256K)** — but VRAM caps you *far* below this (see below) |
 | **Role** | largest model that fits the node — top-tier quality, low concurrency |
+| **For agentic coding (>=200K window)** | needs a **g6e.48xlarge** (8xL40S, 384 GB) or larger — a g6e.12xlarge (4xL40S) only fits ~16K, which is unusable for repo-scale tasks |
+
+> **Hardware requirement for benchmarking / agentic coding.** On a **g6e.12xlarge (4xL40S, 184 GB)** this model fits only a ~16384-token window (the ~160 GB of weights leave ~1 GB for KV cache). That is far too small for agentic coding: the `/swe` prompt alone is ~12K tokens, so the very first request overflows the window and every task fails on turn 1 (auto-compaction cannot help — the first message already does not fit). To serve a **200K or 256K** window this model needs a larger-VRAM node — a **g6e.48xlarge (8xL40S, 384 GB)** or bigger — where the weights leave enough room for a repo-scale KV cache. The 16384 config below is only useful for short-prompt smoke tests, **not** the SWE benchmark. For agentic coding on a 4xL40S node, use the 256K-native [Qwen3.6-35B-A3B](qwen3.6-35b-a3b.md) or [Qwen3-Coder-30B](qwen3-coder-30b.md) instead.
 
 ## Serve it
 
@@ -79,6 +82,20 @@ Despite only 3B active parameters per token (fast, MoE economics), this model's 
 ### Disk: ~160 GB of weights won't fit on the root disk
 
 Separate from VRAM: the **download** is ~160 GB, and the DLAMI root disk is only ~193 GB — nowhere near enough once anything else (e.g. the 30B, at ~57 GB) is also cached. A naive run fills the root disk and the download stalls with `Not enough free disk space`. `vllm-serve.sh` handles this by defaulting `HF_HOME` to the DLAMI's large local-NVMe scratch (`/opt/dlami/nvme/hf-cache`, 3.5 TB here) when it exists — the boot log prints `Weights cache: <dir> (<free>)` so you can confirm before the download starts. **Caveat:** that NVMe scratch is **ephemeral** — wiped on instance stop/terminate — so the 160 GB re-downloads after any stop. If you need the cache to survive a stop, set `HF_HOME` to a path on a persistent EBS volume with ≥200 GB free instead.
+
+## Benchmarking
+
+**The SWE benchmark requires a >=200K context window** (agentic coding tasks routinely need 100K-250K input tokens per request), so this model can only be benchmarked on a **g6e.48xlarge (8xL40S) or larger** where a 200K-256K window fits. The `/benchmark` skill enforces this: it reads the served `max_model_len` after boot and refuses to run if it is under 200000. On such a node, serve at a large window (e.g. `MAX_MODEL_LEN=200000`) and run:
+
+```bash
+cd benchmarks
+./scripts/run-e2e-benchmark.sh --provider vllm --model qwen3-coder-next \
+  --dataset dataset/mcp-gateway-registry.yaml --yes
+```
+
+**Do not attempt the benchmark on a g6e.12xlarge (4xL40S).** There the model is VRAM-bound to a ~16384 window; the `/swe` prompt alone (~12K tokens) plus the output reserve overflows it, so every task fails on turn 1. This was confirmed empirically: on a 4xL40S at 16384 with `--max-output-tokens 4096`, task 1 failed 0/4 with `maximum context length is 16384 tokens ... prompt contains at least 12289 input tokens`. Auto-compaction cannot rescue it because the first message already does not fit. For agentic coding on a 4xL40S node, benchmark the 256K-native [Qwen3.6-35B-A3B](qwen3.6-35b-a3b.md) or [Qwen3-Coder-30B](qwen3-coder-30b.md) instead.
+
+The `--max-output-tokens` flag (added to both the harness and the orchestrator) lets you lower the per-response output cap on the CLI without editing `runner.yaml` -- useful for short-window smoke tests, but it does not make this model benchmarkable on a small-VRAM node.
 
 ## Tuning notes
 

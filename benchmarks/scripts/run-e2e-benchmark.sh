@@ -37,6 +37,14 @@ set -euo pipefail
 #   ./scripts/run-e2e-benchmark.sh vllm qwen3.6-35b dataset/mcp-gateway-registry.yaml
 #   ./scripts/run-e2e-benchmark.sh --provider vllm --model qwen3.6-35b \
 #       --dataset dataset/hello-world.yaml --count 1 --yes
+#
+# Optional flags:
+#   --count N              run only the first N tasks (0 = all, default)
+#   --max-output-tokens N  override the per-response output cap for this run
+#                          (e.g. 4096 on a small-window model so the prompt has
+#                          usable input room; usable input ~= window - this)
+#   --skip-judge           run the harness only; score later
+#   --yes                  clear pre-existing artifact folders without asking
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,6 +57,7 @@ PROVIDER=""
 MODEL=""
 DATASET=""
 COUNT="0"                 # 0 = all tasks
+MAX_OUTPUT_TOKENS=""      # empty = use the config value
 ENDPOINT=""               # derived from provider unless overridden
 AWS_REGION_ARG="${AWS_REGION:-us-east-1}"
 ASSUME_YES=0
@@ -79,6 +88,7 @@ while [[ $# -gt 0 ]]; do
         --model)    MODEL="${2:?--model needs a value}"; shift 2 ;;
         --dataset)  DATASET="${2:?--dataset needs a value}"; shift 2 ;;
         --count)    COUNT="${2:?--count needs a value}"; shift 2 ;;
+        --max-output-tokens) MAX_OUTPUT_TOKENS="${2:?--max-output-tokens needs a value}"; shift 2 ;;
         --endpoint) ENDPOINT="${2:?--endpoint needs a value}"; shift 2 ;;
         --aws-region) AWS_REGION_ARG="${2:?--aws-region needs a value}"; shift 2 ;;
         --config)   CONFIG="${2:?--config needs a value}"; shift 2 ;;
@@ -269,6 +279,7 @@ BENCH_ARGS=(--config "$CONFIG" --provider "$HARNESS_PROVIDER" --model "$MODEL" -
 [[ "$PROVIDER" == "bedrock" ]] && BENCH_ARGS+=(--aws-region "$AWS_REGION_ARG")
 # On the vllm path, calibrate auto-compaction to the live server's window.
 [[ -n "${VLLM_CONTEXT_WINDOW:-}" ]] && BENCH_ARGS+=(--context-window "$VLLM_CONTEXT_WINDOW")
+[[ -n "$MAX_OUTPUT_TOKENS" ]] && BENCH_ARGS+=(--max-output-tokens "$MAX_OUTPUT_TOKENS")
 
 SLUG="$(uv run python -c "import sys; sys.path.insert(0,'scripts'); from runner_config import model_to_slug; print(model_to_slug('$MODEL'))")"
 info "Command:"

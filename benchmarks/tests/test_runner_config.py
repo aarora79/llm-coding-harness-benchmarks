@@ -82,6 +82,14 @@ class LoadRunnerConfigTest(unittest.TestCase):
         self.assertEqual(config.max_turns, 10)
         self.assertEqual(config.tasks, ["a", "b"])
 
+    def test_max_output_tokens_override(self) -> None:
+        # Lowered on the CLI for a small-window model so the prompt has input
+        # room; None must not clobber the config/default value.
+        config = load_runner_config(_write(_MINIMAL), {"max_output_tokens": 4096})
+        self.assertEqual(config.max_output_tokens, 4096)
+        default = load_runner_config(_write(_MINIMAL), {"max_output_tokens": None})
+        self.assertEqual(default.max_output_tokens, 16000)
+
     def test_none_overrides_are_ignored(self) -> None:
         config = load_runner_config(_write(_MINIMAL), {"model": None, "endpoint": None})
         self.assertEqual(config.model, "test-model")
