@@ -146,7 +146,19 @@ aws sts get-caller-identity
 
 ## Step 3 - Pre-flight (see what will happen first)
 
-Show the user which artifact folders already exist for this model+dataset (a pre-existing folder makes the headless `/swe` run stall on its overwrite prompt). This is a read-only check:
+**3a. Both coding-agent CLIs must be installed, and both are expected to be wired to Amazon Bedrock.** The harness runs `claude -p` to produce the artifacts, and the judge runs `codex exec` to score them. Confirm both are on PATH:
+
+```bash
+command -v claude && command -v codex || echo "MISSING a required CLI"
+```
+
+If `claude` is missing, stop -- the harness cannot run. If `codex` is missing, the run can still proceed with `--skip-judge` (score later once codex is installed). The orchestrator re-checks both and fails loudly.
+
+State this expectation to the user **loudly**, because the skill does not configure it: both CLIs must already be authenticated against **Amazon Bedrock** on this machine. The codex judge *always* calls Bedrock for its scoring model; on `--provider bedrock`, `claude` calls Bedrock too (on the litellm/vllm paths `claude` is pointed at the proxy/local server instead, but the judge still uses Bedrock). If either CLI is unconfigured or pointed elsewhere, the run or the scoring will fail.
+
+> Heads-up: this benchmark assumes `claude` and `codex` on this machine are already wired to Amazon Bedrock (credentials/region). The judge always calls Bedrock; on the bedrock path claude does too. I do not configure them -- if either is pointed elsewhere, the run or scoring will fail.
+
+**3b.** Show the user which artifact folders already exist for this model+dataset (a pre-existing folder makes the headless `/swe` run stall on its overwrite prompt). This is a read-only check:
 
 ```bash
 cd benchmarks
